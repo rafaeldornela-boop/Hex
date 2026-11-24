@@ -70,6 +70,27 @@ export const TERRAIN_METADATA: Record<
   },
 };
 
+export const NATURAL_TERRAIN_ASSET_NAMES = new Set<string>([
+  'grass',
+  'grass-forest',
+  'grass-hill',
+  'dirt',
+  'stone',
+  'stone-hill',
+  'stone-mountain',
+  'stone-rocks',
+  'sand',
+  'sand-desert',
+  'sand-rocks',
+  'water',
+  'water-island',
+  'water-rocks',
+]);
+
+export function isNaturalTerrainAssetName(assetName: string): boolean {
+  return NATURAL_TERRAIN_ASSET_NAMES.has(assetName);
+}
+
 /**
  * Deterministic terrain assignment for the handcrafted starter island so that
  * visual 3D models, initial structures (castle, farm, mine, lumber), and all
@@ -297,3 +318,150 @@ export function calculatePlayerResources(
 
   return summary;
 }
+
+export type RareFeatureType =
+  | 'none'
+  | 'gold_vein'
+  | 'pure_iron'
+  | 'arcane_crystal'
+  | 'rich_soil'
+  | 'natural_harbor';
+
+export interface StrategicRegionInfo {
+  rareFeature: RareFeatureType;
+  labelPt: string | null;
+  bonusGoldPerTurn: number;
+  bonusSciencePerTurn: number;
+  bonusOrePerTurn: number;
+  bonusFoodPerTurn: number;
+  defenseBonus: number;
+  conquestCostMultiplier: number;
+}
+
+export function getTerrainDefenseBonus(terrainType: TerrainType): number {
+  switch (terrainType) {
+    case 'mountain':
+      return 4;
+    case 'forest':
+      return 2;
+    case 'water':
+      return 1;
+    case 'fertile':
+    case 'plains':
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Deterministic strategic region / rare resource generator for hexes beyond
+ * the immediate 7-hex starter core.
+ */
+export function getStrategicRegionInfo(q: number, r: number): StrategicRegionInfo {
+  const terrain = getTerrainForHex(q, r);
+  const baseDefense = getTerrainDefenseBonus(terrain);
+  const dist = Math.max(Math.abs(q), Math.abs(r), Math.abs(-q - r));
+
+  if (dist <= 1) {
+    return {
+      rareFeature: 'none',
+      labelPt: null,
+      bonusGoldPerTurn: 0,
+      bonusSciencePerTurn: 0,
+      bonusOrePerTurn: 0,
+      bonusFoodPerTurn: 0,
+      defenseBonus: baseDefense,
+      conquestCostMultiplier: 1,
+    };
+  }
+
+  // Deterministic well-placed rare nodes on Ring 2..5
+  const key = hexKey(q, r);
+  let feature: RareFeatureType = 'none';
+
+  if (key === '0,2' || key === '-2,2') feature = 'pure_iron';
+  else if (key === '2,-2') feature = 'rich_soil';
+  else if (key === '2,-1' || key === '-1,2') feature = 'arcane_crystal';
+  else if (key === '0,-3') feature = 'natural_harbor';
+  else if (key === '3,-1' || key === '-3,2') feature = 'gold_vein';
+  else {
+    const roll = hashAxial(q + 71, r - 43) % 24;
+    if (terrain === 'mountain' && roll <= 3) feature = 'pure_iron';
+    else if (terrain === 'mountain' && roll === 4) feature = 'gold_vein';
+    else if (terrain === 'fertile' && roll <= 2) feature = 'rich_soil';
+    else if (terrain === 'water' && roll <= 1) feature = 'natural_harbor';
+    else if ((terrain === 'forest' || terrain === 'plains') && roll === 5) {
+      feature = 'arcane_crystal';
+    }
+  }
+
+  switch (feature) {
+    case 'gold_vein':
+      return {
+        rareFeature: 'gold_vein',
+        labelPt: 'Veio de Ouro',
+        bonusGoldPerTurn: 18,
+        bonusSciencePerTurn: 0,
+        bonusOrePerTurn: 0,
+        bonusFoodPerTurn: 0,
+        defenseBonus: baseDefense,
+        conquestCostMultiplier: 1.35,
+      };
+    case 'pure_iron':
+      return {
+        rareFeature: 'pure_iron',
+        labelPt: 'Ferro Puro',
+        bonusGoldPerTurn: 0,
+        bonusSciencePerTurn: 0,
+        bonusOrePerTurn: 4,
+        bonusFoodPerTurn: 0,
+        defenseBonus: baseDefense + 1,
+        conquestCostMultiplier: 1.25,
+      };
+    case 'arcane_crystal':
+      return {
+        rareFeature: 'arcane_crystal',
+        labelPt: 'Cristal Arcano',
+        bonusGoldPerTurn: 0,
+        bonusSciencePerTurn: 4,
+        bonusOrePerTurn: 0,
+        bonusFoodPerTurn: 0,
+        defenseBonus: baseDefense,
+        conquestCostMultiplier: 1.3,
+      };
+    case 'rich_soil':
+      return {
+        rareFeature: 'rich_soil',
+        labelPt: 'Solo Abundante',
+        bonusGoldPerTurn: 0,
+        bonusSciencePerTurn: 0,
+        bonusOrePerTurn: 0,
+        bonusFoodPerTurn: 4,
+        defenseBonus: baseDefense,
+        conquestCostMultiplier: 1.15,
+      };
+    case 'natural_harbor':
+      return {
+        rareFeature: 'natural_harbor',
+        labelPt: 'Baía Estratégica',
+        bonusGoldPerTurn: 12,
+        bonusSciencePerTurn: 0,
+        bonusOrePerTurn: 0,
+        bonusFoodPerTurn: 2,
+        defenseBonus: baseDefense,
+        conquestCostMultiplier: 1.2,
+      };
+    default:
+      return {
+        rareFeature: 'none',
+        labelPt: null,
+        bonusGoldPerTurn: 0,
+        bonusSciencePerTurn: 0,
+        bonusOrePerTurn: 0,
+        bonusFoodPerTurn: 0,
+        defenseBonus: baseDefense,
+        conquestCostMultiplier: 1,
+      };
+  }
+}
+

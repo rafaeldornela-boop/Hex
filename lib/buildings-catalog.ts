@@ -1,0 +1,441 @@
+import type { TerrainType } from './terrain-engine';
+import type { TechId } from './tech-engine';
+
+export type BuildingRole =
+  | 'capital'
+  | 'housing'
+  | 'production'
+  | 'commerce'
+  | 'science'
+  | 'military'
+  | 'infrastructure';
+
+export interface ResourceCost {
+  gold: number;
+  wood: number;
+  stone: number;
+  food: number;
+  ore: number;
+}
+
+export interface BuildingProduction {
+  gold: number;
+  wood: number;
+  stone: number;
+  food: number;
+  ore: number;
+  science: number;
+}
+
+export interface BuildingDefinition {
+  assetName: string;
+  labelPt: string;
+  role: BuildingRole;
+  summaryPt: string;
+  buildCost: ResourceCost;
+  maintenanceGold: number;
+  workersRequired: number;
+  housingCapacity: number;
+  storageBonus: number;
+  defenseBonus: number;
+  production: BuildingProduction;
+  allowedTerrains: TerrainType[] | null;
+  requiredTech: TechId | null;
+  canRecruitUnits: boolean;
+}
+
+const ZERO_COST: ResourceCost = { gold: 0, wood: 0, stone: 0, food: 0, ore: 0 };
+const ZERO_PROD: BuildingProduction = {
+  gold: 0,
+  wood: 0,
+  stone: 0,
+  food: 0,
+  ore: 0,
+  science: 0,
+};
+
+export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
+  'building-castle': {
+    assetName: 'building-castle',
+    labelPt: 'Castelo Real',
+    role: 'capital',
+    summaryPt: '+8 Pop · +100 Armazém · +10 Ouro · +2 Ciência · +15 Def',
+    buildCost: { gold: 500, wood: 60, stone: 60, food: 0, ore: 20 },
+    maintenanceGold: 0,
+    workersRequired: 0,
+    housingCapacity: 8,
+    storageBonus: 100,
+    defenseBonus: 15,
+    production: { gold: 10, wood: 0, stone: 0, food: 0, ore: 0, science: 2 },
+    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    requiredTech: 'engineering',
+    canRecruitUnits: true,
+  },
+  'building-cabin': {
+    assetName: 'building-cabin',
+    labelPt: 'Cabana',
+    role: 'housing',
+    summaryPt: '+4 População · Sem trabalhadores',
+    buildCost: { gold: 50, wood: 10, stone: 0, food: 0, ore: 0 },
+    maintenanceGold: 1,
+    workersRequired: 0,
+    housingCapacity: 4,
+    storageBonus: 0,
+    defenseBonus: 0,
+    production: ZERO_PROD,
+    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-house': {
+    assetName: 'building-house',
+    labelPt: 'Casa',
+    role: 'housing',
+    summaryPt: '+6 População · Sem trabalhadores',
+    buildCost: { gold: 80, wood: 15, stone: 5, food: 0, ore: 0 },
+    maintenanceGold: 2,
+    workersRequired: 0,
+    housingCapacity: 6,
+    storageBonus: 10,
+    defenseBonus: 0,
+    production: ZERO_PROD,
+    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-village': {
+    assetName: 'building-village',
+    labelPt: 'Vila',
+    role: 'housing',
+    summaryPt: '+10 População · +60 Armazém · +4 Ouro',
+    buildCost: { gold: 180, wood: 30, stone: 15, food: 0, ore: 0 },
+    maintenanceGold: 4,
+    workersRequired: 0,
+    housingCapacity: 10,
+    storageBonus: 60,
+    defenseBonus: 2,
+    production: { gold: 4, wood: 0, stone: 0, food: 0, ore: 0, science: 0 },
+    allowedTerrains: ['plains', 'fertile', 'forest'],
+    requiredTech: 'construction',
+    canRecruitUnits: false,
+  },
+  'unit-mansion': {
+    assetName: 'unit-mansion',
+    labelPt: 'Mansão',
+    role: 'housing',
+    summaryPt: '+12 População · +12 Ouro',
+    buildCost: { gold: 240, wood: 35, stone: 25, food: 0, ore: 0 },
+    maintenanceGold: 5,
+    workersRequired: 0,
+    housingCapacity: 12,
+    storageBonus: 30,
+    defenseBonus: 2,
+    production: { gold: 12, wood: 0, stone: 0, food: 0, ore: 0, science: 0 },
+    allowedTerrains: ['plains', 'fertile'],
+    requiredTech: 'construction',
+    canRecruitUnits: false,
+  },
+  'building-farm': {
+    assetName: 'building-farm',
+    labelPt: 'Fazenda',
+    role: 'production',
+    summaryPt: '+7 Alimento · 2 trabalhadores · Terra fértil',
+    buildCost: { gold: 60, wood: 12, stone: 0, food: 0, ore: 0 },
+    maintenanceGold: 2,
+    workersRequired: 2,
+    housingCapacity: 0,
+    storageBonus: 20,
+    defenseBonus: 0,
+    production: { gold: 0, wood: 0, stone: 0, food: 7, ore: 0, science: 0 },
+    allowedTerrains: ['fertile'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-sheep': {
+    assetName: 'building-sheep',
+    labelPt: 'Curral',
+    role: 'production',
+    summaryPt: '+4 Alimento · +5 Ouro · 1 trabalhador',
+    buildCost: { gold: 70, wood: 10, stone: 0, food: 0, ore: 0 },
+    maintenanceGold: 2,
+    workersRequired: 1,
+    housingCapacity: 0,
+    storageBonus: 10,
+    defenseBonus: 0,
+    production: { gold: 5, wood: 0, stone: 0, food: 4, ore: 0, science: 0 },
+    allowedTerrains: ['plains', 'fertile'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-mill': {
+    assetName: 'building-mill',
+    labelPt: 'Moinho',
+    role: 'production',
+    summaryPt: '+6 Alimento · +6 Ouro · 2 trabalhadores',
+    buildCost: { gold: 110, wood: 20, stone: 10, food: 0, ore: 0 },
+    maintenanceGold: 3,
+    workersRequired: 2,
+    housingCapacity: 0,
+    storageBonus: 30,
+    defenseBonus: 0,
+    production: { gold: 6, wood: 0, stone: 0, food: 6, ore: 0, science: 0 },
+    allowedTerrains: ['plains', 'fertile'],
+    requiredTech: 'agriculture',
+    canRecruitUnits: false,
+  },
+  'dirt-lumber': {
+    assetName: 'dirt-lumber',
+    labelPt: 'Serraria',
+    role: 'production',
+    summaryPt: '+7 Madeira · 2 trabalhadores · Floresta',
+    buildCost: { gold: 75, wood: 5, stone: 10, food: 0, ore: 0 },
+    maintenanceGold: 2,
+    workersRequired: 2,
+    housingCapacity: 0,
+    storageBonus: 20,
+    defenseBonus: 0,
+    production: { gold: 0, wood: 7, stone: 0, food: 0, ore: 0, science: 0 },
+    allowedTerrains: ['forest'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-smelter': {
+    assetName: 'building-smelter',
+    labelPt: 'Pedreira',
+    role: 'production',
+    summaryPt: '+7 Pedra · +2 Minério · 2 trabalhadores',
+    buildCost: { gold: 90, wood: 15, stone: 0, food: 0, ore: 0 },
+    maintenanceGold: 3,
+    workersRequired: 2,
+    housingCapacity: 0,
+    storageBonus: 25,
+    defenseBonus: 0,
+    production: { gold: 0, wood: 0, stone: 7, food: 0, ore: 2, science: 0 },
+    allowedTerrains: ['mountain', 'plains'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-mine': {
+    assetName: 'building-mine',
+    labelPt: 'Mina',
+    role: 'production',
+    summaryPt: '+7 Minério · +2 Pedra · 2 trabalhadores · Montanha',
+    buildCost: { gold: 120, wood: 20, stone: 10, food: 0, ore: 0 },
+    maintenanceGold: 4,
+    workersRequired: 2,
+    housingCapacity: 0,
+    storageBonus: 25,
+    defenseBonus: 0,
+    production: { gold: 0, wood: 0, stone: 2, food: 0, ore: 7, science: 0 },
+    allowedTerrains: ['mountain'],
+    requiredTech: 'mining',
+    canRecruitUnits: false,
+  },
+  'building-market': {
+    assetName: 'building-market',
+    labelPt: 'Mercado',
+    role: 'commerce',
+    summaryPt: '+18 Ouro · +60 Armazém · 2 trabalhadores',
+    buildCost: { gold: 120, wood: 20, stone: 10, food: 0, ore: 0 },
+    maintenanceGold: 2,
+    workersRequired: 2,
+    housingCapacity: 0,
+    storageBonus: 60,
+    defenseBonus: 0,
+    production: { gold: 18, wood: 0, stone: 0, food: 0, ore: 0, science: 0 },
+    allowedTerrains: ['plains', 'fertile'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-port': {
+    assetName: 'building-port',
+    labelPt: 'Porto',
+    role: 'commerce',
+    summaryPt: '+25 Ouro · +5 Alimento · +80 Armazém · Água',
+    buildCost: { gold: 180, wood: 30, stone: 15, food: 0, ore: 0 },
+    maintenanceGold: 5,
+    workersRequired: 2,
+    housingCapacity: 0,
+    storageBonus: 80,
+    defenseBonus: 2,
+    production: { gold: 25, wood: 0, stone: 0, food: 5, ore: 0, science: 0 },
+    allowedTerrains: ['water'],
+    requiredTech: 'trade',
+    canRecruitUnits: true,
+  },
+  'building-dock': {
+    assetName: 'building-dock',
+    labelPt: 'Doca de Pesca',
+    role: 'production',
+    summaryPt: '+5 Alimento · +8 Ouro · 1 trabalhador · Água',
+    buildCost: { gold: 80, wood: 15, stone: 0, food: 0, ore: 0 },
+    maintenanceGold: 2,
+    workersRequired: 1,
+    housingCapacity: 0,
+    storageBonus: 15,
+    defenseBonus: 0,
+    production: { gold: 8, wood: 0, stone: 0, food: 5, ore: 0, science: 0 },
+    allowedTerrains: ['water'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-watermill': {
+    assetName: 'building-watermill',
+    labelPt: 'Moinho Fluvial',
+    role: 'production',
+    summaryPt: '+6 Alimento · +8 Ouro · 1 trabalhador · Água',
+    buildCost: { gold: 100, wood: 20, stone: 10, food: 0, ore: 0 },
+    maintenanceGold: 2,
+    workersRequired: 1,
+    housingCapacity: 0,
+    storageBonus: 20,
+    defenseBonus: 0,
+    production: { gold: 8, wood: 0, stone: 0, food: 6, ore: 0, science: 0 },
+    allowedTerrains: ['water'],
+    requiredTech: 'agriculture',
+    canRecruitUnits: false,
+  },
+  'building-wizard-tower': {
+    assetName: 'building-wizard-tower',
+    labelPt: 'Universidade',
+    role: 'science',
+    summaryPt: '+6 Ciência · 2 trabalhadores',
+    buildCost: { gold: 150, wood: 20, stone: 20, food: 0, ore: 0 },
+    maintenanceGold: 5,
+    workersRequired: 2,
+    housingCapacity: 0,
+    storageBonus: 20,
+    defenseBonus: 3,
+    production: { gold: 0, wood: 0, stone: 0, food: 0, ore: 0, science: 6 },
+    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-archery': {
+    assetName: 'building-archery',
+    labelPt: 'Quartel',
+    role: 'military',
+    summaryPt: 'Recruta tropas · +6 Defesa · 2 trabalhadores',
+    buildCost: { gold: 150, wood: 20, stone: 20, food: 0, ore: 10 },
+    maintenanceGold: 6,
+    workersRequired: 2,
+    housingCapacity: 0,
+    storageBonus: 10,
+    defenseBonus: 6,
+    production: ZERO_PROD,
+    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    requiredTech: 'military',
+    canRecruitUnits: true,
+  },
+  'building-tower': {
+    assetName: 'building-tower',
+    labelPt: 'Torre de Guarda',
+    role: 'military',
+    summaryPt: '+8 Defesa · 1 trabalhador',
+    buildCost: { gold: 100, wood: 10, stone: 15, food: 0, ore: 5 },
+    maintenanceGold: 3,
+    workersRequired: 1,
+    housingCapacity: 0,
+    storageBonus: 0,
+    defenseBonus: 8,
+    production: ZERO_PROD,
+    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    requiredTech: 'military',
+    canRecruitUnits: false,
+  },
+  'building-wall': {
+    assetName: 'building-wall',
+    labelPt: 'Paliçada',
+    role: 'military',
+    summaryPt: '+7 Defesa · Sem trabalhadores',
+    buildCost: { gold: 50, wood: 12, stone: 8, food: 0, ore: 0 },
+    maintenanceGold: 1,
+    workersRequired: 0,
+    housingCapacity: 0,
+    storageBonus: 0,
+    defenseBonus: 7,
+    production: ZERO_PROD,
+    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+  'building-walls': {
+    assetName: 'building-walls',
+    labelPt: 'Muralha',
+    role: 'military',
+    summaryPt: '+12 Defesa · Sem trabalhadores',
+    buildCost: { gold: 80, wood: 0, stone: 22, food: 0, ore: 5 },
+    maintenanceGold: 1,
+    workersRequired: 0,
+    housingCapacity: 0,
+    storageBonus: 0,
+    defenseBonus: 12,
+    production: ZERO_PROD,
+    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    requiredTech: 'engineering',
+    canRecruitUnits: false,
+  },
+  bridge: {
+    assetName: 'bridge',
+    labelPt: 'Ponte',
+    role: 'infrastructure',
+    summaryPt: 'Travessia · +4 Ouro',
+    buildCost: { gold: 100, wood: 15, stone: 10, food: 0, ore: 0 },
+    maintenanceGold: 1,
+    workersRequired: 0,
+    housingCapacity: 0,
+    storageBonus: 0,
+    defenseBonus: 0,
+    production: { gold: 4, wood: 0, stone: 0, food: 0, ore: 0, science: 0 },
+    allowedTerrains: null,
+    requiredTech: null,
+    canRecruitUnits: false,
+  },
+};
+
+export function getBuildingDefinition(assetName: string): BuildingDefinition {
+  const known = BUILDING_CATALOG[assetName];
+  if (known) return known;
+
+  return {
+    assetName,
+    labelPt: assetName.replace(/^(building|unit|path|river)-/, '').replace(/-/g, ' '),
+    role: 'infrastructure',
+    summaryPt: 'Estrutura do território',
+    buildCost: { ...ZERO_COST, gold: 25 },
+    maintenanceGold: 0,
+    workersRequired: 0,
+    housingCapacity: 0,
+    storageBonus: 0,
+    defenseBonus: 0,
+    production: ZERO_PROD,
+    allowedTerrains: null,
+    requiredTech: null,
+    canRecruitUnits: false,
+  };
+}
+
+/**
+ * Curated strategy building palette order so key buildings appear first in the UI.
+ */
+export const STRATEGY_PALETTE_ORDER: readonly string[] = [
+  'building-house',
+  'building-cabin',
+  'building-farm',
+  'dirt-lumber',
+  'building-smelter',
+  'building-mine',
+  'building-market',
+  'building-wizard-tower',
+  'building-archery',
+  'building-tower',
+  'building-mill',
+  'building-sheep',
+  'building-dock',
+  'building-port',
+  'building-village',
+  'building-walls',
+  'building-wall',
+  'unit-mansion',
+  'bridge',
+];

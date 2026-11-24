@@ -1,7 +1,9 @@
 import type { HexAssetEntry } from './godot-docs';
 import {
+  TERRAIN_METADATA,
   canBuildStructureOnTerrain,
   getHexTerrainAndResource,
+  isNaturalTerrainAssetName,
   type ResourceType,
   type TerrainType,
 } from './terrain-engine';
@@ -114,6 +116,16 @@ export function cycleStructureIndex(
   return mod < 0 ? mod + totalCount : mod;
 }
 
+export function hasHexConstruction(
+  tile: Pick<PlacedHex, 'structureIndex'> | null | undefined,
+  assets: HexAssetEntry[]
+): boolean {
+  if (!tile) return false;
+  const asset = assets[tile.structureIndex];
+  if (!asset) return false;
+  return !isNaturalTerrainAssetName(asset.name);
+}
+
 export function placeHexInState(
   state: HexWorldState,
   q: number,
@@ -126,7 +138,7 @@ export function placeHexInState(
   nextState: HexWorldState;
   changed: boolean;
   spent: number;
-  blockedReason?: 'not_owned' | 'incompatible_terrain';
+  blockedReason?: 'not_owned' | 'already_occupied' | 'incompatible_terrain';
 } {
   const key = hexKey(q, r);
   const previous = state.hexes[key];
@@ -150,15 +162,20 @@ export function placeHexInState(
     };
   }
 
+  // Enforce single construction per hex: cannot build over an existing construction
+  if (hasHexConstruction(previous, assets)) {
+    return {
+      nextState: state,
+      changed: false,
+      spent: 0,
+      blockedReason: 'already_occupied',
+    };
+  }
+
   const terrainInfo = getHexTerrainAndResource(q, r, previous);
 
-  // Enforce terrain compatibility only when placing a different structure
-  // (rotating an already-placed tile remains unrestricted).
-  const isDifferentStructure = !previous || previous.structureIndex !== structureIndex;
-  if (
-    isDifferentStructure &&
-    !canBuildStructureOnTerrain(asset, terrainInfo.terrainType)
-  ) {
+  // Enforce terrain compatibility only when placing a construction on free terrain
+  if (!canBuildStructureOnTerrain(asset, terrainInfo.terrainType)) {
     return {
       nextState: state,
       changed: false,
@@ -176,7 +193,8 @@ export function placeHexInState(
     return { nextState: state, changed: false, spent: 0 };
   }
 
-  const cost = isDifferentStructure ? asset.price : 0;
+  const cost =
+    !previous || previous.structureIndex !== structureIndex ? asset.price : 0;
 
   const nextHexes: Record<string, PlacedHex> = {
     ...state.hexes,
@@ -206,18 +224,54 @@ export function placeHexInState(
 export function demolishHexInState(
   state: HexWorldState,
   q: number,
-  r: number
-): { nextState: HexWorldState; removed: boolean } {
+  r: number,
+  assets: HexAssetEntry[],
+  actorId: HexOwner = 'player'
+): {
+  nextState: HexWorldState;
+  removed: boolean;
+  blockedReason?: 'not_owned' | 'no_building';
+} {
   const key = hexKey(q, r);
-  if (!state.hexes[key]) {
-    return { nextState: state, removed: false };
+  const existing = state.hexes[key];
+  if (!existing) {
+    return { nextState: state, removed: false, blockedReason: 'no_building' };
   }
-  const nextHexes = { ...state.hexes };
-  delete nextHexes[key];
+
+  const currentOwner: HexOwner =
+    typeof existing.owner === 'string' && existing.owner.trim().length > 0
+      ? existing.owner.trim()
+      : 'neutral';
+
+  if (currentOwner !== actorId) {
+    return { nextState: state, removed: false, blockedReason: 'not_owned' };
+  }
+
+  if (!hasHexConstruction(existing, assets)) {
+    return { nextState: state, removed: false, blockedReason: 'no_building' };
+  }
+
+  const terrainInfo = getHexTerrainAndResource(q, r, existing);
+  const baseAssetName = TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
+  const baseAssetIndex = assets.findIndex((a) => a.name === baseAssetName);
+  const nextStructureIndex =
+    baseAssetIndex >= 0 ? baseAssetIndex : existing.structureIndex;
+
   return {
     nextState: {
       ...state,
-      hexes: nextHexes,
+      hexes: {
+        ...state.hexes,
+        [key]: {
+          ...existing,
+          owner: currentOwner,
+          orientation: DEFAULT_ROTATION_DEG,
+          structureIndex: nextStructureIndex,
+          terrainType: terrainInfo.terrainType,
+          resourceType: terrainInfo.resourceType,
+          resourceAmount: terrainInfo.resourceAmount,
+        },
+      },
     },
     removed: true,
   };

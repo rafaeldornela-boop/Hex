@@ -4,12 +4,16 @@ import {
   INITIAL_CASH,
   axialToWorld,
   createStarterWorldState,
+  demolishHexInState,
   deserializeWorldState,
+  hasHexConstruction,
   hexKey,
   placeHexInState,
   serializeWorldState,
 } from './hex-engine';
+import { calculatePlayerResources } from './terrain-engine';
 import {
+  ALREADY_OCCUPIED_BUILD_MESSAGE,
   AXIAL_DIRECTIONS,
   DEFAULT_CONQUEST_COST,
   INITIAL_PLAYER_TERRITORY_COORDS,
@@ -150,18 +154,21 @@ test('insufficient funds blocks conquest cleanly without modifying state', () =>
   assert.equal(countPlayerTerritory(attempt.nextState), 7);
 });
 
-test('building on owned hex preserves ownership and serialization round-trips owners', () => {
+test('building on free owned hex preserves ownership and serialization round-trips owners', () => {
   const starter = createStarterWorldState(HEX_ASSETS);
   const houseIdx = HEX_ASSETS.findIndex((a) => a.name === 'building-house');
-  const built = placeHexInState(starter, 0, 0, houseIdx, 90, HEX_ASSETS);
+  // Conquer free forest hex (1, 1) and build on it
+  const conquered = conquerHexInState(starter, 1, 1, HEX_ASSETS);
+  assert.equal(conquered.conquered, true);
+  const built = placeHexInState(conquered.nextState, 1, 1, houseIdx, 90, HEX_ASSETS);
   assert.equal(built.changed, true);
-  assert.equal(getHexOwner(built.nextState, 0, 0), 'player');
+  assert.equal(getHexOwner(built.nextState, 1, 1), 'player');
 
-  const conquered = conquerHexInState(built.nextState, 0, 2, HEX_ASSETS);
-  const raw = serializeWorldState(conquered.nextState);
+  const conqueredTwo = conquerHexInState(built.nextState, 0, 2, HEX_ASSETS);
+  const raw = serializeWorldState(conqueredTwo.nextState);
   const restored = deserializeWorldState(raw, HEX_ASSETS.length);
   assert.ok(restored !== null);
-  assert.equal(countPlayerTerritory(restored), 8);
+  assert.equal(countPlayerTerritory(restored), 9);
   assert.equal(getHexOwner(restored, 0, 2), 'player');
   assert.equal(getHexOwner(restored, 2, 0), 'neutral');
 });
@@ -192,39 +199,40 @@ test('building is restricted strictly to player territory and never deducts cash
   assert.equal(emptyAttempt.nextState.cash, starter.cash);
 
   // 3. Rival / another owner faction ('enemy_1') -> blocked for 'player', cash untouched
+  // Conquer/use free tile (2, -2) owned by enemy_1
   const withRival = {
     ...starter,
     hexes: {
       ...starter.hexes,
-      [hexKey(2, -1)]: {
-        ...starter.hexes[hexKey(2, -1)],
+      [hexKey(2, -2)]: {
+        ...starter.hexes[hexKey(2, -2)],
         owner: 'enemy_1',
       },
     },
   };
-  assert.equal(getHexOwner(withRival, 2, -1), 'enemy_1');
-  assert.equal(canBuildInTerritory(withRival, 2, -1, 'player'), false);
-  const rivalAttempt = placeHexInState(withRival, 2, -1, paidIdx, 90, HEX_ASSETS);
+  assert.equal(getHexOwner(withRival, 2, -2), 'enemy_1');
+  assert.equal(canBuildInTerritory(withRival, 2, -2, 'player'), false);
+  const rivalAttempt = placeHexInState(withRival, 2, -2, paidIdx, 90, HEX_ASSETS);
   assert.equal(rivalAttempt.changed, false);
   assert.equal(rivalAttempt.spent, 0);
   assert.equal(rivalAttempt.blockedReason, 'not_owned');
   assert.equal(rivalAttempt.nextState.cash, withRival.cash);
 
-  // Multi-faction seam: that faction itself could build on its own tile
-  assert.equal(canBuildInTerritory(withRival, 2, -1, 'enemy_1'), true);
+  // Multi-faction seam: that faction itself could build on its own free tile
+  assert.equal(canBuildInTerritory(withRival, 2, -2, 'enemy_1'), true);
   const rivalSelfBuild = placeHexInState(
     withRival,
     2,
-    -1,
+    -2,
     houseIdx,
     90,
     HEX_ASSETS,
     'enemy_1'
   );
   assert.equal(rivalSelfBuild.changed, true);
-  assert.equal(getHexOwner(rivalSelfBuild.nextState, 2, -1), 'enemy_1');
+  assert.equal(getHexOwner(rivalSelfBuild.nextState, 2, -2), 'enemy_1');
 
-  // 4. Conquering neutral tile (2, 0) enables building on it and deducts paid price
+  // 4. Conquering neutral free tile (2, 0) enables building on it and deducts paid price
   const conquered = conquerHexInState(starter, 2, 0, HEX_ASSETS);
   assert.equal(conquered.conquered, true);
   assert.equal(canBuildInTerritory(conquered.nextState, 2, 0, 'player'), true);
@@ -240,4 +248,74 @@ test('building is restricted strictly to player territory and never deducts cash
   assert.equal(validBuild.spent, paidPrice);
   assert.equal(validBuild.nextState.cash, conquered.nextState.cash - paidPrice);
   assert.equal(getHexOwner(validBuild.nextState, 2, 0), 'player');
+});
+
+test('single building per hex blocks overwrite with zero cash spent and demolition restores free terrain and resources', () => {
+  assert.equal(
+    ALREADY_OCCUPIED_BUILD_MESSAGE,
+    'Este território já possui uma construção.'
+  );
+  const starter = createStarterWorldState(HEX_ASSETS);
+  const paidIdx = HEX_ASSETS.findIndex((a) => a.price > 0);
+  const mineIdx = HEX_ASSETS.findIndex((a) => a.name === 'building-mine');
+  assert.ok(paidIdx >= 0 && mineIdx >= 0);
+
+  // 1. Starter castle at (0, 0) already has a building -> cannot build paid piece on top
+  const overCastle = placeHexInState(starter, 0, 0, paidIdx, 90, HEX_ASSETS);
+  assert.equal(overCastle.changed, false);
+  assert.equal(overCastle.spent, 0);
+  assert.equal(overCastle.blockedReason, 'already_occupied');
+  assert.equal(overCastle.nextState.cash, starter.cash);
+
+  // 2. Conquer Mountain (0, 2) -> free terrain with ore = 10, build Mine, then block overwrite
+  const conquered = conquerHexInState(starter, 0, 2, HEX_ASSETS);
+  assert.equal(conquered.conquered, true);
+  const resBeforeBuild = calculatePlayerResources(conquered.nextState);
+  assert.equal(resBeforeBuild.ore, 10);
+
+  const builtMine = placeHexInState(conquered.nextState, 0, 2, mineIdx, 90, HEX_ASSETS);
+  assert.equal(builtMine.changed, true);
+  assert.equal(hasHexConstruction(builtMine.nextState.hexes[hexKey(0, 2)], HEX_ASSETS), true);
+
+  const overwriteAttempt = placeHexInState(builtMine.nextState, 0, 2, paidIdx, 90, HEX_ASSETS);
+  assert.equal(overwriteAttempt.changed, false);
+  assert.equal(overwriteAttempt.spent, 0);
+  assert.equal(overwriteAttempt.blockedReason, 'already_occupied');
+  assert.equal(overwriteAttempt.nextState.cash, builtMine.nextState.cash);
+
+  // 3. Cannot demolish neutral or rival buildings
+  const neutralDemolish = demolishHexInState(builtMine.nextState, 2, -1, HEX_ASSETS);
+  assert.equal(neutralDemolish.removed, false);
+  assert.equal(neutralDemolish.blockedReason, 'not_owned');
+
+  // 4. Demolish player's Mine on (0, 2) -> removes building, keeps player ownership, mountain terrain, ore=10, and cash
+  const cashBeforeDemolish = builtMine.nextState.cash;
+  const demolished = demolishHexInState(builtMine.nextState, 0, 2, HEX_ASSETS);
+  assert.equal(demolished.removed, true);
+  const tile = demolished.nextState.hexes[hexKey(0, 2)];
+  assert.equal(tile.owner, 'player');
+  assert.equal(tile.terrainType, 'mountain');
+  assert.equal(tile.resourceType, 'ore');
+  assert.equal(tile.resourceAmount, 10);
+  assert.equal(hasHexConstruction(tile, HEX_ASSETS), false);
+  assert.equal(HEX_ASSETS[tile.structureIndex].name, 'stone-mountain');
+  assert.equal(countPlayerTerritory(demolished.nextState), 8);
+  assert.equal(calculatePlayerResources(demolished.nextState).ore, 10);
+  assert.equal(demolished.nextState.cash, cashBeforeDemolish);
+
+  // 5. Demolishing a fertile starter farm (-1, 1) keeps food=20 and restores 'dirt'
+  const demolishFarm = demolishHexInState(demolished.nextState, -1, 1, HEX_ASSETS);
+  assert.equal(demolishFarm.removed, true);
+  const farmTile = demolishFarm.nextState.hexes[hexKey(-1, 1)];
+  assert.equal(farmTile.owner, 'player');
+  assert.equal(farmTile.terrainType, 'fertile');
+  assert.equal(farmTile.resourceType, 'food');
+  assert.equal(HEX_ASSETS[farmTile.structureIndex].name, 'dirt');
+  assert.equal(calculatePlayerResources(demolishFarm.nextState).food, 20);
+
+  // 6. Can build again on the freed mountain hex
+  const rebuilt = placeHexInState(demolishFarm.nextState, 0, 2, paidIdx, 90, HEX_ASSETS);
+  assert.equal(rebuilt.changed, true);
+  assert.equal(rebuilt.spent, HEX_ASSETS[paidIdx].price);
+  assert.equal(hasHexConstruction(rebuilt.nextState.hexes[hexKey(0, 2)], HEX_ASSETS), true);
 });

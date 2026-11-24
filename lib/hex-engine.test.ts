@@ -9,6 +9,7 @@ import {
   cycleStructureIndex,
   demolishHexInState,
   deserializeWorldState,
+  hasHexConstruction,
   hexKey,
   placeHexInState,
   rotateHexStep,
@@ -58,9 +59,11 @@ test('rotateHexStep and cycleStructureIndex wrap cleanly', () => {
   assert.equal(cycleStructureIndex(10, 5, 72), 15);
 });
 
-test('placeHexInState enforces ownership, charges price once per structure change, and demolishHexInState removes tile', () => {
+test('placeHexInState enforces ownership, blocks building over existing constructions, and demolishHexInState restores terrain without refund', () => {
   const bridgeIdx = HEX_ASSETS.findIndex((a) => a.name === 'bridge');
-  assert.ok(bridgeIdx >= 0);
+  const houseIdx = HEX_ASSETS.findIndex((a) => a.name === 'building-house');
+  const forestIdx = HEX_ASSETS.findIndex((a) => a.name === 'grass-forest');
+  assert.ok(bridgeIdx >= 0 && houseIdx >= 0 && forestIdx >= 0);
   assert.equal(HEX_ASSETS[bridgeIdx].price, 100);
 
   let state = createEmptyWorldState();
@@ -71,9 +74,7 @@ test('placeHexInState enforces ownership, charges price once per structure chang
   assert.equal(blocked.blockedReason, 'not_owned');
   assert.equal(blocked.nextState.cash, INITIAL_CASH);
 
-  // Give player ownership of (2, -1) with a grass/building tile different from bridge
-  const otherIdx = HEX_ASSETS.findIndex((a) => a.name === 'grass');
-  assert.ok(otherIdx >= 0 && otherIdx !== bridgeIdx);
+  // Give player ownership of (2, -1) with free forest terrain
   state = {
     ...state,
     hexes: {
@@ -81,29 +82,60 @@ test('placeHexInState enforces ownership, charges price once per structure chang
         q: 2,
         r: -1,
         orientation: DEFAULT_ROTATION_DEG,
-        structureIndex: otherIdx,
+        structureIndex: forestIdx,
         owner: 'player',
+        terrainType: 'forest',
+        resourceType: 'wood',
+        resourceAmount: 10,
       },
     },
   };
+  assert.equal(hasHexConstruction(state.hexes[hexKey(2, -1)], HEX_ASSETS), false);
 
   const placed = placeHexInState(state, 2, -1, bridgeIdx, DEFAULT_ROTATION_DEG, HEX_ASSETS);
   assert.equal(placed.changed, true);
   assert.equal(placed.spent, 100);
   assert.equal(placed.nextState.cash, INITIAL_CASH - 100);
   state = placed.nextState;
+  assert.equal(hasHexConstruction(state.hexes[hexKey(2, -1)], HEX_ASSETS), true);
 
-  // Rotating same structure on same hex should not double-charge
-  const rotated = placeHexInState(state, 2, -1, bridgeIdx, 150, HEX_ASSETS);
-  assert.equal(rotated.changed, true);
-  assert.equal(rotated.spent, 0);
-  assert.equal(rotated.nextState.cash, INITIAL_CASH - 100);
-  state = rotated.nextState;
+  // Attempting to build another construction on the already-occupied hex is blocked with $0 spent
+  const overwriteBlocked = placeHexInState(state, 2, -1, houseIdx, 150, HEX_ASSETS);
+  assert.equal(overwriteBlocked.changed, false);
+  assert.equal(overwriteBlocked.spent, 0);
+  assert.equal(overwriteBlocked.blockedReason, 'already_occupied');
+  assert.equal(overwriteBlocked.nextState.cash, INITIAL_CASH - 100);
+  assert.equal(overwriteBlocked.nextState.hexes[hexKey(2, -1)].structureIndex, bridgeIdx);
 
-  // Demolish removes the tile
-  const demolished = demolishHexInState(state, 2, -1);
+  // Demolishing removes only the construction, keeps player ownership, terrain, resource, and cash (no refund)
+  const demolished = demolishHexInState(state, 2, -1, HEX_ASSETS);
   assert.equal(demolished.removed, true);
-  assert.equal(demolished.nextState.hexes[hexKey(2, -1)], undefined);
+  const restoredTile = demolished.nextState.hexes[hexKey(2, -1)];
+  assert.ok(restoredTile !== undefined);
+  assert.equal(hasHexConstruction(restoredTile, HEX_ASSETS), false);
+  assert.equal(restoredTile.structureIndex, forestIdx);
+  assert.equal(restoredTile.owner, 'player');
+  assert.equal(restoredTile.terrainType, 'forest');
+  assert.equal(restoredTile.resourceType, 'wood');
+  assert.equal(restoredTile.resourceAmount, 10);
+  assert.equal(demolished.nextState.cash, INITIAL_CASH - 100);
+
+  // Demolishing an already free terrain returns removed: false
+  const demolishEmpty = demolishHexInState(demolished.nextState, 2, -1, HEX_ASSETS);
+  assert.equal(demolishEmpty.removed, false);
+  assert.equal(demolishEmpty.blockedReason, 'no_building');
+
+  // After demolishing, the hex is free and can receive a new construction
+  const rebuilt = placeHexInState(
+    demolished.nextState,
+    2,
+    -1,
+    houseIdx,
+    DEFAULT_ROTATION_DEG,
+    HEX_ASSETS
+  );
+  assert.equal(rebuilt.changed, true);
+  assert.equal(rebuilt.nextState.hexes[hexKey(2, -1)].structureIndex, houseIdx);
 });
 
 test('starter world and serialization round-trip preserve all tiles, cash, and faction owners', () => {

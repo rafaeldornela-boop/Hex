@@ -17,6 +17,8 @@ export type { HexOwner } from './hex-engine';
 export const DEFAULT_CONQUEST_COST = 500;
 export const NOT_OWNED_BUILD_MESSAGE =
   'Conquiste este território antes de construir.';
+export const ALREADY_OCCUPIED_BUILD_MESSAGE =
+  'Este território já possui uma construção.';
 
 /**
  * Axial neighbor offsets matching flat-topped hexes in `axialToWorld(q, r)`.

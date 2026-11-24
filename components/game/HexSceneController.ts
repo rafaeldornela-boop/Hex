@@ -5,6 +5,7 @@ import {
   DEFAULT_ROTATION_DEG,
   HEX_OUTER_RADIUS,
   axialToWorld,
+  hasHexConstruction,
   hexKey,
   worldToAxial,
   type AxialCoord,
@@ -30,13 +31,15 @@ import {
   type HexOwner,
 } from '@/lib/territory-engine';
 import {
-  canBuildStructureOnTerrain,
   getHexTerrainAndResource,
+  getStrategicRegionInfo,
+  canBuildStructureOnTerrain,
 } from '@/lib/terrain-engine';
+import type { UnitEntity } from '@/lib/military-engine';
 import { HEX_ASSETS } from '@/lib/repo-data';
 
 export type GameModeState = 'title' | 'playing' | 'paused';
-export type BuilderToolMode = 'expand' | 'build' | 'demolish';
+export type BuilderToolMode = 'expand' | 'build' | 'demolish' | 'command';
 
 export interface HexSceneCallbacks {
   onHoverChange: (coord: AxialCoord | null, existingTile: PlacedHex | null) => void;
@@ -259,17 +262,18 @@ function buildTerritoryPerimeterGeometry(
   state: HexWorldState,
   outerR: number,
   innerR: number,
-  y: number
+  y: number,
+  targetOwner: HexOwner = 'player'
 ): THREE.BufferGeometry {
   const positions: number[] = [];
 
   for (const tile of Object.values(state.hexes)) {
-    if (tile.owner !== 'player') continue;
+    if (tile.owner !== targetOwner) continue;
     const center = axialToWorld(tile.q, tile.r);
     for (let edge = 0; edge < 6; edge++) {
       const dir = AXIAL_DIRECTIONS[edge];
       const nKey = hexKey(tile.q + dir.q, tile.r + dir.r);
-      if (state.hexes[nKey]?.owner !== 'player') {
+      if (state.hexes[nKey]?.owner !== targetOwner) {
         appendHexEdgeQuad(positions, center.x, center.z, y, edge, outerR, innerR);
       }
     }
@@ -345,19 +349,25 @@ function buildFertileFurrowsGeometry(state: HexWorldState): THREE.BufferGeometry
   return geo;
 }
 
-function createNeutralMaterialVariant(
-  mat: THREE.Material | THREE.Material[]
+function createTintedMaterialVariant(
+  mat: THREE.Material | THREE.Material[],
+  tintHex: number,
+  extraRoughness = 0.04
 ): THREE.Material | THREE.Material[] {
-  const tint = new THREE.Color(0x8fa7be);
+  const tint = new THREE.Color(tintHex);
   const cloneOne = (m: THREE.Material): THREE.Material => {
     const cloned = m.clone();
     if ('color' in cloned && cloned.color instanceof THREE.Color) {
       cloned.color.multiply(tint);
     }
-    if ('roughness' in cloned && typeof (cloned as THREE.MeshStandardMaterial).roughness === 'number') {
+    if (
+      extraRoughness !== 0 &&
+      'roughness' in cloned &&
+      typeof (cloned as THREE.MeshStandardMaterial).roughness === 'number'
+    ) {
       (cloned as THREE.MeshStandardMaterial).roughness = Math.min(
         1,
-        (cloned as THREE.MeshStandardMaterial).roughness + 0.1
+        (cloned as THREE.MeshStandardMaterial).roughness + extraRoughness
       );
     }
     return cloned;
@@ -381,7 +391,12 @@ export class HexSceneController {
   private modelCache = new Map<string, THREE.Group>();
   private ownerMaterialPairs = new Map<
     string,
-    { owned: THREE.Material | THREE.Material[]; neutral: THREE.Material | THREE.Material[] }
+    {
+      owned: THREE.Material | THREE.Material[];
+      neutral: THREE.Material | THREE.Material[];
+      ironClan: THREE.Material | THREE.Material[];
+      azureLeague: THREE.Material | THREE.Material[];
+    }
   >();
   private loadingPromises = new Map<string, Promise<THREE.Group>>();
   private hexesGroup = new THREE.Group();
@@ -393,11 +408,17 @@ export class HexSceneController {
   // Territorial borders & conquerable frontier overlays
   private territoryTrimMesh: THREE.Mesh;
   private territoryBorderMesh: THREE.Mesh;
+  private ironClanBorderMesh: THREE.Mesh;
+  private azureLeagueBorderMesh: THREE.Mesh;
   private frontierOverlayMesh: THREE.Mesh;
   private frontierOverlayMat: THREE.MeshBasicMaterial;
   private fertileOverlayMesh: THREE.Mesh;
+  private rareMarkersGroup = new THREE.Group();
+  private unitsGroup = new THREE.Group();
+  private unitTargetOverlayMesh: THREE.Mesh;
   private conquestRingGeo: THREE.BufferGeometry;
   private conquestWaves: ConquestWaveEntry[] = [];
+  private commandValidTargets = new Set<string>();
 
   // Selector cursor (supports both desktop hover and explicit touch selection)
   private selectorGroup = new THREE.Group();
@@ -584,6 +605,28 @@ export class HexSceneController {
     this.territoryBorderMesh.frustumCulled = false;
     this.scene.add(this.territoryBorderMesh);
 
+    const ironBorderMat = new THREE.MeshBasicMaterial({
+      color: 0xdc2626,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    this.ironClanBorderMesh = new THREE.Mesh(new THREE.BufferGeometry(), ironBorderMat);
+    this.ironClanBorderMesh.frustumCulled = false;
+    this.scene.add(this.ironClanBorderMesh);
+
+    const azureBorderMat = new THREE.MeshBasicMaterial({
+      color: 0x2563eb,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    this.azureLeagueBorderMesh = new THREE.Mesh(new THREE.BufferGeometry(), azureBorderMat);
+    this.azureLeagueBorderMesh.frustumCulled = false;
+    this.scene.add(this.azureLeagueBorderMesh);
+
     this.frontierOverlayMat = new THREE.MeshBasicMaterial({
       color: 0xf59e0b,
       transparent: true,
@@ -617,6 +660,26 @@ export class HexSceneController {
     );
     this.fertileOverlayMesh.frustumCulled = false;
     this.scene.add(this.fertileOverlayMesh);
+
+    const unitTargetMat = new THREE.MeshBasicMaterial({
+      color: 0x10b981,
+      transparent: true,
+      opacity: 0.65,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    this.unitTargetOverlayMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      unitTargetMat
+    );
+    this.unitTargetOverlayMesh.frustumCulled = false;
+    this.scene.add(this.unitTargetOverlayMesh);
+
+    this.scene.add(this.rareMarkersGroup);
+    this.scene.add(this.unitsGroup);
 
     this.conquestRingGeo = createHexRingGeometry(
       HEX_OUTER_RADIUS * 1.03,
@@ -868,7 +931,7 @@ export class HexSceneController {
     if (e.button === 0) {
       this.updateHoverFromPointer(e.clientX, e.clientY);
       if (!this.hoveredCoord) return;
-      if (this.toolMode === 'expand') {
+      if (this.toolMode === 'expand' || this.toolMode === 'command') {
         this.callbacks.onSelectHexAt(this.hoveredCoord.q, this.hoveredCoord.r);
       } else if (this.toolMode === 'demolish') {
         this.callbacks.onDemolishAt(this.hoveredCoord.q, this.hoveredCoord.r);
@@ -1061,7 +1124,17 @@ export class HexSceneController {
     this.selectorRingMesh.position.y = hasTile ? 0.222 : 0.042;
     this.selectorGroup.visible = true;
 
-    if (this.toolMode === 'expand') {
+    if (this.toolMode === 'command') {
+      const targetKey = hexKey(activeCoord.q, activeCoord.r);
+      const existing = this.currentWorldState.hexes[targetKey];
+      if (this.commandValidTargets.has(targetKey)) {
+        const isEnemy =
+          existing?.owner && existing.owner !== 'player' && existing.owner !== 'neutral';
+        this.selectorRingMat.color.setHex(isEnemy ? 0xdc2626 : 0x10b981);
+      } else {
+        this.selectorRingMat.color.setHex(0x64748b);
+      }
+    } else if (this.toolMode === 'expand') {
       const check = evaluateConquest(
         this.currentWorldState,
         activeCoord.q,
@@ -1069,6 +1142,8 @@ export class HexSceneController {
       );
       if (check.owner === 'player') {
         this.selectorRingMat.color.setHex(0x10b981); // emerald: already owned
+      } else if (check.owner !== 'neutral') {
+        this.selectorRingMat.color.setHex(0xdc2626); // rival faction tile
       } else if (check.canConquer) {
         this.selectorRingMat.color.setHex(0xf59e0b); // bright gold: conquerable!
       } else if (check.reason === 'insufficient_funds') {
@@ -1077,16 +1152,20 @@ export class HexSceneController {
         this.selectorRingMat.color.setHex(0x64748b); // muted slate: distant neutral
       }
     } else if (this.toolMode === 'demolish') {
-      this.selectorRingMat.color.setHex(0xdc2626);
+      const existing = this.currentWorldState.hexes[hexKey(activeCoord.q, activeCoord.r)];
+      const canDemolish =
+        existing?.owner === 'player' && hasHexConstruction(existing, HEX_ASSETS);
+      this.selectorRingMat.color.setHex(canDemolish ? 0xdc2626 : 0x64748b);
     } else {
       const existing = this.currentWorldState.hexes[hexKey(activeCoord.q, activeCoord.r)];
       const ownedByPlayer = existing?.owner === 'player';
+      const occupied = hasHexConstruction(existing, HEX_ASSETS);
       const terrainInfo = getHexTerrainAndResource(activeCoord.q, activeCoord.r, existing);
       const activeAsset = HEX_ASSETS[this.currentPreviewIndex];
       const terrainAllowed =
         !activeAsset || canBuildStructureOnTerrain(activeAsset, terrainInfo.terrainType);
       this.selectorRingMat.color.setHex(
-        ownedByPlayer && terrainAllowed ? 0x059669 : 0xdc2626
+        ownedByPlayer && !occupied && terrainAllowed ? 0x059669 : 0xdc2626
       );
     }
   }
@@ -1213,7 +1292,9 @@ export class HexSceneController {
               mesh.userData.ownerMatKey = matKey;
               this.ownerMaterialPairs.set(matKey, {
                 owned: mat,
-                neutral: createNeutralMaterialVariant(mat),
+                neutral: createTintedMaterialVariant(mat, 0x8fa7be, 0.1),
+                ironClan: createTintedMaterialVariant(mat, 0xf2b5b5, 0.02),
+                azureLeague: createTintedMaterialVariant(mat, 0xb5d0f2, 0.02),
               });
             }
           });
@@ -1241,7 +1322,10 @@ export class HexSceneController {
         if (!matKey) return;
         const pair = this.ownerMaterialPairs.get(matKey);
         if (!pair) return;
-        mesh.material = owner === 'player' ? pair.owned : pair.neutral;
+        if (owner === 'player') mesh.material = pair.owned;
+        else if (owner === 'iron_clan') mesh.material = pair.ironClan;
+        else if (owner === 'azure_league') mesh.material = pair.azureLeague;
+        else mesh.material = pair.neutral;
       }
     });
   }
@@ -1249,6 +1333,8 @@ export class HexSceneController {
   private rebuildTerritoryOverlays(state: HexWorldState) {
     const oldTrim = this.territoryTrimMesh.geometry;
     const oldBorder = this.territoryBorderMesh.geometry;
+    const oldIronBorder = this.ironClanBorderMesh.geometry;
+    const oldAzureBorder = this.azureLeagueBorderMesh.geometry;
     const oldFrontier = this.frontierOverlayMesh.geometry;
     const oldFertile = this.fertileOverlayMesh.geometry;
 
@@ -1256,21 +1342,225 @@ export class HexSceneController {
       state,
       HEX_OUTER_RADIUS * 1.03,
       HEX_OUTER_RADIUS * 0.875,
-      0.212
+      0.212,
+      'player'
     );
     this.territoryBorderMesh.geometry = buildTerritoryPerimeterGeometry(
       state,
       HEX_OUTER_RADIUS * 1.005,
       HEX_OUTER_RADIUS * 0.9,
-      0.216
+      0.216,
+      'player'
+    );
+    this.ironClanBorderMesh.geometry = buildTerritoryPerimeterGeometry(
+      state,
+      HEX_OUTER_RADIUS * 1.005,
+      HEX_OUTER_RADIUS * 0.89,
+      0.215,
+      'iron_clan'
+    );
+    this.azureLeagueBorderMesh.geometry = buildTerritoryPerimeterGeometry(
+      state,
+      HEX_OUTER_RADIUS * 1.005,
+      HEX_OUTER_RADIUS * 0.89,
+      0.215,
+      'azure_league'
     );
     this.frontierOverlayMesh.geometry = buildConquerableFrontierGeometry(state);
     this.fertileOverlayMesh.geometry = buildFertileFurrowsGeometry(state);
 
     oldTrim.dispose();
     oldBorder.dispose();
+    oldIronBorder.dispose();
+    oldAzureBorder.dispose();
     oldFrontier.dispose();
     oldFertile.dispose();
+    this.rebuildRareMarkers(state);
+  }
+
+  private rebuildRareMarkers(state: HexWorldState) {
+    while (this.rareMarkersGroup.children.length > 0) {
+      const child = this.rareMarkersGroup.children[0] as THREE.Mesh;
+      this.rareMarkersGroup.remove(child);
+      child.geometry?.dispose();
+      if (child.material && !Array.isArray(child.material)) {
+        child.material.dispose();
+      }
+    }
+
+    const gemGeo = new THREE.OctahedronGeometry(0.068, 0);
+    for (const tile of Object.values(state.hexes)) {
+      const strategic = getStrategicRegionInfo(tile.q, tile.r);
+      if (strategic.rareFeature === 'none') continue;
+
+      const colorHex =
+        strategic.rareFeature === 'gold_vein'
+          ? 0xfbbf24
+          : strategic.rareFeature === 'pure_iron'
+            ? 0x94a3b8
+            : strategic.rareFeature === 'arcane_crystal'
+              ? 0x38bdf8
+              : strategic.rareFeature === 'rich_soil'
+                ? 0x84cc16
+                : 0x22d3ee;
+
+      const mat = new THREE.MeshStandardMaterial({
+        color: colorHex,
+        emissive: colorHex,
+        emissiveIntensity: 0.25,
+        roughness: 0.35,
+        metalness: 0.2,
+        flatShading: true,
+      });
+      const marker = new THREE.Mesh(gemGeo.clone(), mat);
+      const pos = axialToWorld(tile.q, tile.r);
+      marker.position.set(pos.x + 0.28, 0.35, pos.z - 0.16);
+      marker.userData.baseY = 0.35;
+      marker.userData.phase = (tile.q * 3 + tile.r * 5) * 0.7;
+      this.rareMarkersGroup.add(marker);
+    }
+    gemGeo.dispose();
+  }
+
+  public syncUnits(
+    units: UnitEntity[],
+    commandSource: AxialCoord | null = null,
+    validTargets: AxialCoord[] = []
+  ) {
+    // Update command target rings
+    this.commandValidTargets = new Set(validTargets.map((c) => hexKey(c.q, c.r)));
+    const oldTargetGeo = this.unitTargetOverlayMesh.geometry;
+    const targetPositions: number[] = [];
+    const outerR = HEX_OUTER_RADIUS * 0.96;
+    const innerR = HEX_OUTER_RADIUS * 0.84;
+    for (const coord of validTargets) {
+      const center = axialToWorld(coord.q, coord.r);
+      const hasTile = Boolean(this.currentWorldState.hexes[hexKey(coord.q, coord.r)]);
+      const y = hasTile ? 0.224 : 0.045;
+      for (let edge = 0; edge < 6; edge++) {
+        appendHexEdgeQuad(targetPositions, center.x, center.z, y, edge, outerR, innerR);
+      }
+    }
+    const nextTargetGeo = new THREE.BufferGeometry();
+    nextTargetGeo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(targetPositions, 3)
+    );
+    this.unitTargetOverlayMesh.geometry = nextTargetGeo;
+    oldTargetGeo.dispose();
+    this.refreshSelectorAnchor();
+
+    // Clear previous unit meshes safely
+    while (this.unitsGroup.children.length > 0) {
+      const child = this.unitsGroup.children[0];
+      this.unitsGroup.remove(child);
+      child.traverse((obj) => {
+        const m = obj as THREE.Mesh;
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) {
+          if (Array.isArray(m.material)) m.material.forEach((mm) => mm.dispose());
+          else m.material.dispose();
+        }
+      });
+    }
+
+    for (const unit of units) {
+      if (unit.hp <= 0) continue;
+      const unitGroup = new THREE.Group();
+      const pos = axialToWorld(unit.q, unit.r);
+      const hasTile = Boolean(this.currentWorldState.hexes[hexKey(unit.q, unit.r)]);
+      const baseY = hasTile ? 0.23 : 0.04;
+      unitGroup.position.set(pos.x, baseY, pos.z);
+
+      const primaryColor =
+        unit.owner === 'player'
+          ? 0x059669
+          : unit.owner === 'iron_clan'
+            ? 0xdc2626
+            : 0x2563eb;
+      const trimColor =
+        unit.owner === 'player'
+          ? 0xfbbf24
+          : unit.owner === 'iron_clan'
+            ? 0x334155
+            : 0xe2e8f0;
+
+      const baseMat = new THREE.MeshStandardMaterial({
+        color: primaryColor,
+        roughness: 0.55,
+        metalness: 0.1,
+        flatShading: true,
+      });
+      const trimMat = new THREE.MeshStandardMaterial({
+        color: trimColor,
+        roughness: 0.45,
+        metalness: 0.25,
+        flatShading: true,
+      });
+
+      const pedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.145, 0.165, 0.05, 6),
+        baseMat
+      );
+      pedestal.position.y = 0.025;
+      pedestal.castShadow = this.quality.shadowsEnabled;
+      unitGroup.add(pedestal);
+
+      if (commandSource && commandSource.q === unit.q && commandSource.r === unit.r) {
+        const ring = new THREE.Mesh(
+          createHexRingGeometry(0.24, 0.19),
+          new THREE.MeshBasicMaterial({
+            color: 0xfbbf24,
+            side: THREE.DoubleSide,
+          })
+        );
+        ring.position.y = 0.01;
+        unitGroup.add(ring);
+      }
+
+      if (unit.type === 'warship') {
+        const hull = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.08, 0.24), trimMat);
+        hull.position.y = 0.09;
+        const sail = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.22, 4), baseMat);
+        sail.position.y = 0.21;
+        unitGroup.add(hull, sail);
+      } else if (unit.type === 'knight') {
+        const steed = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, 0.2), trimMat);
+        steed.position.y = 0.1;
+        const rider = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.22, 6), baseMat);
+        rider.position.y = 0.24;
+        const lance = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.28, 5), trimMat);
+        lance.position.set(0.08, 0.22, 0.02);
+        lance.rotation.x = 0.35;
+        unitGroup.add(steed, rider, lance);
+      } else if (unit.type === 'archer') {
+        const body = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 6), baseMat);
+        body.position.y = 0.16;
+        const hood = new THREE.Mesh(new THREE.SphereGeometry(0.052, 6, 5), trimMat);
+        hood.position.y = 0.27;
+        const bow = new THREE.Mesh(new THREE.TorusGeometry(0.08, 0.012, 4, 8, Math.PI), trimMat);
+        bow.position.set(0.08, 0.17, 0);
+        bow.rotation.z = -Math.PI / 2;
+        unitGroup.add(body, hood, bow);
+      } else {
+        // Infantry
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.09, 0.18, 6), baseMat);
+        body.position.y = 0.14;
+        const helm = new THREE.Mesh(new THREE.SphereGeometry(0.052, 6, 5), trimMat);
+        helm.position.y = 0.25;
+        const shield = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.13, 0.1), trimMat);
+        shield.position.set(0.08, 0.15, 0);
+        unitGroup.add(body, helm, shield);
+      }
+
+      if (unit.owner === 'player' && !unit.movedThisTurn) {
+        unitGroup.userData.readyBob = true;
+        unitGroup.userData.baseY = baseY;
+        unitGroup.userData.phase = (unit.q + unit.r) * 0.9;
+      }
+
+      this.unitsGroup.add(unitGroup);
+    }
   }
 
   private spawnConquestWave(x: number, z: number) {
@@ -1305,9 +1595,14 @@ export class HexSceneController {
     for (const [key, entry] of this.placedMeshes.entries()) {
       const target = nextState.hexes[key];
       if (!target || target.structureIndex !== entry.structureIndex) {
+        const hadConstruction = hasHexConstruction(
+          { structureIndex: entry.structureIndex },
+          HEX_ASSETS
+        );
+        const nowRestoredTerrain = Boolean(target) && !hasHexConstruction(target, HEX_ASSETS);
         this.hexesGroup.remove(entry.group);
         this.placedMeshes.delete(key);
-        if (!target && animSet.has(key)) {
+        if (animSet.has(key) && (!target || (hadConstruction && nowRestoredTerrain))) {
           const pos = entry.group.position;
           this.spawnParticleBurst(pos.x, 0.25, pos.z, 0xdc2626, 8);
         }
@@ -1409,6 +1704,10 @@ export class HexSceneController {
         this.spawnParticleBurst(pos.x, 0.18, pos.z, 0xfef3c7, 10);
       }
     }
+
+    if (!this.disposed) {
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 
   private spawnParticleBurst(
@@ -1452,6 +1751,7 @@ export class HexSceneController {
     this.camera.fov = aspect < 0.8 ? 36 : 32;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+    this.renderer.render(this.scene, this.camera);
   }
 
   private isCameraSettling(): boolean {
@@ -1569,6 +1869,21 @@ export class HexSceneController {
       this.frontierOverlayMat.opacity = 0.36 + Math.sin(this.elapsedSec * 2.6) * 0.12;
     } else {
       this.frontierOverlayMat.opacity = 0.2;
+    }
+
+    for (const child of this.rareMarkersGroup.children) {
+      const baseY = (child.userData.baseY as number | undefined) ?? 0.35;
+      const phase = (child.userData.phase as number | undefined) ?? 0;
+      child.position.y = baseY + Math.sin(this.elapsedSec * 2.5 + phase) * 0.03;
+      child.rotation.y = this.elapsedSec * 1.1 + phase;
+    }
+
+    for (const unitGroup of this.unitsGroup.children) {
+      if (unitGroup.userData.readyBob) {
+        const baseY = (unitGroup.userData.baseY as number | undefined) ?? 0.23;
+        const phase = (unitGroup.userData.phase as number | undefined) ?? 0;
+        unitGroup.position.y = baseY + Math.sin(this.elapsedSec * 3.2 + phase) * 0.015;
+      }
     }
 
     // Conquest wave rings
@@ -1754,6 +2069,8 @@ export class HexSceneController {
     for (const pair of this.ownerMaterialPairs.values()) {
       addMat(pair.owned);
       addMat(pair.neutral);
+      addMat(pair.ironClan);
+      addMat(pair.azureLeague);
     }
 
     geometries.add(this.conquestRingGeo);
