@@ -1,0 +1,6 @@
+{
+  "name": "Hexagon World — Guia & Preparação Godot",
+  "description": "Inspeção completa, documentação inicial (README e ROADMAP) e pacote independente pronto para GitHub do projeto de aprendizado em Godot baseado no Starter-Kit-Hexagon-World.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
