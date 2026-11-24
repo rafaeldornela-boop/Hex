@@ -22,6 +22,8 @@ export interface PlacedHex {
   r: number;
   orientation: number; // degrees: 90, 150, 210, 270, 330, 30
   structureIndex: number;
+  /** Territorial ownership ('player' or 'neutral') */
+  owner?: 'player' | 'neutral';
   /** Optional seam for upcoming territory, level, and worker mechanics */
   meta?: TileDomainMetadata;
 }
@@ -134,6 +136,8 @@ export function placeHexInState(
       r,
       orientation,
       structureIndex,
+      owner: previous?.owner ?? 'neutral',
+      ...(previous?.meta ? { meta: previous.meta } : {}),
     },
   };
 
@@ -201,12 +205,14 @@ export function deserializeWorldState(
         if (idx >= 0 && idx < totalAssets) {
           const q = Math.round((item as PlacedHex).q);
           const r = Math.round((item as PlacedHex).r);
+          const rawOwner = (item as PlacedHex).owner;
           const rawMeta = (item as PlacedHex).meta;
           const tile: PlacedHex = {
             q,
             r,
             orientation: ((item as PlacedHex).orientation % 360 + 360) % 360,
             structureIndex: idx,
+            owner: rawOwner === 'player' ? 'player' : 'neutral',
           };
           if (rawMeta && typeof rawMeta === 'object') {
             tile.meta = rawMeta;
@@ -270,6 +276,16 @@ const STARTER_ISLAND_BLUEPRINT: StarterTileBlueprint[] = [
   { q: -1, r: -3, name: 'unit-ship', orientation: 150 },
 ];
 
+const STARTER_PLAYER_KEYS = new Set([
+  '0,0',
+  '1,0',
+  '-1,0',
+  '0,1',
+  '0,-1',
+  '1,-1',
+  '-1,1',
+]);
+
 export function createStarterWorldState(assets: HexAssetEntry[]): HexWorldState {
   const indexByName = new Map<string, number>();
   assets.forEach((asset, idx) => indexByName.set(asset.name, idx));
@@ -278,11 +294,13 @@ export function createStarterWorldState(assets: HexAssetEntry[]): HexWorldState 
   for (const tile of STARTER_ISLAND_BLUEPRINT) {
     const idx = indexByName.get(tile.name);
     if (idx !== undefined) {
-      hexes[hexKey(tile.q, tile.r)] = {
+      const key = hexKey(tile.q, tile.r);
+      hexes[key] = {
         q: tile.q,
         r: tile.r,
         orientation: tile.orientation ?? DEFAULT_ROTATION_DEG,
         structureIndex: idx,
+        owner: STARTER_PLAYER_KEYS.has(key) ? 'player' : 'neutral',
       };
     }
   }

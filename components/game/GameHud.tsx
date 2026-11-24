@@ -12,9 +12,11 @@ import {
   Coins,
   Compass,
   Crosshair,
+  Flag,
   FolderOpen,
   Hammer,
   Layers,
+  Lock,
   Menu,
   Pause,
   Play,
@@ -30,12 +32,14 @@ import {
 } from 'lucide-react';
 import type { HexAssetEntry } from '@/lib/godot-docs';
 import type { AxialCoord } from '@/lib/hex-engine';
+import type { ConquestCheckResult } from '@/lib/territory-engine';
 import { formatHexDisplayName } from '@/lib/world-domain';
 import type { BuilderToolMode, GameModeState } from './HexSceneController';
 
 export interface GameHudProps {
   gameState: GameModeState;
   cash: number;
+  territoryCount: number;
   tileCount: number;
   selectedIndex: number;
   rotationDeg: number;
@@ -43,6 +47,7 @@ export interface GameHudProps {
   hoveredCoord: AxialCoord | null;
   selectedHex: AxialCoord | null;
   selectedTileAssetName: string | null;
+  selectedConquest: ConquestCheckResult | null;
   assets: HexAssetEntry[];
   muted: boolean;
   dockOpen: boolean;
@@ -93,6 +98,7 @@ function formatCash(value: number): string {
 const GameHud = memo(function GameHud({
   gameState,
   cash,
+  territoryCount,
   tileCount,
   selectedIndex,
   rotationDeg,
@@ -100,6 +106,7 @@ const GameHud = memo(function GameHud({
   hoveredCoord,
   selectedHex,
   selectedTileAssetName,
+  selectedConquest,
   assets,
   muted,
   dockOpen,
@@ -237,10 +244,10 @@ const GameHud = memo(function GameHud({
           {/* Control Hint Line (tailored per form factor) */}
           <div className="pt-3 text-center">
             <p className="md:hidden inline-block text-[11px] font-semibold text-[#1f2933] drop-shadow-[0_1px_0_rgba(255,255,255,0.9)]">
-              Arraste para mover · Pinça para zoom e girar · Toque para construir
+              Arraste para mover · Pinça para zoom · Toque em hexágonos vizinhos para conquistar
             </p>
             <p className="hidden md:inline-block text-xs font-semibold text-[#1f2933] drop-shadow-[0_1px_0_rgba(255,255,255,0.85)]">
-              WASD Mover Câmera · Clique Esquerdo Construir · Botão Direito / R Girar 60° · Q / E Trocar Peça · DEL Remover · F1 / F2 Salvar
+              Clique em hexágonos vizinhos para Conquistar · Alterne para Construir (Q/E/R) ou Demolir (DEL) · WASD Mover · F1 / F2 Salvar
             </p>
           </div>
         </div>
@@ -258,7 +265,7 @@ const GameHud = memo(function GameHud({
               paddingRight: 'max(0.75rem, env(safe-area-inset-right))',
             }}
           >
-            {/* Top-Left Compact Cash & Tiles Plaque (Single DOM source for mobile & desktop) */}
+            {/* Top-Left Compact Cash & Territory Plaque */}
             <div className="pointer-events-auto flex items-center gap-2.5 sm:gap-3 bg-[#fcf9f2]/96 border-2 border-[#3c3426] rounded-xl px-3 py-2 sm:px-4 sm:py-2.5 shadow-[0_3px_0_#3c3426]">
               <div className="flex items-center gap-1.5 sm:gap-2 pr-2.5 sm:pr-3 border-r border-[#d9ceb8]">
                 <Coins className="w-5 h-5 text-amber-600 shrink-0" aria-hidden="true" />
@@ -275,19 +282,34 @@ const GameHud = memo(function GameHud({
                 </div>
               </div>
 
-              <div className="md:pr-3 md:border-r md:border-[#d9ceb8]">
-                <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
+              <div className="flex items-center gap-1.5 sm:gap-2 md:pr-3 md:border-r md:border-[#d9ceb8]">
+                <Flag className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-700 shrink-0" aria-hidden="true" />
+                <div>
+                  <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
+                    Território
+                  </p>
+                  <p
+                    data-testid="hud-territory"
+                    className="font-display text-base sm:text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
+                  >
+                    {territoryCount}
+                  </p>
+                </div>
+              </div>
+
+              {/* Desktop-only total hex count & live hover coordinate */}
+              <div className="hidden md:block pr-3 border-r border-[#d9ceb8]">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
                   Hexágonos
                 </p>
                 <p
                   data-testid="hud-tiles"
-                  className="font-display text-base sm:text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
+                  className="font-display text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
                 >
                   {tileCount}
                 </p>
               </div>
 
-              {/* Desktop-only live hover coordinate */}
               <div className="hidden md:block">
                 <p className="text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
                   Cursor
@@ -488,66 +510,148 @@ const GameHud = memo(function GameHud({
                 data-testid="mobile-selection-bar"
                 className="pointer-events-auto w-full max-w-md bg-[#fcf9f2]/98 border-2 border-[#3c3426] rounded-2xl p-2.5 shadow-[0_4px_0_#3c3426] space-y-2"
               >
-                <div className="flex items-center justify-between gap-2 px-1">
-                  <div className="min-w-0">
-                    <p className="text-[11px] font-bold text-[#1f1a12] truncate capitalize">
-                      {selectedTileAssetName
-                        ? formatHexDisplayName(selectedTileAssetName)
-                        : 'Hexágono vazio'}
-                    </p>
-                    <p className="font-mono text-[10px] text-[#6e604a] tabular-nums">
-                      q:{selectedHex.q} r:{selectedHex.r} · peça:{' '}
-                      <span className="capitalize font-sans font-semibold text-[#2a2319]">
-                        {activePieceLabel}
-                      </span>
-                      {activeAsset.price > 0 ? ` ($${activeAsset.price})` : ''}
-                    </p>
-                  </div>
+                {toolMode === 'expand' && selectedConquest ? (
+                  <>
+                    <div className="flex items-center justify-between gap-2 px-1">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`inline-block w-2.5 h-2.5 rounded-full shrink-0 ${
+                              selectedConquest.owner === 'player'
+                                ? 'bg-emerald-600'
+                                : selectedConquest.isAdjacent
+                                  ? 'bg-amber-500'
+                                  : 'bg-slate-400'
+                            }`}
+                          />
+                          <p className="text-xs font-bold text-[#1f1a12] truncate capitalize">
+                            {selectedTileAssetName
+                              ? formatHexDisplayName(selectedTileAssetName)
+                              : 'Território livre'}
+                          </p>
+                        </div>
+                        <p className="text-[11px] font-medium text-[#5c5140] mt-0.5">
+                          {selectedConquest.owner === 'player'
+                            ? 'Seu território'
+                            : selectedConquest.isAdjacent
+                              ? selectedConquest.canConquer
+                                ? 'Território neutro · Adjacente'
+                                : `Adjacente · Saldo insuficiente (${formatCash(selectedConquest.cost)})`
+                              : 'Distante · Conquiste um vizinho primeiro'}
+                        </p>
+                      </div>
 
-                  <button
-                    type="button"
-                    onClick={onCancelAction}
-                    aria-label="Cancelar seleção"
-                    className="w-10 h-10 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer"
-                  >
-                    <X className="w-4 h-4" aria-hidden="true" />
-                  </button>
-                </div>
+                      <button
+                        type="button"
+                        onClick={onCancelAction}
+                        aria-label="Fechar seleção"
+                        className="w-10 h-10 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer"
+                      >
+                        <X className="w-4 h-4" aria-hidden="true" />
+                      </button>
+                    </div>
 
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    data-testid="mobile-confirm-build"
-                    onClick={onConfirmSelectedHex}
-                    className="flex-1 min-h-[44px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] active:translate-y-0.5 flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <Check className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    {selectedTileAssetName ? 'Substituir' : 'Construir'}
-                    {activeAsset.price > 0 ? ` ($${activeAsset.price})` : ''}
-                  </button>
+                    <div className="flex items-center gap-2">
+                      {selectedConquest.owner === 'player' ? (
+                        <button
+                          type="button"
+                          onClick={() => onSetToolMode('build')}
+                          className="flex-1 min-h-[46px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <Hammer className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          Construir aqui
+                        </button>
+                      ) : selectedConquest.isAdjacent ? (
+                        <button
+                          type="button"
+                          data-testid="mobile-conquer-button"
+                          onClick={onConfirmSelectedHex}
+                          className={`flex-1 min-h-[46px] px-3 rounded-xl font-display text-xs font-bold border-2 flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5 ${
+                            selectedConquest.canConquer
+                              ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426]'
+                              : 'bg-[#efe8d8] text-[#6e604a] border-[#bcae96]'
+                          }`}
+                        >
+                          <Flag className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          Conquistar ({formatCash(selectedConquest.cost)})
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          data-testid="mobile-conquer-blocked"
+                          onClick={onConfirmSelectedHex}
+                          className="flex-1 min-h-[46px] px-3 rounded-xl bg-[#efe8d8] text-[#5c5140] font-display text-xs font-semibold border-2 border-[#c8ba9f] flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          Território muito distante
+                        </button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between gap-2 px-1">
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-bold text-[#1f1a12] truncate capitalize">
+                          {selectedTileAssetName
+                            ? formatHexDisplayName(selectedTileAssetName)
+                            : 'Hexágono vazio'}
+                        </p>
+                        <p className="font-mono text-[10px] text-[#6e604a] tabular-nums">
+                          q:{selectedHex.q} r:{selectedHex.r} · peça:{' '}
+                          <span className="capitalize font-sans font-semibold text-[#2a2319]">
+                            {activePieceLabel}
+                          </span>
+                          {activeAsset.price > 0 ? ` ($${activeAsset.price})` : ''}
+                        </p>
+                      </div>
 
-                  <button
-                    type="button"
-                    onClick={onRotatePiece}
-                    aria-label="Girar peça selecionada"
-                    className="min-w-[44px] min-h-[44px] px-3 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] text-xs font-bold flex items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <RotateCw className="w-4 h-4" aria-hidden="true" />
-                    <span className="font-mono text-[11px]">{rotationDeg}°</span>
-                  </button>
+                      <button
+                        type="button"
+                        onClick={onCancelAction}
+                        aria-label="Cancelar seleção"
+                        className="w-10 h-10 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer"
+                      >
+                        <X className="w-4 h-4" aria-hidden="true" />
+                      </button>
+                    </div>
 
-                  {selectedTileAssetName && (
-                    <button
-                      type="button"
-                      data-testid="mobile-demolish-selected"
-                      onClick={onDemolishSelectedHex}
-                      aria-label="Demolir hexágono selecionado"
-                      className="min-w-[44px] min-h-[44px] px-3 rounded-xl bg-rose-700 text-white border-2 border-rose-950 flex items-center justify-center cursor-pointer"
-                    >
-                      <Trash2 className="w-4 h-4" aria-hidden="true" />
-                    </button>
-                  )}
-                </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        data-testid="mobile-confirm-build"
+                        onClick={onConfirmSelectedHex}
+                        className="flex-1 min-h-[44px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] active:translate-y-0.5 flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Check className="w-4 h-4 shrink-0" aria-hidden="true" />
+                        {selectedTileAssetName ? 'Substituir' : 'Construir'}
+                        {activeAsset.price > 0 ? ` ($${activeAsset.price})` : ''}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={onRotatePiece}
+                        aria-label="Girar peça selecionada"
+                        className="min-w-[44px] min-h-[44px] px-3 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] text-xs font-bold flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <RotateCw className="w-4 h-4" aria-hidden="true" />
+                        <span className="font-mono text-[11px]">{rotationDeg}°</span>
+                      </button>
+
+                      {selectedTileAssetName && (
+                        <button
+                          type="button"
+                          data-testid="mobile-demolish-selected"
+                          onClick={onDemolishSelectedHex}
+                          aria-label="Demolir hexágono selecionado"
+                          className="min-w-[44px] min-h-[44px] px-3 rounded-xl bg-rose-700 text-white border-2 border-rose-950 flex items-center justify-center cursor-pointer"
+                        >
+                          <Trash2 className="w-4 h-4" aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -562,46 +666,46 @@ const GameHud = memo(function GameHud({
             {/* Primary Mobile Thumb Dock (4 spacious >= 52px touch buttons) */}
             {!buildSheetOpen && (
               <div className="pointer-events-auto w-full max-w-md bg-[#fcf9f2]/96 border-2 border-[#3c3426] rounded-2xl p-1.5 shadow-[0_4px_0_#3c3426] flex items-stretch gap-1.5">
-                {/* 1. Prominent Build / Pieces Drawer Button */}
+                {/* 1. Expand Territory Mode */}
+                <button
+                  type="button"
+                  data-testid="mobile-expand-button"
+                  onClick={() => onSetToolMode('expand')}
+                  aria-pressed={toolMode === 'expand'}
+                  className={`flex-1 min-w-0 min-h-[52px] px-2.5 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${
+                    toolMode === 'expand'
+                      ? 'bg-amber-500 border-[#3c3426] text-[#1f1a12] shadow-[0_2px_0_#3c3426]'
+                      : 'bg-white border-[#c8ba9f] text-[#2a2319]'
+                  }`}
+                >
+                  <Flag className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span className="text-[11px] font-bold leading-none">Expandir</span>
+                </button>
+
+                {/* 2. Build / Pieces Drawer Button */}
                 <button
                   type="button"
                   data-testid="mobile-build-button"
                   onClick={() => {
-                    if (toolMode === 'demolish') {
-                      onSetToolMode('build');
-                    }
+                    onSetToolMode('build');
                     onSetBuildSheetOpen(true);
                   }}
-                  className={`flex-1 min-w-0 min-h-[52px] px-3 rounded-xl border-2 flex items-center gap-2.5 text-left cursor-pointer transition-colors ${
+                  aria-pressed={toolMode === 'build'}
+                  className={`flex-[1.25] min-w-0 min-h-[52px] px-2.5 rounded-xl border-2 flex items-center justify-center gap-1.5 text-left cursor-pointer transition-colors ${
                     toolMode === 'build'
                       ? 'bg-emerald-700 border-[#1e2d24] text-white shadow-[0_2px_0_#1e2d24]'
                       : 'bg-white border-[#c8ba9f] text-[#2a2319]'
                   }`}
                 >
-                  <Layers className="w-5 h-5 shrink-0" aria-hidden="true" />
+                  <Layers className="w-4 h-4 shrink-0" aria-hidden="true" />
                   <div className="min-w-0">
                     <span className="block text-[10px] font-bold uppercase tracking-wider opacity-85 leading-none">
                       Construir
                     </span>
-                    <span className="block text-xs font-bold capitalize truncate leading-tight mt-0.5">
+                    <span className="block text-[11px] font-bold capitalize truncate leading-tight mt-0.5">
                       {activePieceLabel}
-                      {activeAsset.price > 0 ? ` · $${activeAsset.price}` : ''}
                     </span>
                   </div>
-                </button>
-
-                {/* 2. Rotate 60° */}
-                <button
-                  type="button"
-                  data-testid="mobile-rotate-button"
-                  onClick={onRotatePiece}
-                  aria-label="Girar peça 60 graus"
-                  className="min-w-[60px] min-h-[52px] px-2 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
-                >
-                  <RotateCw className="w-4 h-4" aria-hidden="true" />
-                  <span className="font-mono text-[10px] font-bold leading-none">
-                    {rotationDeg}°
-                  </span>
                 </button>
 
                 {/* 3. Demolish Toggle */}
@@ -609,11 +713,11 @@ const GameHud = memo(function GameHud({
                   type="button"
                   data-testid="mobile-demolish-button"
                   onClick={() =>
-                    onSetToolMode(toolMode === 'demolish' ? 'build' : 'demolish')
+                    onSetToolMode(toolMode === 'demolish' ? 'expand' : 'demolish')
                   }
                   aria-label="Alternar modo demolir"
                   aria-pressed={toolMode === 'demolish'}
-                  className={`min-w-[60px] min-h-[52px] px-2 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                  className={`min-w-[64px] min-h-[52px] px-2 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                     toolMode === 'demolish'
                       ? 'bg-rose-700 border-rose-950 text-white'
                       : 'bg-white border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc]'
@@ -623,17 +727,30 @@ const GameHud = memo(function GameHud({
                   <span className="text-[10px] font-bold leading-none">Demolir</span>
                 </button>
 
-                {/* 4. Contextual Cancel OR Quick Save */}
+                {/* 4. Contextual Cancel OR Rotate (in build mode) OR Quick Save */}
                 {hasCancellableState ? (
                   <button
                     type="button"
                     data-testid="mobile-cancel-button"
                     onClick={onCancelAction}
                     aria-label="Cancelar ação atual"
-                    className="min-w-[60px] min-h-[52px] px-2 rounded-xl bg-[#efe8d8] border-2 border-[#3c3426] text-[#1f1a12] active:bg-[#e5dcc7] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+                    className="min-w-[64px] min-h-[52px] px-2 rounded-xl bg-[#efe8d8] border-2 border-[#3c3426] text-[#1f1a12] active:bg-[#e5dcc7] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
                   >
                     <X className="w-4 h-4" aria-hidden="true" />
                     <span className="text-[10px] font-bold leading-none">Cancelar</span>
+                  </button>
+                ) : toolMode === 'build' ? (
+                  <button
+                    type="button"
+                    data-testid="mobile-rotate-button"
+                    onClick={onRotatePiece}
+                    aria-label="Girar peça 60 graus"
+                    className="min-w-[64px] min-h-[52px] px-2 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+                  >
+                    <RotateCw className="w-4 h-4" aria-hidden="true" />
+                    <span className="font-mono text-[10px] font-bold leading-none">
+                      {rotationDeg}°
+                    </span>
                   </button>
                 ) : (
                   <button
@@ -641,7 +758,7 @@ const GameHud = memo(function GameHud({
                     data-testid="mobile-save-button"
                     onClick={onSaveMap}
                     aria-label="Salvar mapa"
-                    className="min-w-[60px] min-h-[52px] px-2 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+                    className="min-w-[64px] min-h-[52px] px-2 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
                   >
                     <Save className="w-4 h-4" aria-hidden="true" />
                     <span className="text-[10px] font-bold leading-none">Salvar</span>
@@ -754,9 +871,73 @@ const GameHud = memo(function GameHud({
           )}
 
           {/* ========================================================= */}
-          {/* DESKTOP PLAYING HUD (md+): PRESERVED CLASSIC WORKFLOW     */}
+          {/* DESKTOP PLAYING HUD (md+): EXPAND + PRESERVED BUILDER     */}
           {/* ========================================================= */}
-          <div className="hidden md:flex absolute bottom-3 left-1/2 -translate-x-1/2 w-[min(940px,95vw)] flex-col items-center pointer-events-none">
+          <div className="hidden md:flex absolute bottom-3 left-1/2 -translate-x-1/2 w-[min(960px,95vw)] flex-col items-center pointer-events-none">
+            {/* Desktop Compact Conquest Confirmation Card (when a hex is clicked in Expand mode) */}
+            {toolMode === 'expand' && selectedHex && selectedConquest && (
+              <div
+                data-testid="desktop-selection-bar"
+                className="pointer-events-auto mb-2 flex items-center gap-3 bg-[#fcf9f2]/98 border-2 border-[#3c3426] rounded-2xl px-4 py-2.5 shadow-[0_4px_0_#3c3426]"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`inline-block w-2.5 h-2.5 rounded-full shrink-0 ${
+                        selectedConquest.owner === 'player'
+                          ? 'bg-emerald-600'
+                          : selectedConquest.isAdjacent
+                            ? 'bg-amber-500'
+                            : 'bg-slate-400'
+                      }`}
+                    />
+                    <p className="text-xs font-bold text-[#1f1a12] capitalize">
+                      {selectedTileAssetName
+                        ? formatHexDisplayName(selectedTileAssetName)
+                        : 'Território livre'}
+                    </p>
+                    <span className="font-mono text-[10px] text-[#6e604a]">
+                      (q:{selectedHex.q} r:{selectedHex.r})
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[#5c5140] mt-0.5">
+                    {selectedConquest.owner === 'player'
+                      ? 'Este hexágono já pertence ao seu território.'
+                      : selectedConquest.isAdjacent
+                        ? selectedConquest.canConquer
+                          ? 'Território neutro adjacente — pronto para conquista.'
+                          : `Dinheiro insuficiente (${formatCash(selectedConquest.cost)} necessários).`
+                        : 'Território distante — conquiste um hexágono vizinho primeiro.'}
+                  </p>
+                </div>
+
+                {selectedConquest.owner === 'neutral' && selectedConquest.isAdjacent && (
+                  <button
+                    type="button"
+                    data-testid="desktop-conquer-button"
+                    onClick={onConfirmSelectedHex}
+                    className={`inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 whitespace-nowrap cursor-pointer ${
+                      selectedConquest.canConquer
+                        ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426] hover:bg-amber-400'
+                        : 'bg-[#efe8d8] text-[#6e604a] border-[#bcae96]'
+                    }`}
+                  >
+                    <Flag className="w-3.5 h-3.5" aria-hidden="true" />
+                    Conquistar ({formatCash(selectedConquest.cost)})
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={onCancelAction}
+                  aria-label="Fechar seleção"
+                  className="w-8 h-8 rounded-lg bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] hover:bg-[#e5dcc7] flex items-center justify-center cursor-pointer"
+                >
+                  <X className="w-4 h-4" aria-hidden="true" />
+                </button>
+              </div>
+            )}
+
             {/* Collapse / Expand Toggle Handle */}
             <button
               type="button"
@@ -798,7 +979,7 @@ const GameHud = memo(function GameHud({
                     <ChevronLeft className="w-4 h-4" aria-hidden="true" />
                   </button>
 
-                  <div className="px-2.5 py-1 rounded-lg bg-white border border-[#d9ceb8] min-w-[175px] max-w-[260px]">
+                  <div className="px-2.5 py-1 rounded-lg bg-white border border-[#d9ceb8] min-w-[165px] max-w-[230px]">
                     <p
                       data-testid="hud-active-piece"
                       className="text-xs font-bold text-[#1f1a12] truncate capitalize"
@@ -835,13 +1016,18 @@ const GameHud = memo(function GameHud({
                     tabIndex={-1}
                     onClick={(e) => {
                       e.currentTarget.blur();
-                      onRotatePiece();
+                      onSetToolMode('expand');
                     }}
-                    title="Girar peça em 60° (Botão direito ou R)"
-                    className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg bg-white border border-[#bcae96] text-xs font-semibold text-[#2a2319] hover:bg-[#f2ebdc] whitespace-nowrap cursor-pointer"
+                    aria-pressed={toolMode === 'expand'}
+                    title="Modo Expandir: clique em hexágonos vizinhos para conquistar"
+                    className={`inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border text-xs font-bold whitespace-nowrap cursor-pointer ${
+                      toolMode === 'expand'
+                        ? 'bg-amber-500 border-[#3c3426] text-[#1f1a12]'
+                        : 'bg-white border-[#bcae96] text-[#2a2319] hover:bg-[#f2ebdc]'
+                    }`}
                   >
-                    <RotateCw className="w-3.5 h-3.5" aria-hidden="true" />
-                    Girar [R]
+                    <Flag className="w-3.5 h-3.5" aria-hidden="true" />
+                    Expandir
                   </button>
 
                   <button
@@ -849,26 +1035,51 @@ const GameHud = memo(function GameHud({
                     tabIndex={-1}
                     onClick={(e) => {
                       e.currentTarget.blur();
-                      onSetToolMode(toolMode === 'build' ? 'demolish' : 'build');
+                      onSetToolMode('build');
                     }}
-                    title="Alternar modo Construir / Demolir (ou tecla DEL)"
+                    aria-pressed={toolMode === 'build'}
+                    title="Modo Construir"
+                    className={`inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border text-xs font-semibold whitespace-nowrap cursor-pointer ${
+                      toolMode === 'build'
+                        ? 'bg-emerald-700 border-emerald-900 text-white'
+                        : 'bg-white border-[#bcae96] text-[#2a2319] hover:bg-[#f2ebdc]'
+                    }`}
+                  >
+                    <Hammer className="w-3.5 h-3.5" aria-hidden="true" />
+                    Construir
+                  </button>
+
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      onSetToolMode('demolish');
+                    }}
+                    aria-pressed={toolMode === 'demolish'}
+                    title="Modo Demolir (ou tecla DEL)"
                     className={`inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border text-xs font-semibold whitespace-nowrap cursor-pointer ${
                       toolMode === 'demolish'
                         ? 'bg-rose-700 border-rose-900 text-white'
-                        : 'bg-emerald-700 border-emerald-900 text-white'
+                        : 'bg-white border-[#bcae96] text-[#2a2319] hover:bg-[#f2ebdc]'
                     }`}
                   >
-                    {toolMode === 'demolish' ? (
-                      <>
-                        <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-                        Demolir
-                      </>
-                    ) : (
-                      <>
-                        <Hammer className="w-3.5 h-3.5" aria-hidden="true" />
-                        Construir
-                      </>
-                    )}
+                    <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                    Demolir
+                  </button>
+
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      onRotatePiece();
+                    }}
+                    title="Girar peça em 60° (Botão direito ou R)"
+                    className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg bg-white border border-[#bcae96] text-xs font-semibold text-[#2a2319] hover:bg-[#f2ebdc] whitespace-nowrap cursor-pointer"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" aria-hidden="true" />
+                    Girar [R]
                   </button>
 
                   <button
@@ -1052,15 +1263,15 @@ const GameHud = memo(function GameHud({
                 </p>
               </div>
               <div className="bg-white border border-[#d9ceb8] rounded-xl p-2.5">
-                <p className="text-[10px] font-bold uppercase text-[#6e604a]">Hexágonos</p>
-                <p className="mt-0.5 font-display text-sm sm:text-base font-bold text-[#1f1a12] tabular-nums">
-                  {tileCount}
+                <p className="text-[10px] font-bold uppercase text-[#6e604a]">Território</p>
+                <p className="mt-0.5 font-display text-sm sm:text-base font-bold text-[#9a6308] tabular-nums">
+                  {territoryCount}
                 </p>
               </div>
               <div className="bg-white border border-[#d9ceb8] rounded-xl p-2.5">
-                <p className="text-[10px] font-bold uppercase text-[#6e604a]">Rotação</p>
+                <p className="text-[10px] font-bold uppercase text-[#6e604a]">Hexágonos</p>
                 <p className="mt-0.5 font-display text-sm sm:text-base font-bold text-[#1f1a12] tabular-nums">
-                  {rotationDeg}°
+                  {tileCount}
                 </p>
               </div>
             </div>

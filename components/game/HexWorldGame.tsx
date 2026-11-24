@@ -16,6 +16,12 @@ import {
   type HexWorldState,
 } from '@/lib/hex-engine';
 import { HEX_ASSETS } from '@/lib/repo-data';
+import {
+  conquerHexInState,
+  countPlayerTerritory,
+  evaluateConquest,
+  getConquestFailureMessage,
+} from '@/lib/territory-engine';
 import { gameAudio } from '@/lib/game-audio';
 import {
   HexSceneController,
@@ -47,7 +53,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   );
   const [selectedIndex, setSelectedIndex] = useState<number>(DEFAULT_HOUSE_INDEX);
   const [rotationDeg, setRotationDeg] = useState<number>(DEFAULT_ROTATION_DEG);
-  const [toolMode, setToolMode] = useState<BuilderToolMode>('build');
+  const [toolMode, setToolMode] = useState<BuilderToolMode>('expand');
   const [hoveredCoord, setHoveredCoord] = useState<AxialCoord | null>(null);
   const [selectedHex, setSelectedHex] = useState<AxialCoord | null>(null);
   const [muted, setMuted] = useState<boolean>(false);
@@ -136,18 +142,58 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     controllerRef.current?.syncWorldState(nextState, [hexKey(q, r)]);
   }, []);
 
+  const handleConquerAt = useCallback(
+    (q: number, r: number) => {
+      const result = conquerHexInState(worldStateRef.current, q, r, HEX_ASSETS);
+      if (!result.conquered) {
+        gameAudio.playError();
+        if (result.reason) {
+          showToast(getConquestFailureMessage(result.reason, result.cost));
+        }
+        return;
+      }
+
+      worldStateRef.current = result.nextState;
+      setWorldState(result.nextState);
+      setSelectedHexSynced(null);
+      gameAudio.playConquest();
+      controllerRef.current?.syncWorldState(
+        result.nextState,
+        undefined,
+        [hexKey(q, r)]
+      );
+    },
+    [setSelectedHexSynced, showToast]
+  );
+
+  /**
+   * Selection handler shared by desktop clicks in Expand mode and touch taps.
+   */
+  const handleSelectHexAt = useCallback(
+    (q: number, r: number) => {
+      setSelectedHexSynced({ q, r });
+      gameAudio.playCycle();
+    },
+    [setSelectedHexSynced]
+  );
+
   /**
    * Touch-first tap workflow:
    * - If the mobile build sheet is open, tapping the map dismisses it cleanly.
+   * - In Expand mode: tapping any hex selects it and shows conquest status + "Conquistar" button.
    * - In Demolish mode: tapping an occupied hex demolishes it; tapping empty clears selection.
-   * - In Build mode: first tap selects/previews the hex with floating 3D piece + contextual Confirm/Rotate/Cancel bar;
-   *   tapping the SAME selected hex a second time confirms & places immediately!
+   * - In Build mode: first tap selects/previews the hex; tapping the same hex again builds immediately.
    */
   const handleTouchTapAt = useCallback(
     (q: number, r: number) => {
       if (buildSheetOpenRef.current) {
         buildSheetOpenRef.current = false;
         setBuildSheetOpen(false);
+        return;
+      }
+
+      if (toolModeRef.current === 'expand') {
+        handleSelectHexAt(q, r);
         return;
       }
 
@@ -169,19 +215,21 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setSelectedHexSynced({ q, r });
       gameAudio.playCycle();
     },
-    [handleDemolishAt, handlePlaceAt, setSelectedHexSynced]
+    [handleDemolishAt, handlePlaceAt, handleSelectHexAt, setSelectedHexSynced]
   );
 
   const handleConfirmSelectedHex = useCallback(() => {
     const coord = selectedHexRef.current;
     if (!coord) return;
-    if (toolModeRef.current === 'demolish') {
+    if (toolModeRef.current === 'expand') {
+      handleConquerAt(coord.q, coord.r);
+    } else if (toolModeRef.current === 'demolish') {
       handleDemolishAt(coord.q, coord.r);
       setSelectedHexSynced(null);
     } else {
       handlePlaceAt(coord.q, coord.r);
     }
-  }, [handleDemolishAt, handlePlaceAt, setSelectedHexSynced]);
+  }, [handleConquerAt, handleDemolishAt, handlePlaceAt, setSelectedHexSynced]);
 
   const handleDemolishSelectedHex = useCallback(() => {
     const coord = selectedHexRef.current;
@@ -201,9 +249,9 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       didCancel = true;
     }
     if (toolModeRef.current === 'demolish') {
-      toolModeRef.current = 'build';
-      setToolMode('build');
-      controllerRef.current?.setToolMode('build');
+      toolModeRef.current = 'expand';
+      setToolMode('expand');
+      controllerRef.current?.setToolMode('expand');
       didCancel = true;
     }
     if (didCancel) {
@@ -382,6 +430,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       onPlaceAt: handlePlaceAt,
       onDemolishAt: handleDemolishAt,
       onTouchTapAt: handleTouchTapAt,
+      onSelectHexAt: handleSelectHexAt,
       onRotate: handleRotatePiece,
       onCycleStructure: handleCyclePiece,
       onLoadProgress: () => {},
@@ -389,6 +438,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
 
     controllerRef.current = controller;
     controller.setGameState(gameStateRef.current);
+    controller.setToolMode(toolModeRef.current);
     controller.setSelectedPiece(selectedIndexRef.current, rotationDegRef.current);
     controller.syncWorldState(worldStateRef.current);
 
@@ -403,6 +453,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     handlePlaceAt,
     handleDemolishAt,
     handleTouchTapAt,
+    handleSelectHexAt,
     handleRotatePiece,
     handleCyclePiece,
   ]);
@@ -490,12 +541,22 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     [worldState.hexes]
   );
 
+  const territoryCount = useMemo(
+    () => countPlayerTerritory(worldState),
+    [worldState]
+  );
+
   const selectedTileAssetName = useMemo(() => {
     if (!selectedHex) return null;
     const existing = worldState.hexes[hexKey(selectedHex.q, selectedHex.r)];
     if (!existing) return null;
     return HEX_ASSETS[existing.structureIndex]?.name ?? null;
   }, [selectedHex, worldState.hexes]);
+
+  const selectedConquest = useMemo(() => {
+    if (!selectedHex) return null;
+    return evaluateConquest(worldState, selectedHex.q, selectedHex.r, HEX_ASSETS);
+  }, [selectedHex, worldState]);
 
   return (
     <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-[#9bd2ee] hex-game-viewport">
@@ -510,6 +571,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       <GameHud
         gameState={gameState}
         cash={worldState.cash}
+        territoryCount={territoryCount}
         tileCount={tileCount}
         selectedIndex={selectedIndex}
         rotationDeg={rotationDeg}
@@ -517,6 +579,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         hoveredCoord={hoveredCoord}
         selectedHex={selectedHex}
         selectedTileAssetName={selectedTileAssetName}
+        selectedConquest={selectedConquest}
         assets={HEX_ASSETS}
         muted={muted}
         dockOpen={dockOpen}

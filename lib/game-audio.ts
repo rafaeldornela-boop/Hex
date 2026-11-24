@@ -141,6 +141,46 @@ class HexGameAudio {
       osc.stop(t + 0.19);
     });
   }
+
+  playConquest() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const notes = [392.0, 523.25, 659.25];
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      const t = now + idx * 0.065;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.11, t + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.26);
+    });
+  }
+
+  playError() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(210, now);
+    osc.frequency.exponentialRampToValueAtTime(145, now + 0.12);
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.09, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.14);
+  }
 }
 
 export const gameAudio = new HexGameAudio();
+
