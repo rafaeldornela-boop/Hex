@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   BookOpen,
@@ -10,6 +11,7 @@ import {
   FileText,
   Layers,
   Menu,
+  Play,
   X,
 } from 'lucide-react';
 import OverviewSetupView from './OverviewSetupView';
@@ -122,9 +124,18 @@ export default function WorkspaceShell() {
           })}
         </nav>
 
-        <div className="mx-3 mt-4 pt-4 border-t border-slate-200 px-3 text-xs text-slate-500 space-y-1">
-          <p className="font-medium text-slate-700">Godot 4.2 · Forward Plus</p>
-          <p className="font-mono text-[11px] truncate">res://scenes/main.tscn</p>
+        <div className="mx-3 mt-4 pt-4 border-t border-slate-200 px-1 space-y-3">
+          <Link
+            href="/"
+            className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 transition-colors whitespace-nowrap"
+          >
+            <Play className="w-3.5 h-3.5 fill-current" aria-hidden="true" />
+            Jogar Hexagon World 3D
+          </Link>
+          <div className="px-2 text-xs text-slate-500 space-y-1">
+            <p className="font-medium text-slate-700">Godot 4.2 · Forward Plus</p>
+            <p className="font-mono text-[11px] truncate">res://scenes/main.tscn</p>
+          </div>
         </div>
       </aside>
 
