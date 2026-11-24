@@ -1080,11 +1080,14 @@ export class HexSceneController {
       this.selectorRingMat.color.setHex(0xdc2626);
     } else {
       const existing = this.currentWorldState.hexes[hexKey(activeCoord.q, activeCoord.r)];
+      const ownedByPlayer = existing?.owner === 'player';
       const terrainInfo = getHexTerrainAndResource(activeCoord.q, activeCoord.r, existing);
       const activeAsset = HEX_ASSETS[this.currentPreviewIndex];
-      const allowed =
+      const terrainAllowed =
         !activeAsset || canBuildStructureOnTerrain(activeAsset, terrainInfo.terrainType);
-      this.selectorRingMat.color.setHex(allowed ? 0x059669 : 0xdc2626);
+      this.selectorRingMat.color.setHex(
+        ownedByPlayer && terrainAllowed ? 0x059669 : 0xdc2626
+      );
     }
   }
 
@@ -1316,7 +1319,10 @@ export class HexSceneController {
             this.popAnims.push({ mesh: entry.group, progress: 0 });
           }
         }
-        const nextOwner: HexOwner = target.owner === 'player' ? 'player' : 'neutral';
+        const nextOwner: HexOwner =
+          typeof target.owner === 'string' && target.owner.trim().length > 0
+            ? target.owner.trim()
+            : 'neutral';
         if (nextOwner !== entry.owner) {
           entry.owner = nextOwner;
           this.applyOwnerMaterials(entry.group, nextOwner);
@@ -1371,7 +1377,10 @@ export class HexSceneController {
       const template = this.modelCache.get(asset.name);
       if (!template) continue;
 
-      const owner: HexOwner = liveTile.owner === 'player' ? 'player' : 'neutral';
+      const owner: HexOwner =
+        typeof liveTile.owner === 'string' && liveTile.owner.trim().length > 0
+          ? liveTile.owner.trim()
+          : 'neutral';
       const group = new THREE.Group();
       const clone = template.clone(true);
       this.applyOwnerMaterials(clone, owner);

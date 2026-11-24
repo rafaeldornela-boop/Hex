@@ -23,13 +23,15 @@ export interface AxialCoord {
   r: number;
 }
 
+export type HexOwner = 'player' | 'neutral' | (string & {});
+
 export interface PlacedHex {
   q: number;
   r: number;
   orientation: number; // degrees: 90, 150, 210, 270, 330, 30
   structureIndex: number;
-  /** Territorial ownership ('player' or 'neutral') */
-  owner?: 'player' | 'neutral';
+  /** Territorial ownership ('player', 'neutral', or future faction ID) */
+  owner?: HexOwner;
   /** Persistent terrain biome & basic resource data */
   terrainType?: TerrainType;
   resourceType?: ResourceType;
@@ -118,18 +120,34 @@ export function placeHexInState(
   r: number,
   structureIndex: number,
   orientation: number,
-  assets: HexAssetEntry[]
+  assets: HexAssetEntry[],
+  actorId: HexOwner = 'player'
 ): {
   nextState: HexWorldState;
   changed: boolean;
   spent: number;
-  blockedReason?: 'incompatible_terrain';
+  blockedReason?: 'not_owned' | 'incompatible_terrain';
 } {
   const key = hexKey(q, r);
   const previous = state.hexes[key];
   const asset = assets[structureIndex];
   if (!asset) {
     return { nextState: state, changed: false, spent: 0 };
+  }
+
+  const currentOwner: HexOwner =
+    typeof previous?.owner === 'string' && previous.owner.trim().length > 0
+      ? previous.owner.trim()
+      : 'neutral';
+
+  // Enforce territorial ownership inside pure game logic before terrain or cash checks
+  if (currentOwner !== actorId) {
+    return {
+      nextState: state,
+      changed: false,
+      spent: 0,
+      blockedReason: 'not_owned',
+    };
   }
 
   const terrainInfo = getHexTerrainAndResource(q, r, previous);
@@ -167,7 +185,7 @@ export function placeHexInState(
       r,
       orientation,
       structureIndex,
-      owner: previous?.owner ?? 'neutral',
+      owner: currentOwner,
       terrainType: terrainInfo.terrainType,
       resourceType: terrainInfo.resourceType,
       resourceAmount: terrainInfo.resourceAmount,
@@ -240,6 +258,10 @@ export function deserializeWorldState(
           const q = Math.round((item as PlacedHex).q);
           const r = Math.round((item as PlacedHex).r);
           const rawOwner = (item as PlacedHex).owner;
+          const owner: HexOwner =
+            typeof rawOwner === 'string' && rawOwner.trim().length > 0
+              ? rawOwner.trim()
+              : 'neutral';
           const rawMeta = (item as PlacedHex).meta;
           const terrainInfo = getHexTerrainAndResource(q, r, item as PlacedHex);
           const tile: PlacedHex = {
@@ -247,7 +269,7 @@ export function deserializeWorldState(
             r,
             orientation: ((item as PlacedHex).orientation % 360 + 360) % 360,
             structureIndex: idx,
-            owner: rawOwner === 'player' ? 'player' : 'neutral',
+            owner,
             terrainType: terrainInfo.terrainType,
             resourceType: terrainInfo.resourceType,
             resourceAmount: terrainInfo.resourceAmount,

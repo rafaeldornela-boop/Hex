@@ -116,26 +116,29 @@ test('building terrain restrictions block incompatible placements and preserve t
   assert.equal(canBuildStructureOnTerrain('building-house', 'plains'), true);
   assert.equal(canBuildStructureOnTerrain('building-house', 'forest'), true);
 
-  // State enforcement: starter (0,2) is mountain, (1,1) is forest, (2,-2) is fertile
+  // State enforcement: conquer ring-2 tiles first so ownership check passes and terrain checks apply
   let state = createStarterWorldState(HEX_ASSETS);
+  state = conquerHexInState(state, 1, 1, HEX_ASSETS).nextState; // forest
+  state = conquerHexInState(state, 0, 2, HEX_ASSETS).nextState; // mountain
+  state = conquerHexInState(state, 2, -1, HEX_ASSETS).nextState; // bridge to (2,-2)
+  state = conquerHexInState(state, 2, -2, HEX_ASSETS).nextState; // fertile
 
-  // Try building Farm on Forest (1,1) -> must block
+  // Try building Farm on owned Forest (1,1) -> must block for incompatible terrain
   const farmOnForest = placeHexInState(state, 1, 1, farmIdx, DEFAULT_ROTATION_DEG, HEX_ASSETS);
   assert.equal(farmOnForest.changed, false);
   assert.equal(farmOnForest.blockedReason, 'incompatible_terrain');
 
-  // Try building Mine on Fertile (2,-2) -> must block
+  // Try building Mine on owned Fertile (2,-2) -> must block for incompatible terrain
   const mineOnFertile = placeHexInState(state, 2, -2, mineIdx, DEFAULT_ROTATION_DEG, HEX_ASSETS);
   assert.equal(mineOnFertile.changed, false);
   assert.equal(mineOnFertile.blockedReason, 'incompatible_terrain');
 
-  // Try building Lumber (Serraria) on Mountain (0,2) -> must block
+  // Try building Lumber (Serraria) on owned Mountain (0,2) -> must block for incompatible terrain
   const lumberOnMountain = placeHexInState(state, 0, 2, lumberIdx, DEFAULT_ROTATION_DEG, HEX_ASSETS);
   assert.equal(lumberOnMountain.changed, false);
   assert.equal(lumberOnMountain.blockedReason, 'incompatible_terrain');
 
   // Valid placements succeed and preserve underlying terrain/resource/owner
-  state = conquerHexInState(state, 0, 2, HEX_ASSETS).nextState;
   const mineOnMountain = placeHexInState(state, 0, 2, mineIdx, DEFAULT_ROTATION_DEG, HEX_ASSETS);
   assert.equal(mineOnMountain.changed, true);
   assert.equal(mineOnMountain.blockedReason, undefined);

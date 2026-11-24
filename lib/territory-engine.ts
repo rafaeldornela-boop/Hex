@@ -3,6 +3,7 @@ import {
   DEFAULT_ROTATION_DEG,
   hexKey,
   type AxialCoord,
+  type HexOwner,
   type HexWorldState,
   type PlacedHex,
 } from './hex-engine';
@@ -11,9 +12,11 @@ import {
   getHexTerrainAndResource,
 } from './terrain-engine';
 
-export type HexOwner = 'player' | 'neutral';
+export type { HexOwner } from './hex-engine';
 
 export const DEFAULT_CONQUEST_COST = 500;
+export const NOT_OWNED_BUILD_MESSAGE =
+  'Conquiste este território antes de construir.';
 
 /**
  * Axial neighbor offsets matching flat-topped hexes in `axialToWorld(q, r)`.
@@ -61,8 +64,28 @@ export function getHexOwner(
   q: number,
   r: number
 ): HexOwner {
-  const tile = state.hexes[hexKey(q, r)];
-  return tile?.owner === 'player' ? 'player' : 'neutral';
+  const raw = state.hexes[hexKey(q, r)]?.owner;
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : 'neutral';
+}
+
+export function isHexOwnedBy(
+  tile: Pick<PlacedHex, 'owner'> | null | undefined,
+  actorId: HexOwner = 'player'
+): boolean {
+  const owner: HexOwner =
+    typeof tile?.owner === 'string' && tile.owner.trim().length > 0
+      ? tile.owner.trim()
+      : 'neutral';
+  return owner === actorId;
+}
+
+export function canBuildInTerritory(
+  state: HexWorldState,
+  q: number,
+  r: number,
+  actorId: HexOwner = 'player'
+): boolean {
+  return isHexOwnedBy(state.hexes[hexKey(q, r)], actorId);
 }
 
 export function countPlayerTerritory(state: HexWorldState): number {
@@ -129,7 +152,7 @@ export function evaluateConquest(
 ): ConquestCheckResult {
   const key = hexKey(q, r);
   const existingTile = state.hexes[key] ?? null;
-  const owner: HexOwner = existingTile?.owner === 'player' ? 'player' : 'neutral';
+  const owner: HexOwner = getHexOwner(state, q, r);
   const cost = calculateConquestCost({ q, r }, existingTile, assets);
 
   if (owner === 'player') {

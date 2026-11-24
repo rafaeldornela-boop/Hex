@@ -51,13 +51,10 @@ export interface GameHudProps {
   cash: number;
   territoryCount: number;
   playerResources: PlayerResourceSummary;
-  tileCount: number;
   selectedIndex: number;
-  rotationDeg: number;
   toolMode: BuilderToolMode;
-  hoveredCoord: AxialCoord | null;
-  hoveredTerrainInfo: TerrainDescriptor | null;
   selectedHex: AxialCoord | null;
+  selectedHexOwned: boolean;
   selectedTileAssetName: string | null;
   selectedConquest: ConquestCheckResult | null;
   selectedTerrainInfo: TerrainDescriptor | null;
@@ -98,7 +95,7 @@ const PALETTE_GROUPS = [
   { id: 'path', label: 'Caminhos' },
   { id: 'river', label: 'Rios' },
   { id: 'unit', label: 'Unidades' },
-  { id: 'all', label: 'Todos (72)' },
+  { id: 'all', label: 'Todos' },
 ] as const;
 
 type PaletteGroupId = (typeof PALETTE_GROUPS)[number]['id'];
@@ -114,13 +111,10 @@ const GameHud = memo(function GameHud({
   cash,
   territoryCount,
   playerResources,
-  tileCount,
   selectedIndex,
-  rotationDeg,
   toolMode,
-  hoveredCoord,
-  hoveredTerrainInfo,
   selectedHex,
+  selectedHexOwned,
   selectedTileAssetName,
   selectedConquest,
   selectedTerrainInfo,
@@ -235,7 +229,7 @@ const GameHud = memo(function GameHud({
                     Hexagon World
                   </h1>
                   <p className="mt-1.5 text-xs font-medium text-[#5c5140]">
-                    Construtor 3D · 72 peças originais
+                    Expansão Territorial e Construção 3D
                   </p>
                 </div>
               </div>
@@ -270,7 +264,7 @@ const GameHud = memo(function GameHud({
               Arraste para mover · Pinça para zoom · Toque em hexágonos vizinhos para conquistar
             </p>
             <p className="hidden md:inline-block text-xs font-semibold text-[#1f2933] drop-shadow-[0_1px_0_rgba(255,255,255,0.85)]">
-              Clique em hexágonos vizinhos para Conquistar · Alterne para Construir (Q/E/R) ou Demolir (DEL) · WASD Mover · F1 / F2 Salvar
+              Clique em hexágonos vizinhos para conquistar · Use Construir para erguer edifícios · Arraste ou use WASD para mover
             </p>
           </div>
         </div>
@@ -306,7 +300,7 @@ const GameHud = memo(function GameHud({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-1.5 sm:gap-2 md:pr-3 md:border-r md:border-[#d9ceb8]">
+                <div className="flex items-center gap-1.5 sm:gap-2">
                   <Flag className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-700 shrink-0" aria-hidden="true" />
                   <div>
                     <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
@@ -319,32 +313,6 @@ const GameHud = memo(function GameHud({
                       {territoryCount}
                     </p>
                   </div>
-                </div>
-
-                {/* Desktop-only total hex count & live hover coordinate + terrain */}
-                <div className="hidden md:block pr-3 border-r border-[#d9ceb8]">
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
-                    Hexágonos
-                  </p>
-                  <p
-                    data-testid="hud-tiles"
-                    className="font-display text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
-                  >
-                    {tileCount}
-                  </p>
-                </div>
-
-                <div className="hidden md:block">
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
-                    Cursor
-                  </p>
-                  <p className="font-mono text-xs font-semibold text-[#2a2319] tabular-nums leading-tight mt-0.5 whitespace-nowrap">
-                    {hoveredCoord
-                      ? `q:${hoveredCoord.q} r:${hoveredCoord.r}${
-                          hoveredTerrainInfo ? ` · ${hoveredTerrainInfo.labelPt}` : ''
-                        }`
-                      : '—'}
-                  </p>
                 </div>
               </div>
 
@@ -595,11 +563,13 @@ const GameHud = memo(function GameHud({
                         <p className="text-[11px] font-medium text-[#5c5140] mt-0.5">
                           {selectedConquest.owner === 'player'
                             ? 'Seu território'
-                            : selectedConquest.isAdjacent
-                              ? selectedConquest.canConquer
-                                ? 'Território neutro · Adjacente'
-                                : `Adjacente · Saldo insuficiente (${formatCash(selectedConquest.cost)})`
-                              : 'Distante · Conquiste um vizinho primeiro'}
+                            : selectedConquest.owner !== 'neutral'
+                              ? 'Território de outro proprietário'
+                              : selectedConquest.isAdjacent
+                                ? selectedConquest.canConquer
+                                  ? 'Território neutro · Adjacente'
+                                  : `Adjacente · Saldo insuficiente (${formatCash(selectedConquest.cost)})`
+                                : 'Distante · Conquiste um vizinho primeiro'}
                         </p>
                       </div>
 
@@ -623,6 +593,11 @@ const GameHud = memo(function GameHud({
                           <Hammer className="w-4 h-4 shrink-0" aria-hidden="true" />
                           Construir aqui
                         </button>
+                      ) : selectedConquest.owner !== 'neutral' ? (
+                        <div className="flex-1 min-h-[46px] px-3 rounded-xl bg-[#efe8d8] text-[#5c5140] font-display text-xs font-semibold border-2 border-[#c8ba9f] flex items-center justify-center gap-1.5">
+                          <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          Território de outro proprietário
+                        </div>
                       ) : selectedConquest.isAdjacent ? (
                         <button
                           type="button"
@@ -669,16 +644,22 @@ const GameHud = memo(function GameHud({
                             {selectedTerrainInfo.resourceLabelPt}
                           </p>
                         )}
-                        <p className="font-mono text-[10px] text-[#6e604a] tabular-nums">
-                          peça:{' '}
-                          <span className="capitalize font-sans font-semibold text-[#2a2319]">
-                            {activePieceLabel}
-                          </span>
-                          {activeAsset.price > 0 ? ` ($${activeAsset.price})` : ''}
-                          {!canBuildActiveOnSelected && activePieceInfo.requiredTerrain
-                            ? ` · Requer ${TERRAIN_METADATA[activePieceInfo.requiredTerrain].labelPt}`
-                            : ''}
-                        </p>
+                        {!selectedHexOwned ? (
+                          <p className="text-[11px] font-semibold text-rose-700 mt-0.5">
+                            Conquiste este território antes de construir.
+                          </p>
+                        ) : !canBuildActiveOnSelected && activePieceInfo.requiredTerrain ? (
+                          <p className="text-[11px] font-semibold text-rose-700 mt-0.5">
+                            Requer terreno: {TERRAIN_METADATA[activePieceInfo.requiredTerrain].labelPt}
+                          </p>
+                        ) : (
+                          <p className="text-[11px] font-medium text-[#5c5140] mt-0.5">
+                            <span className="capitalize font-semibold text-[#2a2319]">
+                              {activePieceLabel}
+                            </span>
+                            {activeAsset.price > 0 ? ` · ${formatCash(activeAsset.price)}` : ''}
+                          </p>
+                        )}
                       </div>
 
                       <button
@@ -697,14 +678,24 @@ const GameHud = memo(function GameHud({
                         data-testid="mobile-confirm-build"
                         onClick={onConfirmSelectedHex}
                         className={`flex-1 min-h-[44px] px-3 rounded-xl font-display text-xs font-bold border-2 active:translate-y-0.5 flex items-center justify-center gap-1.5 cursor-pointer ${
-                          canBuildActiveOnSelected
+                          selectedHexOwned && canBuildActiveOnSelected
                             ? 'bg-emerald-700 text-white border-[#1e2d24] shadow-[0_2px_0_#1e2d24]'
                             : 'bg-rose-100 text-rose-900 border-rose-400'
                         }`}
                       >
-                        <Check className="w-4 h-4 shrink-0" aria-hidden="true" />
-                        {selectedTileAssetName ? 'Substituir' : 'Construir'}
-                        {activeAsset.price > 0 ? ` ($${activeAsset.price})` : ''}
+                        {!selectedHexOwned ? (
+                          <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
+                        ) : (
+                          <Check className="w-4 h-4 shrink-0" aria-hidden="true" />
+                        )}
+                        {!selectedHexOwned
+                          ? 'Conquiste antes'
+                          : selectedTileAssetName
+                            ? 'Substituir'
+                            : 'Construir'}
+                        {selectedHexOwned && activeAsset.price > 0
+                          ? ` (${formatCash(activeAsset.price)})`
+                          : ''}
                       </button>
 
                       <button
@@ -714,7 +705,7 @@ const GameHud = memo(function GameHud({
                         className="min-w-[44px] min-h-[44px] px-3 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] text-xs font-bold flex items-center justify-center gap-1 cursor-pointer"
                       >
                         <RotateCw className="w-4 h-4" aria-hidden="true" />
-                        <span className="font-mono text-[11px]">{rotationDeg}°</span>
+                        <span>Girar</span>
                       </button>
 
                       {selectedTileAssetName && (
@@ -823,12 +814,12 @@ const GameHud = memo(function GameHud({
                     type="button"
                     data-testid="mobile-rotate-button"
                     onClick={onRotatePiece}
-                    aria-label="Girar peça 60 graus"
+                    aria-label="Girar peça"
                     className="min-w-[64px] min-h-[52px] px-2 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
                   >
                     <RotateCw className="w-4 h-4" aria-hidden="true" />
-                    <span className="font-mono text-[10px] font-bold leading-none">
-                      {rotationDeg}°
+                    <span className="text-[10px] font-bold leading-none">
+                      Girar
                     </span>
                   </button>
                 ) : (
@@ -871,11 +862,11 @@ const GameHud = memo(function GameHud({
                 <div className="pt-2.5 pb-2 px-1 flex items-center justify-between gap-2 border-b border-[#e0d6c3]">
                   <div className="min-w-0">
                     <p className="font-display text-sm font-bold text-[#1f1a12]">
-                      Escolher Peça ({visiblePieces.length})
+                      Escolher Construção
                     </p>
                     <p className="text-[11px] text-[#5c5140] truncate">
-                      Ativa: <span className="capitalize font-semibold">{activePieceLabel}</span>
-                      {activeAsset.price > 0 ? ` · $${activeAsset.price}` : ''}
+                      <span className="capitalize font-semibold">{activePieceLabel}</span>
+                      {activeAsset.price > 0 ? ` · ${formatCash(activeAsset.price)}` : ' · Grátis'}
                     </p>
                   </div>
 
@@ -937,13 +928,15 @@ const GameHud = memo(function GameHud({
                             {label}
                           </span>
                           <span
-                            className={`mt-1 block font-mono text-[10px] tabular-nums truncate ${
+                            className={`mt-1 block text-[10px] font-medium tabular-nums truncate ${
                               isSelected ? 'text-emerald-100' : 'text-[#6e604a]'
                             }`}
                           >
                             {info.requiredTerrain
                               ? `Só ${TERRAIN_METADATA[info.requiredTerrain].labelPt}`
-                              : `#${index + 1} ${asset.price > 0 ? `· $${asset.price}` : '· Grátis'}`}
+                              : asset.price > 0
+                                ? formatCash(asset.price)
+                                : 'Grátis'}
                           </span>
                         </button>
                       );
@@ -981,9 +974,6 @@ const GameHud = memo(function GameHud({
                           formatHexDisplayName(selectedTileAssetName)
                         : 'Território livre'}
                     </p>
-                    <span className="font-mono text-[10px] text-[#6e604a]">
-                      (q:{selectedHex.q} r:{selectedHex.r})
-                    </span>
                   </div>
                   {selectedTerrainInfo && (
                     <p
@@ -997,11 +987,13 @@ const GameHud = memo(function GameHud({
                   <p className="text-[11px] text-[#5c5140] mt-0.5">
                     {selectedConquest.owner === 'player'
                       ? 'Este hexágono já pertence ao seu território.'
-                      : selectedConquest.isAdjacent
-                        ? selectedConquest.canConquer
-                          ? 'Território neutro adjacente — pronto para conquista.'
-                          : `Dinheiro insuficiente (${formatCash(selectedConquest.cost)} necessários).`
-                        : 'Território distante — conquiste um hexágono vizinho primeiro.'}
+                      : selectedConquest.owner !== 'neutral'
+                        ? 'Este território pertence a outro proprietário.'
+                        : selectedConquest.isAdjacent
+                          ? selectedConquest.canConquer
+                            ? 'Território neutro adjacente — pronto para conquista.'
+                            : `Dinheiro insuficiente (${formatCash(selectedConquest.cost)} necessários).`
+                          : 'Território distante — conquiste um hexágono vizinho primeiro.'}
                   </p>
                 </div>
 
@@ -1036,6 +1028,7 @@ const GameHud = memo(function GameHud({
             <button
               type="button"
               tabIndex={-1}
+              title="Alternar painel de construção (H)"
               onClick={(e) => {
                 e.currentTarget.blur();
                 onToggleDock();
@@ -1045,12 +1038,12 @@ const GameHud = memo(function GameHud({
               {dockOpen ? (
                 <>
                   <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
-                  Ocultar Peças [H]
+                  Ocultar Peças
                 </>
               ) : (
                 <>
                   <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
-                  Mostrar Peças [H]
+                  Mostrar Peças
                 </>
               )}
             </button>
@@ -1078,13 +1071,16 @@ const GameHud = memo(function GameHud({
                       data-testid="hud-active-piece"
                       className="text-xs font-bold text-[#1f1a12] truncate capitalize"
                     >
-                      #{selectedIndex + 1} {activePieceLabel}
+                      {activePieceLabel}
                     </p>
                     <p
                       data-testid="hud-orientation"
-                      className="font-mono text-[10px] text-[#6e604a] tabular-nums"
+                      className="text-[10px] font-medium text-[#6e604a] tabular-nums"
                     >
-                      {rotationDeg}° · ${activeAsset.price} · {activeAsset.category}
+                      {activeAsset.price > 0 ? formatCash(activeAsset.price) : 'Grátis'}
+                      {activePieceInfo.requiredTerrain
+                        ? ` · Só ${TERRAIN_METADATA[activePieceInfo.requiredTerrain].labelPt}`
+                        : ''}
                     </p>
                   </div>
 
@@ -1173,7 +1169,7 @@ const GameHud = memo(function GameHud({
                     className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg bg-white border border-[#bcae96] text-xs font-semibold text-[#2a2319] hover:bg-[#f2ebdc] whitespace-nowrap cursor-pointer"
                   >
                     <RotateCw className="w-3.5 h-3.5" aria-hidden="true" />
-                    Girar [R]
+                    Girar
                   </button>
 
                   <button
@@ -1301,13 +1297,15 @@ const GameHud = memo(function GameHud({
                             {label}
                           </span>
                           <span
-                            className={`block font-mono text-[10px] tabular-nums ${
+                            className={`block text-[10px] font-medium tabular-nums ${
                               isSelected ? 'text-emerald-100' : 'text-[#6e604a]'
                             }`}
                           >
                             {info.requiredTerrain
                               ? `Só ${TERRAIN_METADATA[info.requiredTerrain].labelPt}`
-                              : `#${index + 1} ${asset.price > 0 ? `· $${asset.price}` : ''}`}
+                              : asset.price > 0
+                                ? formatCash(asset.price)
+                                : 'Grátis'}
                           </span>
                         </button>
                       );
@@ -1354,7 +1352,7 @@ const GameHud = memo(function GameHud({
               </button>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <div className="bg-white border border-[#d9ceb8] rounded-xl p-2.5">
                 <p className="text-[10px] font-bold uppercase text-[#6e604a]">Saldo</p>
                 <p className="mt-0.5 font-display text-sm sm:text-base font-bold text-[#1f1a12] tabular-nums truncate">
@@ -1365,12 +1363,6 @@ const GameHud = memo(function GameHud({
                 <p className="text-[10px] font-bold uppercase text-[#6e604a]">Território</p>
                 <p className="mt-0.5 font-display text-sm sm:text-base font-bold text-[#9a6308] tabular-nums">
                   {territoryCount}
-                </p>
-              </div>
-              <div className="bg-white border border-[#d9ceb8] rounded-xl p-2.5">
-                <p className="text-[10px] font-bold uppercase text-[#6e604a]">Hexágonos</p>
-                <p className="mt-0.5 font-display text-sm sm:text-base font-bold text-[#1f1a12] tabular-nums">
-                  {tileCount}
                 </p>
               </div>
             </div>

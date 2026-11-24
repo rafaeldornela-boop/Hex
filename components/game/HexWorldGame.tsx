@@ -17,10 +17,12 @@ import {
 } from '@/lib/hex-engine';
 import { HEX_ASSETS } from '@/lib/repo-data';
 import {
+  NOT_OWNED_BUILD_MESSAGE,
   conquerHexInState,
   countPlayerTerritory,
   evaluateConquest,
   getConquestFailureMessage,
+  getHexOwner,
 } from '@/lib/territory-engine';
 import {
   INCOMPATIBLE_TERRAIN_MESSAGE,
@@ -61,7 +63,6 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   const [selectedIndex, setSelectedIndex] = useState<number>(DEFAULT_HOUSE_INDEX);
   const [rotationDeg, setRotationDeg] = useState<number>(DEFAULT_ROTATION_DEG);
   const [toolMode, setToolMode] = useState<BuilderToolMode>('expand');
-  const [hoveredCoord, setHoveredCoord] = useState<AxialCoord | null>(null);
   const [selectedHex, setSelectedHex] = useState<AxialCoord | null>(null);
   const [muted, setMuted] = useState<boolean>(false);
   const [dockOpen, setDockOpen] = useState<boolean>(true);
@@ -134,6 +135,11 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         rotationDegRef.current,
         HEX_ASSETS
       );
+      if (blockedReason === 'not_owned') {
+        gameAudio.playError();
+        showToast(NOT_OWNED_BUILD_MESSAGE);
+        return;
+      }
       if (blockedReason === 'incompatible_terrain') {
         gameAudio.playError();
         showToast(INCOMPATIBLE_TERRAIN_MESSAGE);
@@ -338,7 +344,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setSelectedHexSynced(null);
       controllerRef.current?.syncWorldState(loaded);
       gameAudio.playSaveChime();
-      showToast(`Mapa carregado (${Object.keys(loaded.hexes).length} peças)`);
+      showToast('Mapa carregado');
     } catch {
       showToast('Erro ao carregar mapa');
     }
@@ -439,9 +445,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     if (!mountEl) return;
 
     const controller = new HexSceneController(mountEl, {
-      onHoverChange: (coord) => {
-        setHoveredCoord(coord);
-      },
+      onHoverChange: () => {},
       onPlaceAt: handlePlaceAt,
       onDemolishAt: handleDemolishAt,
       onTouchTapAt: handleTouchTapAt,
@@ -551,11 +555,6 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     handleToggleMute,
   ]);
 
-  const tileCount = useMemo(
-    () => Object.keys(worldState.hexes).length,
-    [worldState.hexes]
-  );
-
   const territoryCount = useMemo(
     () => countPlayerTerritory(worldState),
     [worldState]
@@ -573,6 +572,11 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     return HEX_ASSETS[existing.structureIndex]?.name ?? null;
   }, [selectedHex, worldState.hexes]);
 
+  const selectedHexOwned = useMemo(() => {
+    if (!selectedHex) return true;
+    return getHexOwner(worldState, selectedHex.q, selectedHex.r) === 'player';
+  }, [selectedHex, worldState]);
+
   const selectedConquest = useMemo(() => {
     if (!selectedHex) return null;
     return evaluateConquest(worldState, selectedHex.q, selectedHex.r, HEX_ASSETS);
@@ -584,13 +588,6 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     const info = getHexTerrainAndResource(selectedHex.q, selectedHex.r, existing);
     return describeTerrain(info.terrainType);
   }, [selectedHex, worldState.hexes]);
-
-  const hoveredTerrainInfo = useMemo(() => {
-    if (!hoveredCoord) return null;
-    const existing = worldState.hexes[hexKey(hoveredCoord.q, hoveredCoord.r)];
-    const info = getHexTerrainAndResource(hoveredCoord.q, hoveredCoord.r, existing);
-    return describeTerrain(info.terrainType);
-  }, [hoveredCoord, worldState.hexes]);
 
   const canBuildActiveOnSelected = useMemo(() => {
     if (!selectedTerrainInfo) return true;
@@ -614,13 +611,10 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         cash={worldState.cash}
         territoryCount={territoryCount}
         playerResources={playerResources}
-        tileCount={tileCount}
         selectedIndex={selectedIndex}
-        rotationDeg={rotationDeg}
         toolMode={toolMode}
-        hoveredCoord={hoveredCoord}
-        hoveredTerrainInfo={hoveredTerrainInfo}
         selectedHex={selectedHex}
+        selectedHexOwned={selectedHexOwned}
         selectedTileAssetName={selectedTileAssetName}
         selectedConquest={selectedConquest}
         selectedTerrainInfo={selectedTerrainInfo}

@@ -13,7 +13,9 @@ import {
   AXIAL_DIRECTIONS,
   DEFAULT_CONQUEST_COST,
   INITIAL_PLAYER_TERRITORY_COORDS,
+  NOT_OWNED_BUILD_MESSAGE,
   calculateConquestCost,
+  canBuildInTerritory,
   conquerHexInState,
   countPlayerTerritory,
   evaluateConquest,
@@ -162,4 +164,80 @@ test('building on owned hex preserves ownership and serialization round-trips ow
   assert.equal(countPlayerTerritory(restored), 8);
   assert.equal(getHexOwner(restored, 0, 2), 'player');
   assert.equal(getHexOwner(restored, 2, 0), 'neutral');
+});
+
+test('building is restricted strictly to player territory and never deducts cash on neutral or rival tiles', () => {
+  const starter = createStarterWorldState(HEX_ASSETS);
+  const houseIdx = HEX_ASSETS.findIndex((a) => a.name === 'building-house');
+  const paidIdx = HEX_ASSETS.findIndex((a) => a.price > 0);
+  assert.ok(houseIdx >= 0 && paidIdx >= 0);
+  const paidPrice = HEX_ASSETS[paidIdx].price;
+  assert.ok(paidPrice > 0);
+  assert.equal(NOT_OWNED_BUILD_MESSAGE, 'Conquiste este território antes de construir.');
+
+  // 1. Neutral tile (2, 0) -> blocked, cash untouched even for a paid piece
+  assert.equal(canBuildInTerritory(starter, 2, 0, 'player'), false);
+  const neutralAttempt = placeHexInState(starter, 2, 0, paidIdx, 90, HEX_ASSETS);
+  assert.equal(neutralAttempt.changed, false);
+  assert.equal(neutralAttempt.spent, 0);
+  assert.equal(neutralAttempt.blockedReason, 'not_owned');
+  assert.equal(neutralAttempt.nextState.cash, starter.cash);
+
+  // 2. Empty unowned coordinate (5, 5) -> blocked, cash untouched
+  assert.equal(canBuildInTerritory(starter, 5, 5, 'player'), false);
+  const emptyAttempt = placeHexInState(starter, 5, 5, paidIdx, 90, HEX_ASSETS);
+  assert.equal(emptyAttempt.changed, false);
+  assert.equal(emptyAttempt.spent, 0);
+  assert.equal(emptyAttempt.blockedReason, 'not_owned');
+  assert.equal(emptyAttempt.nextState.cash, starter.cash);
+
+  // 3. Rival / another owner faction ('enemy_1') -> blocked for 'player', cash untouched
+  const withRival = {
+    ...starter,
+    hexes: {
+      ...starter.hexes,
+      [hexKey(2, -1)]: {
+        ...starter.hexes[hexKey(2, -1)],
+        owner: 'enemy_1',
+      },
+    },
+  };
+  assert.equal(getHexOwner(withRival, 2, -1), 'enemy_1');
+  assert.equal(canBuildInTerritory(withRival, 2, -1, 'player'), false);
+  const rivalAttempt = placeHexInState(withRival, 2, -1, paidIdx, 90, HEX_ASSETS);
+  assert.equal(rivalAttempt.changed, false);
+  assert.equal(rivalAttempt.spent, 0);
+  assert.equal(rivalAttempt.blockedReason, 'not_owned');
+  assert.equal(rivalAttempt.nextState.cash, withRival.cash);
+
+  // Multi-faction seam: that faction itself could build on its own tile
+  assert.equal(canBuildInTerritory(withRival, 2, -1, 'enemy_1'), true);
+  const rivalSelfBuild = placeHexInState(
+    withRival,
+    2,
+    -1,
+    houseIdx,
+    90,
+    HEX_ASSETS,
+    'enemy_1'
+  );
+  assert.equal(rivalSelfBuild.changed, true);
+  assert.equal(getHexOwner(rivalSelfBuild.nextState, 2, -1), 'enemy_1');
+
+  // 4. Conquering neutral tile (2, 0) enables building on it and deducts paid price
+  const conquered = conquerHexInState(starter, 2, 0, HEX_ASSETS);
+  assert.equal(conquered.conquered, true);
+  assert.equal(canBuildInTerritory(conquered.nextState, 2, 0, 'player'), true);
+  const validBuild = placeHexInState(
+    conquered.nextState,
+    2,
+    0,
+    paidIdx,
+    90,
+    HEX_ASSETS
+  );
+  assert.equal(validBuild.changed, true);
+  assert.equal(validBuild.spent, paidPrice);
+  assert.equal(validBuild.nextState.cash, conquered.nextState.cash - paidPrice);
+  assert.equal(getHexOwner(validBuild.nextState, 2, 0), 'player');
 });
