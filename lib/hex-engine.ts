@@ -1,4 +1,10 @@
 import type { HexAssetEntry } from './godot-docs';
+import {
+  canBuildStructureOnTerrain,
+  getHexTerrainAndResource,
+  type ResourceType,
+  type TerrainType,
+} from './terrain-engine';
 import type { FutureEconomySnapshot, TileDomainMetadata } from './world-domain';
 
 /**
@@ -24,6 +30,10 @@ export interface PlacedHex {
   structureIndex: number;
   /** Territorial ownership ('player' or 'neutral') */
   owner?: 'player' | 'neutral';
+  /** Persistent terrain biome & basic resource data */
+  terrainType?: TerrainType;
+  resourceType?: ResourceType;
+  resourceAmount?: number;
   /** Optional seam for upcoming territory, level, and worker mechanics */
   meta?: TileDomainMetadata;
 }
@@ -109,12 +119,34 @@ export function placeHexInState(
   structureIndex: number,
   orientation: number,
   assets: HexAssetEntry[]
-): { nextState: HexWorldState; changed: boolean; spent: number } {
+): {
+  nextState: HexWorldState;
+  changed: boolean;
+  spent: number;
+  blockedReason?: 'incompatible_terrain';
+} {
   const key = hexKey(q, r);
   const previous = state.hexes[key];
   const asset = assets[structureIndex];
   if (!asset) {
     return { nextState: state, changed: false, spent: 0 };
+  }
+
+  const terrainInfo = getHexTerrainAndResource(q, r, previous);
+
+  // Enforce terrain compatibility only when placing a different structure
+  // (rotating an already-placed tile remains unrestricted).
+  const isDifferentStructure = !previous || previous.structureIndex !== structureIndex;
+  if (
+    isDifferentStructure &&
+    !canBuildStructureOnTerrain(asset, terrainInfo.terrainType)
+  ) {
+    return {
+      nextState: state,
+      changed: false,
+      spent: 0,
+      blockedReason: 'incompatible_terrain',
+    };
   }
 
   const isSameTile =
@@ -126,8 +158,7 @@ export function placeHexInState(
     return { nextState: state, changed: false, spent: 0 };
   }
 
-  const shouldCharge = !previous || previous.structureIndex !== structureIndex;
-  const cost = shouldCharge ? asset.price : 0;
+  const cost = isDifferentStructure ? asset.price : 0;
 
   const nextHexes: Record<string, PlacedHex> = {
     ...state.hexes,
@@ -137,6 +168,9 @@ export function placeHexInState(
       orientation,
       structureIndex,
       owner: previous?.owner ?? 'neutral',
+      terrainType: terrainInfo.terrainType,
+      resourceType: terrainInfo.resourceType,
+      resourceAmount: terrainInfo.resourceAmount,
       ...(previous?.meta ? { meta: previous.meta } : {}),
     },
   };
@@ -207,12 +241,16 @@ export function deserializeWorldState(
           const r = Math.round((item as PlacedHex).r);
           const rawOwner = (item as PlacedHex).owner;
           const rawMeta = (item as PlacedHex).meta;
+          const terrainInfo = getHexTerrainAndResource(q, r, item as PlacedHex);
           const tile: PlacedHex = {
             q,
             r,
             orientation: ((item as PlacedHex).orientation % 360 + 360) % 360,
             structureIndex: idx,
             owner: rawOwner === 'player' ? 'player' : 'neutral',
+            terrainType: terrainInfo.terrainType,
+            resourceType: terrainInfo.resourceType,
+            resourceAmount: terrainInfo.resourceAmount,
           };
           if (rawMeta && typeof rawMeta === 'object') {
             tile.meta = rawMeta;
@@ -257,7 +295,7 @@ const STARTER_ISLAND_BLUEPRINT: StarterTileBlueprint[] = [
   { q: 1, r: 1, name: 'grass-forest', orientation: 90 },
   { q: 2, r: 0, name: 'grass-forest', orientation: 150 },
   { q: 2, r: -1, name: 'building-wizard-tower', orientation: 90 },
-  { q: 2, r: -2, name: 'grass-hill', orientation: 90 },
+  { q: 2, r: -2, name: 'dirt', orientation: 90 },
   { q: 1, r: -2, name: 'building-sheep', orientation: 90 },
   { q: 0, r: -2, name: 'bridge', orientation: 90 },
   { q: -1, r: -1, name: 'grass', orientation: 90 },
@@ -269,7 +307,7 @@ const STARTER_ISLAND_BLUEPRINT: StarterTileBlueprint[] = [
   { q: -1, r: -2, name: 'water', orientation: 90 },
   { q: 0, r: -3, name: 'building-port', orientation: 90 },
   { q: 1, r: -3, name: 'water-island', orientation: 90 },
-  { q: -2, r: -1, name: 'sand', orientation: 90 },
+  { q: -2, r: -1, name: 'dirt', orientation: 90 },
   { q: 2, r: 1, name: 'stone-rocks', orientation: 90 },
   { q: 3, r: -1, name: 'sand-rocks', orientation: 90 },
   { q: -3, r: 1, name: 'water-rocks', orientation: 90 },
@@ -295,12 +333,16 @@ export function createStarterWorldState(assets: HexAssetEntry[]): HexWorldState 
     const idx = indexByName.get(tile.name);
     if (idx !== undefined) {
       const key = hexKey(tile.q, tile.r);
+      const terrainInfo = getHexTerrainAndResource(tile.q, tile.r);
       hexes[key] = {
         q: tile.q,
         r: tile.r,
         orientation: tile.orientation ?? DEFAULT_ROTATION_DEG,
         structureIndex: idx,
         owner: STARTER_PLAYER_KEYS.has(key) ? 'player' : 'neutral',
+        terrainType: terrainInfo.terrainType,
+        resourceType: terrainInfo.resourceType,
+        resourceAmount: terrainInfo.resourceAmount,
       };
     }
   }

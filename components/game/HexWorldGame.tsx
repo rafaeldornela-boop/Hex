@@ -22,6 +22,13 @@ import {
   evaluateConquest,
   getConquestFailureMessage,
 } from '@/lib/territory-engine';
+import {
+  INCOMPATIBLE_TERRAIN_MESSAGE,
+  calculatePlayerResources,
+  canBuildStructureOnTerrain,
+  describeTerrain,
+  getHexTerrainAndResource,
+} from '@/lib/terrain-engine';
 import { gameAudio } from '@/lib/game-audio';
 import {
   HexSceneController,
@@ -117,21 +124,29 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     controllerRef.current?.setSelectedHex(coord);
   }, []);
 
-  const handlePlaceAt = useCallback((q: number, r: number) => {
-    const { nextState, changed } = placeHexInState(
-      worldStateRef.current,
-      q,
-      r,
-      selectedIndexRef.current,
-      rotationDegRef.current,
-      HEX_ASSETS
-    );
-    if (!changed) return;
-    worldStateRef.current = nextState;
-    setWorldState(nextState);
-    gameAudio.playPlace();
-    controllerRef.current?.syncWorldState(nextState, [hexKey(q, r)]);
-  }, []);
+  const handlePlaceAt = useCallback(
+    (q: number, r: number) => {
+      const { nextState, changed, blockedReason } = placeHexInState(
+        worldStateRef.current,
+        q,
+        r,
+        selectedIndexRef.current,
+        rotationDegRef.current,
+        HEX_ASSETS
+      );
+      if (blockedReason === 'incompatible_terrain') {
+        gameAudio.playError();
+        showToast(INCOMPATIBLE_TERRAIN_MESSAGE);
+        return;
+      }
+      if (!changed) return;
+      worldStateRef.current = nextState;
+      setWorldState(nextState);
+      gameAudio.playPlace();
+      controllerRef.current?.syncWorldState(nextState, [hexKey(q, r)]);
+    },
+    [showToast]
+  );
 
   const handleDemolishAt = useCallback((q: number, r: number) => {
     const { nextState, removed } = demolishHexInState(worldStateRef.current, q, r);
@@ -546,6 +561,11 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     [worldState]
   );
 
+  const playerResources = useMemo(
+    () => calculatePlayerResources(worldState),
+    [worldState]
+  );
+
   const selectedTileAssetName = useMemo(() => {
     if (!selectedHex) return null;
     const existing = worldState.hexes[hexKey(selectedHex.q, selectedHex.r)];
@@ -557,6 +577,27 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     if (!selectedHex) return null;
     return evaluateConquest(worldState, selectedHex.q, selectedHex.r, HEX_ASSETS);
   }, [selectedHex, worldState]);
+
+  const selectedTerrainInfo = useMemo(() => {
+    if (!selectedHex) return null;
+    const existing = worldState.hexes[hexKey(selectedHex.q, selectedHex.r)];
+    const info = getHexTerrainAndResource(selectedHex.q, selectedHex.r, existing);
+    return describeTerrain(info.terrainType);
+  }, [selectedHex, worldState.hexes]);
+
+  const hoveredTerrainInfo = useMemo(() => {
+    if (!hoveredCoord) return null;
+    const existing = worldState.hexes[hexKey(hoveredCoord.q, hoveredCoord.r)];
+    const info = getHexTerrainAndResource(hoveredCoord.q, hoveredCoord.r, existing);
+    return describeTerrain(info.terrainType);
+  }, [hoveredCoord, worldState.hexes]);
+
+  const canBuildActiveOnSelected = useMemo(() => {
+    if (!selectedTerrainInfo) return true;
+    const asset = HEX_ASSETS[selectedIndex];
+    if (!asset) return true;
+    return canBuildStructureOnTerrain(asset, selectedTerrainInfo.type);
+  }, [selectedIndex, selectedTerrainInfo]);
 
   return (
     <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-[#9bd2ee] hex-game-viewport">
@@ -572,14 +613,18 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         gameState={gameState}
         cash={worldState.cash}
         territoryCount={territoryCount}
+        playerResources={playerResources}
         tileCount={tileCount}
         selectedIndex={selectedIndex}
         rotationDeg={rotationDeg}
         toolMode={toolMode}
         hoveredCoord={hoveredCoord}
+        hoveredTerrainInfo={hoveredTerrainInfo}
         selectedHex={selectedHex}
         selectedTileAssetName={selectedTileAssetName}
         selectedConquest={selectedConquest}
+        selectedTerrainInfo={selectedTerrainInfo}
+        canBuildActiveOnSelected={canBuildActiveOnSelected}
         assets={HEX_ASSETS}
         muted={muted}
         dockOpen={dockOpen}

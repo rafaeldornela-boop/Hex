@@ -6,6 +6,10 @@ import {
   type HexWorldState,
   type PlacedHex,
 } from './hex-engine';
+import {
+  TERRAIN_METADATA,
+  getHexTerrainAndResource,
+} from './terrain-engine';
 
 export type HexOwner = 'player' | 'neutral';
 
@@ -198,23 +202,31 @@ export function conquerHexInState(
   const key = hexKey(q, r);
   const existing = state.hexes[key];
 
+  const terrainInfo = getHexTerrainAndResource(q, r, existing);
   let nextTile: PlacedHex;
   if (existing) {
     nextTile = {
       ...existing,
       owner: 'player',
+      terrainType: terrainInfo.terrainType,
+      resourceType: terrainInfo.resourceType,
+      resourceAmount: terrainInfo.resourceAmount,
     };
   } else {
-    const grassIdx = Math.max(
+    const targetAssetName = TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
+    const terrainAssetIdx = Math.max(
       0,
-      assets.findIndex((a) => a.name === 'grass')
+      assets.findIndex((a) => a.name === targetAssetName)
     );
     nextTile = {
       q,
       r,
       orientation: DEFAULT_ROTATION_DEG,
-      structureIndex: grassIdx,
+      structureIndex: terrainAssetIdx,
       owner: 'player',
+      terrainType: terrainInfo.terrainType,
+      resourceType: terrainInfo.resourceType,
+      resourceAmount: terrainInfo.resourceAmount,
     };
   }
 

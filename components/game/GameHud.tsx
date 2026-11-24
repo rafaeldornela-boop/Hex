@@ -12,20 +12,24 @@ import {
   Coins,
   Compass,
   Crosshair,
+  Droplets,
   Flag,
   FolderOpen,
   Hammer,
   Layers,
   Lock,
   Menu,
+  Mountain,
   Pause,
   Play,
   RotateCcw,
   RotateCw,
   Save,
   Trash2,
+  Trees,
   Volume2,
   VolumeX,
+  Wheat,
   X,
   ZoomIn,
   ZoomOut,
@@ -33,6 +37,12 @@ import {
 import type { HexAssetEntry } from '@/lib/godot-docs';
 import type { AxialCoord } from '@/lib/hex-engine';
 import type { ConquestCheckResult } from '@/lib/territory-engine';
+import {
+  TERRAIN_METADATA,
+  getStructureDisplayInfo,
+  type PlayerResourceSummary,
+  type TerrainDescriptor,
+} from '@/lib/terrain-engine';
 import { formatHexDisplayName } from '@/lib/world-domain';
 import type { BuilderToolMode, GameModeState } from './HexSceneController';
 
@@ -40,14 +50,18 @@ export interface GameHudProps {
   gameState: GameModeState;
   cash: number;
   territoryCount: number;
+  playerResources: PlayerResourceSummary;
   tileCount: number;
   selectedIndex: number;
   rotationDeg: number;
   toolMode: BuilderToolMode;
   hoveredCoord: AxialCoord | null;
+  hoveredTerrainInfo: TerrainDescriptor | null;
   selectedHex: AxialCoord | null;
   selectedTileAssetName: string | null;
   selectedConquest: ConquestCheckResult | null;
+  selectedTerrainInfo: TerrainDescriptor | null;
+  canBuildActiveOnSelected: boolean;
   assets: HexAssetEntry[];
   muted: boolean;
   dockOpen: boolean;
@@ -99,14 +113,18 @@ const GameHud = memo(function GameHud({
   gameState,
   cash,
   territoryCount,
+  playerResources,
   tileCount,
   selectedIndex,
   rotationDeg,
   toolMode,
   hoveredCoord,
+  hoveredTerrainInfo,
   selectedHex,
   selectedTileAssetName,
   selectedConquest,
+  selectedTerrainInfo,
+  canBuildActiveOnSelected,
   assets,
   muted,
   dockOpen,
@@ -139,7 +157,9 @@ const GameHud = memo(function GameHud({
   const [paletteGroup, setPaletteGroup] = useState<PaletteGroupId>('building');
 
   const activeAsset = assets[selectedIndex] ?? assets[0];
-  const activePieceLabel = formatHexDisplayName(activeAsset.name);
+  const activePieceInfo = getStructureDisplayInfo(activeAsset.name);
+  const activePieceLabel =
+    activePieceInfo.labelPt || formatHexDisplayName(activeAsset.name);
   const hasCancellableState =
     selectedHex !== null || toolMode === 'demolish' || buildSheetOpen;
 
@@ -149,6 +169,9 @@ const GameHud = memo(function GameHud({
       .filter(({ asset }) => {
         if (paletteGroup === 'all') return true;
         if (paletteGroup === 'terrain') return TERRAIN_CATEGORIES.has(asset.category);
+        if (paletteGroup === 'building') {
+          return asset.category === 'building' || asset.name === 'dirt-lumber';
+        }
         return asset.category === paletteGroup;
       });
   }, [assets, paletteGroup]);
@@ -265,58 +288,87 @@ const GameHud = memo(function GameHud({
               paddingRight: 'max(0.75rem, env(safe-area-inset-right))',
             }}
           >
-            {/* Top-Left Compact Cash & Territory Plaque */}
-            <div className="pointer-events-auto flex items-center gap-2.5 sm:gap-3 bg-[#fcf9f2]/96 border-2 border-[#3c3426] rounded-xl px-3 py-2 sm:px-4 sm:py-2.5 shadow-[0_3px_0_#3c3426]">
-              <div className="flex items-center gap-1.5 sm:gap-2 pr-2.5 sm:pr-3 border-r border-[#d9ceb8]">
-                <Coins className="w-5 h-5 text-amber-600 shrink-0" aria-hidden="true" />
-                <div>
-                  <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
-                    Saldo
+            {/* Top-Left Compact Cash, Territory & Owned Resources Stack */}
+            <div className="pointer-events-auto flex flex-col items-start gap-1.5">
+              <div className="flex items-center gap-2.5 sm:gap-3 bg-[#fcf9f2]/96 border-2 border-[#3c3426] rounded-xl px-3 py-2 sm:px-4 sm:py-2.5 shadow-[0_3px_0_#3c3426]">
+                <div className="flex items-center gap-1.5 sm:gap-2 pr-2.5 sm:pr-3 border-r border-[#d9ceb8]">
+                  <Coins className="w-5 h-5 text-amber-600 shrink-0" aria-hidden="true" />
+                  <div>
+                    <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
+                      Saldo
+                    </p>
+                    <p
+                      data-testid="hud-cash"
+                      className="font-display text-base sm:text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
+                    >
+                      {formatCash(cash)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 sm:gap-2 md:pr-3 md:border-r md:border-[#d9ceb8]">
+                  <Flag className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-700 shrink-0" aria-hidden="true" />
+                  <div>
+                    <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
+                      Território
+                    </p>
+                    <p
+                      data-testid="hud-territory"
+                      className="font-display text-base sm:text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
+                    >
+                      {territoryCount}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Desktop-only total hex count & live hover coordinate + terrain */}
+                <div className="hidden md:block pr-3 border-r border-[#d9ceb8]">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
+                    Hexágonos
                   </p>
                   <p
-                    data-testid="hud-cash"
-                    className="font-display text-base sm:text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
+                    data-testid="hud-tiles"
+                    className="font-display text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
                   >
-                    {formatCash(cash)}
+                    {tileCount}
+                  </p>
+                </div>
+
+                <div className="hidden md:block">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
+                    Cursor
+                  </p>
+                  <p className="font-mono text-xs font-semibold text-[#2a2319] tabular-nums leading-tight mt-0.5 whitespace-nowrap">
+                    {hoveredCoord
+                      ? `q:${hoveredCoord.q} r:${hoveredCoord.r}${
+                          hoveredTerrainInfo ? ` · ${hoveredTerrainInfo.labelPt}` : ''
+                        }`
+                      : '—'}
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5 sm:gap-2 md:pr-3 md:border-r md:border-[#d9ceb8]">
-                <Flag className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-700 shrink-0" aria-hidden="true" />
-                <div>
-                  <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
-                    Território
-                  </p>
-                  <p
-                    data-testid="hud-territory"
-                    className="font-display text-base sm:text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
-                  >
-                    {territoryCount}
-                  </p>
-                </div>
-              </div>
-
-              {/* Desktop-only total hex count & live hover coordinate */}
-              <div className="hidden md:block pr-3 border-r border-[#d9ceb8]">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
-                  Hexágonos
-                </p>
-                <p
-                  data-testid="hud-tiles"
-                  className="font-display text-lg font-bold text-[#1f1a12] tabular-nums leading-tight"
-                >
-                  {tileCount}
-                </p>
-              </div>
-
-              <div className="hidden md:block">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
-                  Cursor
-                </p>
-                <p className="font-mono text-xs font-semibold text-[#2a2319] tabular-nums leading-tight mt-0.5">
-                  {hoveredCoord ? `q:${hoveredCoord.q} r:${hoveredCoord.r}` : '—'}
-                </p>
+              {/* Compact Owned Territory Resource Strip (only player-owned hexes contribute) */}
+              <div
+                data-testid="hud-resources"
+                className="flex items-center gap-2.5 sm:gap-3 bg-[#fcf9f2]/95 border-2 border-[#3c3426] rounded-xl px-2.5 py-1 shadow-[0_2px_0_#3c3426] text-[11px] font-bold text-[#2a2319] tabular-nums"
+              >
+                <span className="inline-flex items-center gap-1" title="Madeira (Florestas conquistadas)">
+                  <Trees className="w-3.5 h-3.5 text-emerald-700 shrink-0" aria-hidden="true" />
+                  <span data-testid="res-wood">{playerResources.wood}</span>
+                </span>
+                <span className="inline-flex items-center gap-1" title="Minério (Montanhas conquistadas)">
+                  <Mountain className="w-3.5 h-3.5 text-slate-600 shrink-0" aria-hidden="true" />
+                  <span data-testid="res-ore">{playerResources.ore}</span>
+                </span>
+                <span className="inline-flex items-center gap-1" title="Alimento (Terras férteis conquistadas)">
+                  <Wheat className="w-3.5 h-3.5 text-amber-600 shrink-0" aria-hidden="true" />
+                  <span data-testid="res-food">{playerResources.food}</span>
+                </span>
+                <span className="inline-flex items-center gap-1" title="Água / Pesca (Águas conquistadas)">
+                  <Droplets className="w-3.5 h-3.5 text-sky-600 shrink-0" aria-hidden="true" />
+                  <span data-testid="res-water">{playerResources.water}</span>
+                </span>
               </div>
             </div>
 
@@ -485,7 +537,7 @@ const GameHud = memo(function GameHud({
               role="status"
               aria-live="polite"
               style={{
-                top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 3.75rem)',
+                top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 6.1rem)',
               }}
               className="absolute left-1/2 -translate-x-1/2 z-30 bg-[#1f2923] text-[#fcf9f2] border-2 border-[#3c3426] rounded-xl px-4 py-2 text-xs font-semibold shadow-md whitespace-nowrap max-w-[92vw] truncate"
             >
@@ -526,10 +578,20 @@ const GameHud = memo(function GameHud({
                           />
                           <p className="text-xs font-bold text-[#1f1a12] truncate capitalize">
                             {selectedTileAssetName
-                              ? formatHexDisplayName(selectedTileAssetName)
+                              ? getStructureDisplayInfo(selectedTileAssetName).labelPt ||
+                                formatHexDisplayName(selectedTileAssetName)
                               : 'Território livre'}
                           </p>
                         </div>
+                        {selectedTerrainInfo && (
+                          <p
+                            data-testid="mobile-terrain-info"
+                            className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
+                          >
+                            Terreno: {selectedTerrainInfo.labelPt} · Recurso:{' '}
+                            {selectedTerrainInfo.resourceLabelPt}
+                          </p>
+                        )}
                         <p className="text-[11px] font-medium text-[#5c5140] mt-0.5">
                           {selectedConquest.owner === 'player'
                             ? 'Seu território'
@@ -594,15 +656,28 @@ const GameHud = memo(function GameHud({
                       <div className="min-w-0">
                         <p className="text-[11px] font-bold text-[#1f1a12] truncate capitalize">
                           {selectedTileAssetName
-                            ? formatHexDisplayName(selectedTileAssetName)
+                            ? getStructureDisplayInfo(selectedTileAssetName).labelPt ||
+                              formatHexDisplayName(selectedTileAssetName)
                             : 'Hexágono vazio'}
                         </p>
+                        {selectedTerrainInfo && (
+                          <p
+                            data-testid="mobile-terrain-info"
+                            className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
+                          >
+                            Terreno: {selectedTerrainInfo.labelPt} · Recurso:{' '}
+                            {selectedTerrainInfo.resourceLabelPt}
+                          </p>
+                        )}
                         <p className="font-mono text-[10px] text-[#6e604a] tabular-nums">
-                          q:{selectedHex.q} r:{selectedHex.r} · peça:{' '}
+                          peça:{' '}
                           <span className="capitalize font-sans font-semibold text-[#2a2319]">
                             {activePieceLabel}
                           </span>
                           {activeAsset.price > 0 ? ` ($${activeAsset.price})` : ''}
+                          {!canBuildActiveOnSelected && activePieceInfo.requiredTerrain
+                            ? ` · Requer ${TERRAIN_METADATA[activePieceInfo.requiredTerrain].labelPt}`
+                            : ''}
                         </p>
                       </div>
 
@@ -621,7 +696,11 @@ const GameHud = memo(function GameHud({
                         type="button"
                         data-testid="mobile-confirm-build"
                         onClick={onConfirmSelectedHex}
-                        className="flex-1 min-h-[44px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] active:translate-y-0.5 flex items-center justify-center gap-1.5 cursor-pointer"
+                        className={`flex-1 min-h-[44px] px-3 rounded-xl font-display text-xs font-bold border-2 active:translate-y-0.5 flex items-center justify-center gap-1.5 cursor-pointer ${
+                          canBuildActiveOnSelected
+                            ? 'bg-emerald-700 text-white border-[#1e2d24] shadow-[0_2px_0_#1e2d24]'
+                            : 'bg-rose-100 text-rose-900 border-rose-400'
+                        }`}
                       >
                         <Check className="w-4 h-4 shrink-0" aria-hidden="true" />
                         {selectedTileAssetName ? 'Substituir' : 'Construir'}
@@ -836,10 +915,13 @@ const GameHud = memo(function GameHud({
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     {visiblePieces.map(({ asset, index }) => {
                       const isSelected = index === selectedIndex && toolMode === 'build';
+                      const info = getStructureDisplayInfo(asset.name);
+                      const label = info.labelPt || formatHexDisplayName(asset.name);
                       return (
                         <button
                           key={asset.file}
                           type="button"
+                          data-testid={`mobile-piece-${asset.name}`}
                           onClick={() => {
                             onSetToolMode('build');
                             onSelectPiece(index);
@@ -852,14 +934,16 @@ const GameHud = memo(function GameHud({
                           }`}
                         >
                           <span className="block text-xs font-bold capitalize leading-tight truncate">
-                            {formatHexDisplayName(asset.name)}
+                            {label}
                           </span>
                           <span
-                            className={`mt-1 block font-mono text-[11px] tabular-nums ${
+                            className={`mt-1 block font-mono text-[10px] tabular-nums truncate ${
                               isSelected ? 'text-emerald-100' : 'text-[#6e604a]'
                             }`}
                           >
-                            #{index + 1} {asset.price > 0 ? `· $${asset.price}` : '· Grátis'}
+                            {info.requiredTerrain
+                              ? `Só ${TERRAIN_METADATA[info.requiredTerrain].labelPt}`
+                              : `#${index + 1} ${asset.price > 0 ? `· $${asset.price}` : '· Grátis'}`}
                           </span>
                         </button>
                       );
@@ -874,7 +958,7 @@ const GameHud = memo(function GameHud({
           {/* DESKTOP PLAYING HUD (md+): EXPAND + PRESERVED BUILDER     */}
           {/* ========================================================= */}
           <div className="hidden md:flex absolute bottom-3 left-1/2 -translate-x-1/2 w-[min(960px,95vw)] flex-col items-center pointer-events-none">
-            {/* Desktop Compact Conquest Confirmation Card (when a hex is clicked in Expand mode) */}
+            {/* Desktop Compact Selection & Terrain/Resource Card (when a hex is clicked in Expand mode) */}
             {toolMode === 'expand' && selectedHex && selectedConquest && (
               <div
                 data-testid="desktop-selection-bar"
@@ -893,13 +977,23 @@ const GameHud = memo(function GameHud({
                     />
                     <p className="text-xs font-bold text-[#1f1a12] capitalize">
                       {selectedTileAssetName
-                        ? formatHexDisplayName(selectedTileAssetName)
+                        ? getStructureDisplayInfo(selectedTileAssetName).labelPt ||
+                          formatHexDisplayName(selectedTileAssetName)
                         : 'Território livre'}
                     </p>
                     <span className="font-mono text-[10px] text-[#6e604a]">
                       (q:{selectedHex.q} r:{selectedHex.r})
                     </span>
                   </div>
+                  {selectedTerrainInfo && (
+                    <p
+                      data-testid="desktop-terrain-info"
+                      className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
+                    >
+                      Terreno: {selectedTerrainInfo.labelPt} · Recurso:{' '}
+                      {selectedTerrainInfo.resourceLabelPt}
+                    </p>
+                  )}
                   <p className="text-[11px] text-[#5c5140] mt-0.5">
                     {selectedConquest.owner === 'player'
                       ? 'Este hexágono já pertence ao seu território.'
@@ -1184,11 +1278,14 @@ const GameHud = memo(function GameHud({
                   <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
                     {visiblePieces.map(({ asset, index }) => {
                       const isSelected = index === selectedIndex && toolMode === 'build';
+                      const info = getStructureDisplayInfo(asset.name);
+                      const label = info.labelPt || formatHexDisplayName(asset.name);
                       return (
                         <button
                           key={asset.file}
                           type="button"
                           tabIndex={-1}
+                          data-testid={`desktop-piece-${asset.name}`}
                           onClick={(e) => {
                             e.currentTarget.blur();
                             onSetToolMode('build');
@@ -1201,14 +1298,16 @@ const GameHud = memo(function GameHud({
                           }`}
                         >
                           <span className="block text-[11px] font-semibold capitalize leading-tight">
-                            {formatHexDisplayName(asset.name)}
+                            {label}
                           </span>
                           <span
                             className={`block font-mono text-[10px] tabular-nums ${
                               isSelected ? 'text-emerald-100' : 'text-[#6e604a]'
                             }`}
                           >
-                            #{index + 1} {asset.price > 0 ? `· $${asset.price}` : ''}
+                            {info.requiredTerrain
+                              ? `Só ${TERRAIN_METADATA[info.requiredTerrain].labelPt}`
+                              : `#${index + 1} ${asset.price > 0 ? `· $${asset.price}` : ''}`}
                           </span>
                         </button>
                       );

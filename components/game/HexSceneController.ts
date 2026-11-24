@@ -29,6 +29,10 @@ import {
   getConquerableFrontierCoords,
   type HexOwner,
 } from '@/lib/territory-engine';
+import {
+  canBuildStructureOnTerrain,
+  getHexTerrainAndResource,
+} from '@/lib/terrain-engine';
 import { HEX_ASSETS } from '@/lib/repo-data';
 
 export type GameModeState = 'title' | 'playing' | 'paused';
@@ -296,6 +300,51 @@ function buildConquerableFrontierGeometry(state: HexWorldState): THREE.BufferGeo
   return geo;
 }
 
+const BASE_FERTILE_VISUAL_ASSETS = new Set(['dirt', 'grass', 'grass-hill']);
+
+/**
+ * Single batched geometry drawing cultivated crop-furrow strips across
+ * unbuilt Terra fértil hexes so players immediately distinguish fertile soil
+ * from open plains or desert sand without extra draw calls.
+ */
+function buildFertileFurrowsGeometry(state: HexWorldState): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const y = 0.207;
+  const halfLen = 0.28;
+  const halfWidth = 0.028;
+  const offsets = [-0.21, -0.07, 0.07, 0.21];
+
+  for (const tile of Object.values(state.hexes)) {
+    const terrainInfo = getHexTerrainAndResource(tile.q, tile.r, tile);
+    if (terrainInfo.terrainType !== 'fertile') continue;
+    const assetName = HEX_ASSETS[tile.structureIndex]?.name ?? '';
+    if (!BASE_FERTILE_VISUAL_ASSETS.has(assetName)) continue;
+
+    const center = axialToWorld(tile.q, tile.r);
+    for (const dz of offsets) {
+      const lenScale = Math.abs(dz) > 0.15 ? 0.72 : 1.0;
+      const hx = halfLen * lenScale;
+      const x0 = center.x - hx;
+      const x1 = center.x + hx;
+      const z0 = center.z + dz - halfWidth;
+      const z1 = center.z + dz + halfWidth;
+
+      positions.push(
+        x0, y, z0,
+        x1, y, z0,
+        x1, y, z1,
+        x0, y, z0,
+        x1, y, z1,
+        x0, y, z1
+      );
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  return geo;
+}
+
 function createNeutralMaterialVariant(
   mat: THREE.Material | THREE.Material[]
 ): THREE.Material | THREE.Material[] {
@@ -346,6 +395,7 @@ export class HexSceneController {
   private territoryBorderMesh: THREE.Mesh;
   private frontierOverlayMesh: THREE.Mesh;
   private frontierOverlayMat: THREE.MeshBasicMaterial;
+  private fertileOverlayMesh: THREE.Mesh;
   private conquestRingGeo: THREE.BufferGeometry;
   private conquestWaves: ConquestWaveEntry[] = [];
 
@@ -550,6 +600,23 @@ export class HexSceneController {
     );
     this.frontierOverlayMesh.frustumCulled = false;
     this.scene.add(this.frontierOverlayMesh);
+
+    const fertileMat = new THREE.MeshBasicMaterial({
+      color: 0x4d7c0f,
+      transparent: true,
+      opacity: 0.76,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    this.fertileOverlayMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      fertileMat
+    );
+    this.fertileOverlayMesh.frustumCulled = false;
+    this.scene.add(this.fertileOverlayMesh);
 
     this.conquestRingGeo = createHexRingGeometry(
       HEX_OUTER_RADIUS * 1.03,
@@ -1012,7 +1079,12 @@ export class HexSceneController {
     } else if (this.toolMode === 'demolish') {
       this.selectorRingMat.color.setHex(0xdc2626);
     } else {
-      this.selectorRingMat.color.setHex(0x059669);
+      const existing = this.currentWorldState.hexes[hexKey(activeCoord.q, activeCoord.r)];
+      const terrainInfo = getHexTerrainAndResource(activeCoord.q, activeCoord.r, existing);
+      const activeAsset = HEX_ASSETS[this.currentPreviewIndex];
+      const allowed =
+        !activeAsset || canBuildStructureOnTerrain(activeAsset, terrainInfo.terrainType);
+      this.selectorRingMat.color.setHex(allowed ? 0x059669 : 0xdc2626);
     }
   }
 
@@ -1079,6 +1151,7 @@ export class HexSceneController {
     if (structureIndex !== this.currentPreviewIndex) {
       this.currentPreviewIndex = structureIndex;
       this.refreshSelectorPreview(structureIndex);
+      this.refreshSelectorAnchor();
     }
   }
 
@@ -1174,6 +1247,7 @@ export class HexSceneController {
     const oldTrim = this.territoryTrimMesh.geometry;
     const oldBorder = this.territoryBorderMesh.geometry;
     const oldFrontier = this.frontierOverlayMesh.geometry;
+    const oldFertile = this.fertileOverlayMesh.geometry;
 
     this.territoryTrimMesh.geometry = buildTerritoryPerimeterGeometry(
       state,
@@ -1188,10 +1262,12 @@ export class HexSceneController {
       0.216
     );
     this.frontierOverlayMesh.geometry = buildConquerableFrontierGeometry(state);
+    this.fertileOverlayMesh.geometry = buildFertileFurrowsGeometry(state);
 
     oldTrim.dispose();
     oldBorder.dispose();
     oldFrontier.dispose();
+    oldFertile.dispose();
   }
 
   private spawnConquestWave(x: number, z: number) {
