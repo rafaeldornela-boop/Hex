@@ -1,4 +1,5 @@
 import type { HexAssetEntry } from './godot-docs';
+import type { FutureEconomySnapshot, TileDomainMetadata } from './world-domain';
 
 /**
  * Exact flat-topped hexagonal tessellation matching the Kenney Hexagons .glb
@@ -21,11 +22,15 @@ export interface PlacedHex {
   r: number;
   orientation: number; // degrees: 90, 150, 210, 270, 330, 30
   structureIndex: number;
+  /** Optional seam for upcoming territory, level, and worker mechanics */
+  meta?: TileDomainMetadata;
 }
 
 export interface HexWorldState {
   cash: number;
   hexes: Record<string, PlacedHex>;
+  /** Reserved seam for future economy/territory state (unused in current build) */
+  futureEconomy?: Partial<FutureEconomySnapshot>;
 }
 
 export function hexKey(q: number, r: number): string {
@@ -196,12 +201,17 @@ export function deserializeWorldState(
         if (idx >= 0 && idx < totalAssets) {
           const q = Math.round((item as PlacedHex).q);
           const r = Math.round((item as PlacedHex).r);
-          hexes[hexKey(q, r)] = {
+          const rawMeta = (item as PlacedHex).meta;
+          const tile: PlacedHex = {
             q,
             r,
             orientation: ((item as PlacedHex).orientation % 360 + 360) % 360,
             structureIndex: idx,
           };
+          if (rawMeta && typeof rawMeta === 'object') {
+            tile.meta = rawMeta;
+          }
+          hexes[hexKey(q, r)] = tile;
         }
       }
     }

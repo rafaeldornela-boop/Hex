@@ -11,6 +11,18 @@ import {
   type HexWorldState,
   type PlacedHex,
 } from '@/lib/hex-engine';
+import {
+  detectDeviceQualityProfile,
+  type RenderQualityProfile,
+} from '@/lib/device-profile';
+import {
+  TOUCH_TAP_MAX_MOVEMENT_PX,
+  computeTwoFingerGestureDelta,
+  isCleanTap,
+  pointDistance,
+  screenPanToWorldDelta,
+  type ScreenPoint,
+} from '@/lib/touch-gestures';
 import { HEX_ASSETS } from '@/lib/repo-data';
 
 export type GameModeState = 'title' | 'playing' | 'paused';
@@ -20,6 +32,7 @@ export interface HexSceneCallbacks {
   onHoverChange: (coord: AxialCoord | null, existingTile: PlacedHex | null) => void;
   onPlaceAt: (q: number, r: number) => void;
   onDemolishAt: (q: number, r: number) => void;
+  onTouchTapAt: (q: number, r: number) => void;
   onRotate: () => void;
   onCycleStructure: (delta: number) => void;
   onLoadProgress: (loaded: number, total: number) => void;
@@ -43,7 +56,9 @@ interface ParticleState {
   scale: number;
 }
 
-const PARTICLE_POOL_SIZE = 48;
+const CAMERA_MIN_DIST = 5.5;
+const CAMERA_MAX_DIST = 22;
+const CAMERA_PAN_BOUND = 15;
 
 // Pre-allocated scratch helpers (zero GC inside animation loop)
 const _raycaster = new THREE.Raycaster();
@@ -66,8 +81,10 @@ function detectSoftwareWebGL(): boolean {
   return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
 }
 
-function createWaterCanvasTexture(maxAnisotropy: number): THREE.CanvasTexture {
-  const size = 512;
+function createWaterCanvasTexture(
+  size: number,
+  maxAnisotropy: number
+): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
@@ -76,19 +93,21 @@ function createWaterCanvasTexture(maxAnisotropy: number): THREE.CanvasTexture {
     ctx.fillStyle = '#3f96be';
     ctx.fillRect(0, 0, size, size);
 
-    // Soft organic ocean dappling (non-repeating pseudo-random distribution)
+    // Soft organic ocean dappling (deterministic pseudo-random distribution)
     let seed = 1337;
     const rand = () => {
       seed = (seed * 16807) % 2147483647;
       return (seed - 1) / 2147483646;
     };
 
-    for (let i = 0; i < 140; i++) {
+    const scale = size / 512;
+    const dappleCount = Math.round(140 * Math.max(0.55, scale));
+    for (let i = 0; i < dappleCount; i++) {
       const x = rand() * size;
       const y = rand() * size;
-      const r = 18 + rand() * 44;
+      const r = (18 + rand() * 44) * scale;
       const isHighlight = i % 2 === 0;
-      const grad = ctx.createRadialGradient(x, y, 2, x, y, r);
+      const grad = ctx.createRadialGradient(x, y, Math.max(1, 2 * scale), x, y, r);
       grad.addColorStop(
         0,
         isHighlight ? 'rgba(130, 212, 240, 0.14)' : 'rgba(28, 96, 134, 0.14)'
@@ -100,12 +119,13 @@ function createWaterCanvasTexture(maxAnisotropy: number): THREE.CanvasTexture {
       ctx.fill();
     }
 
-    for (let i = 0; i < 36; i++) {
+    const waveCount = Math.round(36 * Math.max(0.6, scale));
+    for (let i = 0; i < waveCount; i++) {
       const x = rand() * size;
       const y = rand() * size;
-      const w = 14 + rand() * 22;
+      const w = (14 + rand() * 22) * scale;
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = Math.max(1, 1.5 * scale);
       ctx.beginPath();
       ctx.arc(x, y, w, 0.15 * Math.PI, 0.85 * Math.PI);
       ctx.stroke();
@@ -116,7 +136,7 @@ function createWaterCanvasTexture(maxAnisotropy: number): THREE.CanvasTexture {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(22, 22);
-  tex.anisotropy = maxAnisotropy;
+  tex.anisotropy = Math.min(maxAnisotropy, 4);
   return tex;
 }
 
@@ -186,8 +206,10 @@ export class HexSceneController {
   private container: HTMLElement;
   private callbacks: HexSceneCallbacks;
   private isSoftwareGl: boolean;
+  private quality: RenderQualityProfile;
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
+  private envRenderTarget: THREE.WebGLRenderTarget | null = null;
   private camera: THREE.PerspectiveCamera;
   private gltfLoader: GLTFLoader;
   private waterTexture: THREE.CanvasTexture;
@@ -196,9 +218,12 @@ export class HexSceneController {
   private modelCache = new Map<string, THREE.Group>();
   private loadingPromises = new Map<string, Promise<THREE.Group>>();
   private hexesGroup = new THREE.Group();
-  private placedMeshes = new Map<string, { group: THREE.Group; structureIndex: number; orientation: number }>();
+  private placedMeshes = new Map<
+    string,
+    { group: THREE.Group; structureIndex: number; orientation: number }
+  >();
 
-  // Selector cursor
+  // Selector cursor (supports both desktop hover and explicit touch selection)
   private selectorGroup = new THREE.Group();
   private selectorRingMat: THREE.MeshBasicMaterial;
   private selectorPreviewGroup = new THREE.Group();
@@ -206,6 +231,7 @@ export class HexSceneController {
   private currentRotationDeg = DEFAULT_ROTATION_DEG;
   private toolMode: BuilderToolMode = 'build';
   private hoveredCoord: AxialCoord | null = null;
+  private selectedCoord: AxialCoord | null = null;
   private currentWorldState: HexWorldState = { cash: 10000, hexes: {} };
 
   // Camera state
@@ -219,7 +245,7 @@ export class HexSceneController {
   private camDistanceGoal = 11.5;
   private camPitch = 0.66; // ~38° down-angle
 
-  // Input state
+  // Desktop pointer + keyboard input state
   private keysHeld = new Set<string>();
   private isOrbitDragging = false;
   private lastDragX = 0;
@@ -228,16 +254,27 @@ export class HexSceneController {
   private pointerClientY = 0;
   private lastHoverRaycastTime = 0;
 
+  // Touch multi-pointer gesture state (unified Pointer Events, zero duplicate touchstart/mousedown)
+  private activeTouchPointers = new Map<number, ScreenPoint>();
+  private touchStartPoint: ScreenPoint | null = null;
+  private touchStartTime = 0;
+  private touchHadMultiTouch = false;
+  private touchIsPanning = false;
+  private lastTouchActivityMs = 0;
+
   // Pop animations & pooled particles
   private popAnims: PopAnimEntry[] = [];
+  private particlePoolSize: number;
   private particlesMesh: THREE.InstancedMesh;
   private particles: ParticleState[] = [];
   private particleCursor = 0;
+  private activeParticleCount = 0;
 
   // Loop management
   private disposed = false;
   private frameId = 0;
   private lastFrameMs = 0;
+  private lastRenderMs = 0;
   private resizeObserver: ResizeObserver;
   private elapsedSec = 0;
 
@@ -245,28 +282,32 @@ export class HexSceneController {
     this.container = container;
     this.callbacks = callbacks;
     this.isSoftwareGl = detectSoftwareWebGL();
+    this.quality = detectDeviceQualityProfile(this.isSoftwareGl);
+    this.particlePoolSize = this.quality.particlePoolSize;
 
-    // Renderer
+    // Renderer (progressive quality per device tier, full crisp quality on desktop)
     this.renderer = new THREE.WebGLRenderer({
-      antialias: !this.isSoftwareGl,
-      powerPreference: 'high-performance',
+      antialias: this.quality.antialias,
+      powerPreference:
+        this.quality.tier === 'desktop-high' ? 'high-performance' : 'default',
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 0.92;
-    this.renderer.setPixelRatio(
-      this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2)
-    );
-    this.renderer.shadowMap.enabled = !this.isSoftwareGl;
+    this.renderer.setPixelRatio(this.quality.pixelRatio);
+    this.renderer.shadowMap.enabled = this.quality.shadowsEnabled;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     const width = Math.max(container.clientWidth, 1);
     const height = Math.max(container.clientHeight, 1);
     this.renderer.setSize(width, height);
-    this.renderer.domElement.style.display = 'block';
-    this.renderer.domElement.style.width = '100%';
-    this.renderer.domElement.style.height = '100%';
-    container.appendChild(this.renderer.domElement);
+    const canvas = this.renderer.domElement;
+    canvas.style.display = 'block';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.touchAction = 'none';
+    canvas.style.userSelect = 'none';
+    container.appendChild(canvas);
 
     // Scene & Atmosphere (linear horizon fog keeps foreground island crisp and vivid)
     this.scene = new THREE.Scene();
@@ -276,12 +317,17 @@ export class HexSceneController {
 
     // Studio RoomEnvironment for subtle PBR sheen without washing out pastel colormaps
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.envRenderTarget = pmrem.fromScene(new RoomEnvironment(), 0.04);
+    this.scene.environment = this.envRenderTarget.texture;
     this.scene.environmentIntensity = 0.32;
     pmrem.dispose();
 
-    // Camera
-    this.camera = new THREE.PerspectiveCamera(32, width / height, 0.1, 180);
+    // Camera (portrait-aware starting distance so vertical phone frames the whole island cleanly)
+    const aspect = width / height;
+    const defaultDist = this.getDefaultCameraDistance(aspect);
+    this.camDistance = defaultDist;
+    this.camDistanceGoal = defaultDist;
+    this.camera = new THREE.PerspectiveCamera(aspect < 0.8 ? 36 : 32, aspect, 0.1, 180);
     this.updateCameraTransform(1);
 
     // Warm/Cool 3-Point Outdoor Lighting Rig (1 shadow caster)
@@ -291,9 +337,12 @@ export class HexSceneController {
 
     const sunLight = new THREE.DirectionalLight(0xfff1d0, 1.65);
     sunLight.position.set(14, 22, 12);
-    if (!this.isSoftwareGl) {
+    if (this.quality.shadowsEnabled) {
       sunLight.castShadow = true;
-      sunLight.shadow.mapSize.set(1024, 1024);
+      sunLight.shadow.mapSize.set(
+        this.quality.shadowMapSize,
+        this.quality.shadowMapSize
+      );
       const d = 11;
       sunLight.shadow.camera.left = -d;
       sunLight.shadow.camera.right = d;
@@ -312,7 +361,10 @@ export class HexSceneController {
 
     // Expansive ocean surface extending to horizon fog (no floating slab in void)
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
-    this.waterTexture = createWaterCanvasTexture(maxAniso);
+    this.waterTexture = createWaterCanvasTexture(
+      this.quality.waterTextureSize,
+      maxAniso
+    );
     const waterGeo = new THREE.PlaneGeometry(240, 240);
     waterGeo.rotateX(-Math.PI / 2);
     const waterMat = new THREE.MeshStandardMaterial({
@@ -323,19 +375,22 @@ export class HexSceneController {
     });
     this.waterMesh = new THREE.Mesh(waterGeo, waterMat);
     this.waterMesh.position.y = -0.025;
-    this.waterMesh.receiveShadow = !this.isSoftwareGl;
+    this.waterMesh.receiveShadow = this.quality.shadowsEnabled;
     this.scene.add(this.waterMesh);
 
     // Subtle hex grid guide lines near island
-    this.scene.add(buildSubtleHexGridLines(7));
+    this.scene.add(buildSubtleHexGridLines(this.quality.gridGuideRings));
 
     // Placed hexes container
     this.scene.add(this.hexesGroup);
 
     // Selector cursor (hex ring elevated cleanly above the 0.20 tile surface + preview container)
-    const ringGeo = createHexRingGeometry(HEX_OUTER_RADIUS * 1.02, HEX_OUTER_RADIUS * 0.84);
+    const ringGeo = createHexRingGeometry(
+      HEX_OUTER_RADIUS * 1.02,
+      HEX_OUTER_RADIUS * 0.84
+    );
     this.selectorRingMat = new THREE.MeshBasicMaterial({
-      color: 0x10b981,
+      color: 0x059669,
       transparent: true,
       opacity: 0.95,
       side: THREE.DoubleSide,
@@ -361,10 +416,10 @@ export class HexSceneController {
     this.particlesMesh = new THREE.InstancedMesh(
       particleGeo,
       particleMat,
-      PARTICLE_POOL_SIZE
+      this.particlePoolSize
     );
     this.particlesMesh.frustumCulled = false;
-    for (let i = 0; i < PARTICLE_POOL_SIZE; i++) {
+    for (let i = 0; i < this.particlePoolSize; i++) {
       this.particles.push({
         active: false,
         age: 0,
@@ -386,7 +441,7 @@ export class HexSceneController {
     this.particlesMesh.instanceMatrix.needsUpdate = true;
     this.scene.add(this.particlesMesh);
 
-    // Asset loader
+    // Asset loader (shared cache across all placed tiles)
     THREE.Cache.enabled = true;
     this.gltfLoader = new GLTFLoader();
 
@@ -400,7 +455,16 @@ export class HexSceneController {
     }
 
     this.lastFrameMs = performance.now();
+    this.lastRenderMs = this.lastFrameMs;
     this.scheduleNextFrame();
+  }
+
+  private getDefaultCameraDistance(aspect: number): number {
+    return aspect < 0.8 ? 15.6 : 11.2;
+  }
+
+  public getQualityProfile(): RenderQualityProfile {
+    return this.quality;
   }
 
   private bindEvents() {
@@ -408,6 +472,7 @@ export class HexSceneController {
     el.addEventListener('pointermove', this.onPointerMove);
     el.addEventListener('pointerdown', this.onPointerDown);
     el.addEventListener('pointerleave', this.onPointerLeave);
+    el.addEventListener('pointercancel', this.onPointerCancel);
     el.addEventListener('wheel', this.onWheel, { passive: false });
     el.addEventListener('contextmenu', this.onContextMenu);
     el.addEventListener('webglcontextlost', this.onContextLost);
@@ -423,6 +488,7 @@ export class HexSceneController {
     el.removeEventListener('pointermove', this.onPointerMove);
     el.removeEventListener('pointerdown', this.onPointerDown);
     el.removeEventListener('pointerleave', this.onPointerLeave);
+    el.removeEventListener('pointercancel', this.onPointerCancel);
     el.removeEventListener('wheel', this.onWheel);
     el.removeEventListener('contextmenu', this.onContextMenu);
     el.removeEventListener('webglcontextlost', this.onContextLost);
@@ -431,6 +497,15 @@ export class HexSceneController {
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onWindowBlur);
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
+  }
+
+  private resetTransientInput() {
+    this.keysHeld.clear();
+    this.isOrbitDragging = false;
+    this.activeTouchPointers.clear();
+    this.touchStartPoint = null;
+    this.touchIsPanning = false;
+    this.touchHadMultiTouch = false;
   }
 
   private onContextLost = (e: Event) => {
@@ -442,14 +517,14 @@ export class HexSceneController {
   };
 
   private onWindowBlur = () => {
-    this.keysHeld.clear();
-    this.isOrbitDragging = false;
+    this.resetTransientInput();
   };
 
   private onVisibilityChange = () => {
     if (document.hidden) {
-      this.keysHeld.clear();
-      this.isOrbitDragging = false;
+      this.resetTransientInput();
+    } else {
+      this.lastFrameMs = performance.now();
     }
   };
 
@@ -473,7 +548,147 @@ export class HexSceneController {
     this.keysHeld.delete(e.code);
   };
 
+  private raycastGroundCoord(clientX: number, clientY: number): AxialCoord | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+
+    _ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    _ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+    _raycaster.setFromCamera(_ndc, this.camera);
+    const hit = _raycaster.ray.intersectPlane(_groundPlane, _hitPoint);
+    if (!hit) return null;
+
+    return worldToAxial(_hitPoint.x, _hitPoint.z);
+  }
+
+  private applyPanScreenDelta(screenDx: number, screenDy: number) {
+    const height = Math.max(this.container.clientHeight, 320);
+    const { dx, dz } = screenPanToWorldDelta(
+      screenDx,
+      screenDy,
+      height,
+      this.camDistance,
+      this.camYaw
+    );
+    this.camTargetGoal.x = THREE.MathUtils.clamp(
+      this.camTargetGoal.x + dx,
+      -CAMERA_PAN_BOUND,
+      CAMERA_PAN_BOUND
+    );
+    this.camTargetGoal.z = THREE.MathUtils.clamp(
+      this.camTargetGoal.z + dz,
+      -CAMERA_PAN_BOUND,
+      CAMERA_PAN_BOUND
+    );
+  }
+
+  private onPointerDown = (e: PointerEvent) => {
+    if (this.gameState !== 'playing') return;
+
+    // Touch path: 1-finger pan / clean tap, 2-finger pinch + twist + midpoint pan
+    if (e.pointerType === 'touch') {
+      e.preventDefault();
+      this.lastTouchActivityMs = performance.now();
+      try {
+        this.renderer.domElement.setPointerCapture(e.pointerId);
+      } catch {
+        // Ignore if pointer capture is unsupported in synthetic browser tests
+      }
+
+      const pt: ScreenPoint = { x: e.clientX, y: e.clientY };
+      this.activeTouchPointers.set(e.pointerId, pt);
+
+      if (this.activeTouchPointers.size === 1) {
+        this.touchStartPoint = pt;
+        this.touchStartTime = performance.now();
+        this.touchHadMultiTouch = false;
+        this.touchIsPanning = false;
+      } else {
+        this.touchHadMultiTouch = true;
+        this.touchIsPanning = false;
+      }
+      return;
+    }
+
+    // Desktop mouse / pen path (100% preserved)
+    if (e.button === 1 || (e.button === 0 && (e.shiftKey || e.altKey))) {
+      e.preventDefault();
+      this.isOrbitDragging = true;
+      this.lastDragX = e.clientX;
+      return;
+    }
+
+    if (e.button === 2) {
+      e.preventDefault();
+      this.callbacks.onRotate();
+      return;
+    }
+
+    if (e.button === 0) {
+      this.updateHoverFromPointer(e.clientX, e.clientY);
+      if (!this.hoveredCoord) return;
+      if (this.toolMode === 'demolish') {
+        this.callbacks.onDemolishAt(this.hoveredCoord.q, this.hoveredCoord.r);
+      } else {
+        this.callbacks.onPlaceAt(this.hoveredCoord.q, this.hoveredCoord.r);
+      }
+    }
+  };
+
   private onPointerMove = (e: PointerEvent) => {
+    if (e.pointerType === 'touch') {
+      if (this.gameState !== 'playing') return;
+      const prevPt = this.activeTouchPointers.get(e.pointerId);
+      if (!prevPt) return;
+
+      e.preventDefault();
+      this.lastTouchActivityMs = performance.now();
+      const currPt: ScreenPoint = { x: e.clientX, y: e.clientY };
+
+      if (this.activeTouchPointers.size === 1) {
+        if (!this.touchIsPanning && this.touchStartPoint) {
+          if (pointDistance(this.touchStartPoint, currPt) > TOUCH_TAP_MAX_MOVEMENT_PX) {
+            this.touchIsPanning = true;
+          }
+        }
+        if (this.touchIsPanning) {
+          this.applyPanScreenDelta(currPt.x - prevPt.x, currPt.y - prevPt.y);
+        }
+        this.activeTouchPointers.set(e.pointerId, currPt);
+        return;
+      }
+
+      if (this.activeTouchPointers.size >= 2) {
+        const entries = Array.from(this.activeTouchPointers.entries());
+        const [idA, oldA] = entries[0];
+        const [idB, oldB] = entries[1];
+
+        const nextA = idA === e.pointerId ? currPt : oldA;
+        const nextB = idB === e.pointerId ? currPt : oldB;
+
+        const gesture = computeTwoFingerGestureDelta(
+          oldA,
+          oldB,
+          nextA,
+          nextB,
+          this.camDistanceGoal
+        );
+
+        this.zoomBy(gesture.zoomDelta);
+        if (gesture.yawDeltaRad !== 0) {
+          this.camYawGoal += gesture.yawDeltaRad;
+        }
+        if (gesture.panScreenDx !== 0 || gesture.panScreenDy !== 0) {
+          this.applyPanScreenDelta(gesture.panScreenDx, gesture.panScreenDy);
+        }
+
+        this.activeTouchPointers.set(e.pointerId, currPt);
+      }
+      return;
+    }
+
+    // Desktop mouse hover / orbit drag
     this.pointerInside = true;
     this.pointerClientX = e.clientX;
     this.pointerClientY = e.clientY;
@@ -494,45 +709,60 @@ export class HexSceneController {
     }
   };
 
-  private onPointerLeave = () => {
-    this.pointerInside = false;
-    this.hoveredCoord = null;
-    this.selectorGroup.visible = false;
-    this.callbacks.onHoverChange(null, null);
+  private onPointerUp = (e: PointerEvent) => {
+    if (e.pointerType === 'touch') {
+      if (!this.activeTouchPointers.has(e.pointerId)) return;
+      this.lastTouchActivityMs = performance.now();
+
+      const wasLastFinger = this.activeTouchPointers.size === 1;
+      const endPt: ScreenPoint = { x: e.clientX, y: e.clientY };
+
+      if (
+        wasLastFinger &&
+        this.gameState === 'playing' &&
+        this.touchStartPoint &&
+        isCleanTap(
+          this.touchStartPoint,
+          endPt,
+          performance.now() - this.touchStartTime,
+          this.touchHadMultiTouch
+        )
+      ) {
+        const coord = this.raycastGroundCoord(e.clientX, e.clientY);
+        if (coord) {
+          this.callbacks.onTouchTapAt(coord.q, coord.r);
+        }
+      }
+
+      this.activeTouchPointers.delete(e.pointerId);
+      if (this.activeTouchPointers.size === 0) {
+        this.touchStartPoint = null;
+        this.touchIsPanning = false;
+        this.touchHadMultiTouch = false;
+      }
+      return;
+    }
+
+    this.isOrbitDragging = false;
   };
 
-  private onPointerDown = (e: PointerEvent) => {
-    if (this.gameState !== 'playing') return;
-
-    // Middle mouse button OR Shift/Alt + Left button -> orbit rotate camera
-    if (e.button === 1 || (e.button === 0 && (e.shiftKey || e.altKey))) {
-      e.preventDefault();
-      this.isOrbitDragging = true;
-      this.lastDragX = e.clientX;
-      return;
-    }
-
-    // Right click -> rotate piece 60° (matching Godot's rotate action)
-    if (e.button === 2) {
-      e.preventDefault();
-      this.callbacks.onRotate();
-      return;
-    }
-
-    // Left click -> build or demolish at raycasted hex
-    if (e.button === 0) {
-      this.updateHoverFromPointer(e.clientX, e.clientY);
-      if (!this.hoveredCoord) return;
-      if (this.toolMode === 'demolish') {
-        this.callbacks.onDemolishAt(this.hoveredCoord.q, this.hoveredCoord.r);
-      } else {
-        this.callbacks.onPlaceAt(this.hoveredCoord.q, this.hoveredCoord.r);
+  private onPointerCancel = (e: PointerEvent) => {
+    if (e.pointerType === 'touch') {
+      this.activeTouchPointers.delete(e.pointerId);
+      if (this.activeTouchPointers.size === 0) {
+        this.touchStartPoint = null;
+        this.touchIsPanning = false;
+        this.touchHadMultiTouch = false;
       }
     }
   };
 
-  private onPointerUp = () => {
-    this.isOrbitDragging = false;
+  private onPointerLeave = (e: PointerEvent) => {
+    if (e.pointerType === 'touch') return;
+    this.pointerInside = false;
+    this.hoveredCoord = null;
+    this.refreshSelectorAnchor();
+    this.callbacks.onHoverChange(null, null);
   };
 
   private onWheel = (e: WheelEvent) => {
@@ -547,25 +777,13 @@ export class HexSceneController {
   };
 
   private updateHoverFromPointer(clientX: number, clientY: number) {
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-
-    _ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-    _ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-
-    _raycaster.setFromCamera(_ndc, this.camera);
-    const hit = _raycaster.ray.intersectPlane(_groundPlane, _hitPoint);
-    if (!hit) {
+    const coord = this.raycastGroundCoord(clientX, clientY);
+    if (!coord) {
       this.hoveredCoord = null;
-      this.selectorGroup.visible = false;
+      this.refreshSelectorAnchor();
       this.callbacks.onHoverChange(null, null);
       return;
     }
-
-    const coord = worldToAxial(_hitPoint.x, _hitPoint.z);
-    const worldPos = axialToWorld(coord.q, coord.r);
-    this.selectorGroup.position.set(worldPos.x, 0, worldPos.z);
-    this.selectorGroup.visible = true;
 
     const changed =
       !this.hoveredCoord ||
@@ -573,35 +791,58 @@ export class HexSceneController {
       this.hoveredCoord.r !== coord.r;
 
     this.hoveredCoord = coord;
+    this.refreshSelectorAnchor();
     if (changed) {
-      const existing = this.currentWorldState.hexes[hexKey(coord.q, coord.r)] ?? null;
+      const existing =
+        this.currentWorldState.hexes[hexKey(coord.q, coord.r)] ?? null;
       this.callbacks.onHoverChange(coord, existing);
     }
   }
 
+  private refreshSelectorAnchor() {
+    if (this.gameState !== 'playing') {
+      this.selectorGroup.visible = false;
+      return;
+    }
+
+    const activeCoord = this.selectedCoord ?? this.hoveredCoord;
+    if (!activeCoord) {
+      this.selectorGroup.visible = false;
+      return;
+    }
+
+    const worldPos = axialToWorld(activeCoord.q, activeCoord.r);
+    this.selectorGroup.position.set(worldPos.x, 0, worldPos.z);
+    this.selectorGroup.visible = true;
+  }
+
+  public setSelectedHex(coord: AxialCoord | null) {
+    this.selectedCoord = coord;
+    this.refreshSelectorAnchor();
+  }
+
   public getHoveredCoord(): AxialCoord | null {
-    return this.hoveredCoord;
+    return this.selectedCoord ?? this.hoveredCoord;
   }
 
   public setGameState(next: GameModeState) {
     const prev = this.gameState;
     this.gameState = next;
-    this.keysHeld.clear();
-    this.isOrbitDragging = false;
+    this.resetTransientInput();
 
     if (next === 'playing' && prev === 'title') {
-      // Smooth handoff from live title tour to gameplay framing
+      const aspect =
+        Math.max(this.container.clientWidth, 1) /
+        Math.max(this.container.clientHeight, 1);
       this.camTargetGoal.set(0, 0, 0);
       this.camYawGoal = Math.PI / 4;
-      this.camDistanceGoal = 11.2;
+      this.camDistanceGoal = this.getDefaultCameraDistance(aspect);
       if (this.pointerInside) {
         this.updateHoverFromPointer(this.pointerClientX, this.pointerClientY);
       }
     }
 
-    if (next !== 'playing') {
-      this.selectorGroup.visible = false;
-    }
+    this.refreshSelectorAnchor();
   }
 
   public setToolMode(mode: BuilderToolMode) {
@@ -611,14 +852,18 @@ export class HexSceneController {
   }
 
   public centerCamera() {
+    const aspect =
+      Math.max(this.container.clientWidth, 1) /
+      Math.max(this.container.clientHeight, 1);
     this.camTargetGoal.set(0, 0, 0);
+    this.camDistanceGoal = this.getDefaultCameraDistance(aspect);
   }
 
   public zoomBy(delta: number) {
     this.camDistanceGoal = THREE.MathUtils.clamp(
       this.camDistanceGoal + delta,
-      5.5,
-      20
+      CAMERA_MIN_DIST,
+      CAMERA_MAX_DIST
     );
   }
 
@@ -678,8 +923,8 @@ export class HexSceneController {
           root.traverse((obj) => {
             if ((obj as THREE.Mesh).isMesh) {
               const mesh = obj as THREE.Mesh;
-              mesh.castShadow = !this.isSoftwareGl;
-              mesh.receiveShadow = !this.isSoftwareGl;
+              mesh.castShadow = this.quality.shadowsEnabled;
+              mesh.receiveShadow = this.quality.shadowsEnabled;
               const mat = mesh.material;
               if (mat && 'envMapIntensity' in mat) {
                 (mat as THREE.MeshStandardMaterial).envMapIntensity = 0.28;
@@ -706,7 +951,7 @@ export class HexSceneController {
     this.currentWorldState = nextState;
     const animSet = new Set(animateNewKeys ?? []);
 
-    // Remove meshes that no longer exist or changed structure
+    // Remove meshes that no longer exist or changed structure (shared geometry/materials stay in modelCache)
     for (const [key, entry] of this.placedMeshes.entries()) {
       const target = nextState.hexes[key];
       if (!target || target.structureIndex !== entry.structureIndex) {
@@ -714,7 +959,7 @@ export class HexSceneController {
         this.placedMeshes.delete(key);
         if (!target && animSet.has(key)) {
           const pos = entry.group.position;
-          this.spawnParticleBurst(pos.x, 0.25, pos.z, 0xdc2626, 10);
+          this.spawnParticleBurst(pos.x, 0.25, pos.z, 0xdc2626, 8);
         }
       } else if (target.orientation !== entry.orientation) {
         entry.group.rotation.y = THREE.MathUtils.degToRad(target.orientation);
@@ -756,7 +1001,6 @@ export class HexSceneController {
     if (this.disposed) return;
 
     for (const [key, tile] of missingEntries) {
-      // Ensure state still has this tile after async load
       const liveTile = this.currentWorldState.hexes[key];
       if (!liveTile || liveTile.structureIndex !== tile.structureIndex) continue;
       if (this.placedMeshes.has(key)) continue;
@@ -784,7 +1028,7 @@ export class HexSceneController {
       if (animSet.has(key)) {
         group.scale.set(1.12, 0.55, 1.12);
         this.popAnims.push({ mesh: group, progress: 0 });
-        this.spawnParticleBurst(pos.x, 0.18, pos.z, 0xfef3c7, 12);
+        this.spawnParticleBurst(pos.x, 0.18, pos.z, 0xfef3c7, 10);
       }
     }
   }
@@ -796,10 +1040,13 @@ export class HexSceneController {
     hexColor: number,
     count: number
   ) {
-    for (let i = 0; i < count; i++) {
-      const p = this.particles[this.particleCursor];
-      this.particleCursor = (this.particleCursor + 1) % PARTICLE_POOL_SIZE;
-      const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.4;
+    const cappedCount = Math.min(count, this.particlePoolSize);
+    for (let i = 0; i < cappedCount; i++) {
+      const idx = this.particleCursor;
+      const p = this.particles[idx];
+      this.particleCursor = (this.particleCursor + 1) % this.particlePoolSize;
+      if (!p.active) this.activeParticleCount++;
+      const angle = (Math.PI * 2 * i) / cappedCount + (Math.random() - 0.5) * 0.4;
       const speed = 1.1 + Math.random() * 1.4;
       p.active = true;
       p.age = 0;
@@ -811,10 +1058,7 @@ export class HexSceneController {
       p.vy = 1.6 + Math.random() * 1.2;
       p.vz = Math.sin(angle) * speed;
       p.scale = 0.7 + Math.random() * 0.6;
-      this.particlesMesh.setColorAt(
-        (this.particleCursor - 1 + PARTICLE_POOL_SIZE) % PARTICLE_POOL_SIZE,
-        _colorTmp.setHex(hexColor)
-      );
+      this.particlesMesh.setColorAt(idx, _colorTmp.setHex(hexColor));
     }
     if (this.particlesMesh.instanceColor) {
       this.particlesMesh.instanceColor.needsUpdate = true;
@@ -825,21 +1069,37 @@ export class HexSceneController {
     if (this.disposed) return;
     const width = Math.max(this.container.clientWidth, 1);
     const height = Math.max(this.container.clientHeight, 1);
-    this.camera.aspect = width / height;
+    const aspect = width / height;
+    this.camera.aspect = aspect;
+    this.camera.fov = aspect < 0.8 ? 36 : 32;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
   }
 
+  private isCameraSettling(): boolean {
+    return (
+      Math.abs(this.camTarget.x - this.camTargetGoal.x) > 0.003 ||
+      Math.abs(this.camTarget.z - this.camTargetGoal.z) > 0.003 ||
+      Math.abs(this.camYaw - this.camYawGoal) > 0.002 ||
+      Math.abs(this.camDistance - this.camDistanceGoal) > 0.008
+    );
+  }
+
   private updateCameraTransform(dt: number) {
+    const aspect =
+      Math.max(this.container.clientWidth, 1) /
+      Math.max(this.container.clientHeight, 1);
+
     if (this.gameState === 'title') {
       this.titleOrbitAngle += dt * 0.16;
-      const dist = 10.6;
-      const pitch = 0.56;
+      const isPortrait = aspect < 0.85;
+      const dist = isPortrait ? 15.2 : 10.6;
+      const pitch = isPortrait ? 0.62 : 0.56;
       const horiz = Math.cos(pitch) * dist;
       const y = Math.sin(pitch) * dist;
-      // Offset lookAt slightly left so the focal castle sits nicely in right 2/3 while left third has calm sky/water
-      const focusX = -0.9;
-      const focusZ = -0.2;
+      // On desktop, offset left so the castle sits in right 2/3; on mobile portrait, center castle in upper frame
+      const focusX = isPortrait ? 0 : -0.9;
+      const focusZ = isPortrait ? 0.65 : -0.2;
       this.camera.position.set(
         focusX + Math.sin(this.titleOrbitAngle) * horiz,
         y,
@@ -867,22 +1127,41 @@ export class HexSceneController {
         const panSpeed = 6.5 * dt;
         this.camTargetGoal.x = THREE.MathUtils.clamp(
           this.camTargetGoal.x + worldDx * panSpeed,
-          -14,
-          14
+          -CAMERA_PAN_BOUND,
+          CAMERA_PAN_BOUND
         );
         this.camTargetGoal.z = THREE.MathUtils.clamp(
           this.camTargetGoal.z + worldDz * panSpeed,
-          -14,
-          14
+          -CAMERA_PAN_BOUND,
+          CAMERA_PAN_BOUND
         );
       }
     }
 
-    const dampFactor = 9;
-    this.camTarget.x = THREE.MathUtils.damp(this.camTarget.x, this.camTargetGoal.x, dampFactor, dt);
-    this.camTarget.z = THREE.MathUtils.damp(this.camTarget.z, this.camTargetGoal.z, dampFactor, dt);
-    this.camYaw = THREE.MathUtils.damp(this.camYaw, this.camYawGoal, 8, dt);
-    this.camDistance = THREE.MathUtils.damp(this.camDistance, this.camDistanceGoal, 8, dt);
+    // Tighter damping during active/recent touch gestures so camera never feels slippery
+    const touchRecent = performance.now() - this.lastTouchActivityMs < 450;
+    const targetDamp = touchRecent ? 18 : 10;
+    const rotDamp = touchRecent ? 16 : 9;
+
+    this.camTarget.x = THREE.MathUtils.damp(
+      this.camTarget.x,
+      this.camTargetGoal.x,
+      targetDamp,
+      dt
+    );
+    this.camTarget.z = THREE.MathUtils.damp(
+      this.camTarget.z,
+      this.camTargetGoal.z,
+      targetDamp,
+      dt
+    );
+    this.camYaw = THREE.MathUtils.damp(this.camYaw, this.camYawGoal, rotDamp, dt);
+    this.camDistance = THREE.MathUtils.damp(
+      this.camDistance,
+      this.camDistanceGoal,
+      rotDamp,
+      dt
+    );
 
     const horiz = Math.cos(this.camPitch) * this.camDistance;
     const height = Math.sin(this.camPitch) * this.camDistance;
@@ -904,7 +1183,8 @@ export class HexSceneController {
 
     // Gentle preview float
     if (this.selectorGroup.visible && this.selectorPreviewGroup.visible) {
-      this.selectorPreviewGroup.position.y = 0.22 + Math.sin(this.elapsedSec * 4) * 0.03;
+      this.selectorPreviewGroup.position.y =
+        0.22 + Math.sin(this.elapsedSec * 4) * 0.03;
     }
 
     // Pop-in spring animations
@@ -923,15 +1203,18 @@ export class HexSceneController {
       }
     }
 
-    // Pooled particles
+    // Pooled particles (early-out when pool is completely idle)
+    if (this.activeParticleCount <= 0) return;
+
     let anyParticleUpdated = false;
-    for (let i = 0; i < PARTICLE_POOL_SIZE; i++) {
+    for (let i = 0; i < this.particlePoolSize; i++) {
       const p = this.particles[i];
       if (!p.active) continue;
       anyParticleUpdated = true;
       p.age += dt;
       if (p.age >= p.life) {
         p.active = false;
+        this.activeParticleCount = Math.max(0, this.activeParticleCount - 1);
         _dummy.position.set(0, -10, 0);
         _dummy.scale.setScalar(0);
         _dummy.updateMatrix();
@@ -964,7 +1247,9 @@ export class HexSceneController {
           if (sync) gl.deleteSync(sync);
           return;
         }
-        const status = sync ? gl.getSyncParameter(sync, gl.SYNC_STATUS) : gl.SIGNALED;
+        const status = sync
+          ? gl.getSyncParameter(sync, gl.SYNC_STATUS)
+          : gl.SIGNALED;
         if (status === gl.UNSIGNALED) {
           this.frameId = window.setTimeout(poll, 5);
         } else {
@@ -987,11 +1272,42 @@ export class HexSceneController {
     }
   }
 
+  private isSceneActive(): boolean {
+    return (
+      this.gameState === 'title' ||
+      this.activeTouchPointers.size > 0 ||
+      this.keysHeld.size > 0 ||
+      this.isOrbitDragging ||
+      this.popAnims.length > 0 ||
+      this.activeParticleCount > 0 ||
+      this.isCameraSettling()
+    );
+  }
+
   private tick = () => {
     if (this.disposed) return;
+
+    if (document.hidden) {
+      this.scheduleNextFrame();
+      return;
+    }
+
     const now = performance.now();
+
+    // Battery-friendly idle frame throttling on real mobile devices (zero impact when interacting or on desktop)
+    if (
+      !this.isSoftwareGl &&
+      this.quality.idleFrameIntervalMs > 0 &&
+      !this.isSceneActive() &&
+      now - this.lastRenderMs < this.quality.idleFrameIntervalMs
+    ) {
+      this.scheduleNextFrame();
+      return;
+    }
+
     const rawDt = (now - this.lastFrameMs) / 1000;
     this.lastFrameMs = now;
+    this.lastRenderMs = now;
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
 
     this.updateCameraTransform(dt);
@@ -1009,17 +1325,37 @@ export class HexSceneController {
     this.resizeObserver.disconnect();
     this.unbindEvents();
 
-    this.scene.traverse((obj) => {
-      if ((obj as THREE.Mesh).isMesh) {
+    // Deduplicate shared geometries/materials before disposal (safe with cloned GLB templates)
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+
+    const collectResources = (root: THREE.Object3D) => {
+      root.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
-        mesh.geometry?.dispose();
-        if (Array.isArray(mesh.material)) {
-          mesh.material.forEach((m) => m.dispose());
-        } else {
-          mesh.material?.dispose();
+        if (mesh.geometry) {
+          geometries.add(mesh.geometry);
         }
-      }
-    });
+        if (mesh.material) {
+          if (Array.isArray(mesh.material)) {
+            mesh.material.forEach((m) => materials.add(m));
+          } else {
+            materials.add(mesh.material);
+          }
+        }
+      });
+    };
+
+    collectResources(this.scene);
+    for (const template of this.modelCache.values()) {
+      collectResources(template);
+    }
+
+    geometries.forEach((g) => g.dispose());
+    materials.forEach((m) => m.dispose());
+
+    this.modelCache.clear();
+    this.placedMeshes.clear();
+    this.envRenderTarget?.dispose();
     this.waterTexture.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentNode === this.container) {

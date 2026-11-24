@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DEFAULT_ROTATION_DEG,
   createEmptyWorldState,
@@ -49,8 +49,11 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   const [rotationDeg, setRotationDeg] = useState<number>(DEFAULT_ROTATION_DEG);
   const [toolMode, setToolMode] = useState<BuilderToolMode>('build');
   const [hoveredCoord, setHoveredCoord] = useState<AxialCoord | null>(null);
+  const [selectedHex, setSelectedHex] = useState<AxialCoord | null>(null);
   const [muted, setMuted] = useState<boolean>(false);
   const [dockOpen, setDockOpen] = useState<boolean>(true);
+  const [buildSheetOpen, setBuildSheetOpen] = useState<boolean>(false);
+  const [cameraStripOpen, setCameraStripOpen] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
 
@@ -59,6 +62,9 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   const worldStateRef = useRef(worldState);
   const selectedIndexRef = useRef(selectedIndex);
   const rotationDegRef = useRef(rotationDeg);
+  const toolModeRef = useRef(toolMode);
+  const selectedHexRef = useRef(selectedHex);
+  const buildSheetOpenRef = useRef(buildSheetOpen);
 
   useEffect(() => {
     gameStateRef.current = gameState;
@@ -72,6 +78,15 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   useEffect(() => {
     rotationDegRef.current = rotationDeg;
   }, [rotationDeg]);
+  useEffect(() => {
+    toolModeRef.current = toolMode;
+  }, [toolMode]);
+  useEffect(() => {
+    selectedHexRef.current = selectedHex;
+  }, [selectedHex]);
+  useEffect(() => {
+    buildSheetOpenRef.current = buildSheetOpen;
+  }, [buildSheetOpen]);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -89,6 +104,12 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     document.body.dataset.state = gameState;
     controllerRef.current?.setGameState(gameState);
   }, [gameState]);
+
+  const setSelectedHexSynced = useCallback((coord: AxialCoord | null) => {
+    selectedHexRef.current = coord;
+    setSelectedHex(coord);
+    controllerRef.current?.setSelectedHex(coord);
+  }, []);
 
   const handlePlaceAt = useCallback((q: number, r: number) => {
     const { nextState, changed } = placeHexInState(
@@ -115,6 +136,81 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     controllerRef.current?.syncWorldState(nextState, [hexKey(q, r)]);
   }, []);
 
+  /**
+   * Touch-first tap workflow:
+   * - If the mobile build sheet is open, tapping the map dismisses it cleanly.
+   * - In Demolish mode: tapping an occupied hex demolishes it; tapping empty clears selection.
+   * - In Build mode: first tap selects/previews the hex with floating 3D piece + contextual Confirm/Rotate/Cancel bar;
+   *   tapping the SAME selected hex a second time confirms & places immediately!
+   */
+  const handleTouchTapAt = useCallback(
+    (q: number, r: number) => {
+      if (buildSheetOpenRef.current) {
+        buildSheetOpenRef.current = false;
+        setBuildSheetOpen(false);
+        return;
+      }
+
+      if (toolModeRef.current === 'demolish') {
+        const existing = worldStateRef.current.hexes[hexKey(q, r)];
+        if (existing) {
+          handleDemolishAt(q, r);
+        }
+        setSelectedHexSynced(null);
+        return;
+      }
+
+      const prev = selectedHexRef.current;
+      if (prev && prev.q === q && prev.r === r) {
+        handlePlaceAt(q, r);
+        return;
+      }
+
+      setSelectedHexSynced({ q, r });
+      gameAudio.playCycle();
+    },
+    [handleDemolishAt, handlePlaceAt, setSelectedHexSynced]
+  );
+
+  const handleConfirmSelectedHex = useCallback(() => {
+    const coord = selectedHexRef.current;
+    if (!coord) return;
+    if (toolModeRef.current === 'demolish') {
+      handleDemolishAt(coord.q, coord.r);
+      setSelectedHexSynced(null);
+    } else {
+      handlePlaceAt(coord.q, coord.r);
+    }
+  }, [handleDemolishAt, handlePlaceAt, setSelectedHexSynced]);
+
+  const handleDemolishSelectedHex = useCallback(() => {
+    const coord = selectedHexRef.current;
+    if (!coord) return;
+    handleDemolishAt(coord.q, coord.r);
+  }, [handleDemolishAt]);
+
+  const handleCancelAction = useCallback(() => {
+    let didCancel = false;
+    if (buildSheetOpenRef.current) {
+      buildSheetOpenRef.current = false;
+      setBuildSheetOpen(false);
+      didCancel = true;
+    }
+    if (selectedHexRef.current) {
+      setSelectedHexSynced(null);
+      didCancel = true;
+    }
+    if (toolModeRef.current === 'demolish') {
+      toolModeRef.current = 'build';
+      setToolMode('build');
+      controllerRef.current?.setToolMode('build');
+      didCancel = true;
+    }
+    if (didCancel) {
+      gameAudio.playCycle();
+    }
+  }, [setSelectedHexSynced]);
+
   const handleRotatePiece = useCallback(() => {
     setRotationDeg((prev) => {
       const next = rotateHexStep(prev, 1);
@@ -126,6 +222,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   }, []);
 
   const handleCyclePiece = useCallback((delta: number) => {
+    toolModeRef.current = 'build';
     setToolMode('build');
     controllerRef.current?.setToolMode('build');
     setSelectedIndex((prev) => {
@@ -145,6 +242,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   }, []);
 
   const handleSetToolMode = useCallback((mode: BuilderToolMode) => {
+    toolModeRef.current = mode;
     setToolMode(mode);
     controllerRef.current?.setToolMode(mode);
   }, []);
@@ -154,7 +252,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       const serialized = serializeWorldState(worldStateRef.current);
       window.localStorage.setItem(STORAGE_KEY, serialized);
       gameAudio.playSaveChime();
-      showToast('Mapa salvo localmente (F1)');
+      showToast('Mapa salvo localmente');
     } catch {
       showToast('Não foi possível salvar no navegador');
     }
@@ -164,7 +262,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
       if (!raw) {
-        showToast('Nenhum mapa salvo ainda (use F1)');
+        showToast('Nenhum mapa salvo ainda');
         return;
       }
       const loaded = deserializeWorldState(raw, HEX_ASSETS.length);
@@ -174,38 +272,60 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       }
       worldStateRef.current = loaded;
       setWorldState(loaded);
+      setSelectedHexSynced(null);
       controllerRef.current?.syncWorldState(loaded);
       gameAudio.playSaveChime();
       showToast(`Mapa carregado (${Object.keys(loaded.hexes).length} peças)`);
     } catch {
       showToast('Erro ao carregar mapa');
     }
-  }, [showToast]);
+  }, [setSelectedHexSynced, showToast]);
 
   const handleStartGame = useCallback(() => {
     document.body.dataset.state = 'playing';
     setGameState('playing');
   }, []);
 
+  const handleResume = useCallback(() => {
+    setGameState('playing');
+  }, []);
+
+  const handlePause = useCallback(() => {
+    buildSheetOpenRef.current = false;
+    setBuildSheetOpen(false);
+    setCameraStripOpen(false);
+    setGameState('paused');
+  }, []);
+
+  const handleBackToTitle = useCallback(() => {
+    buildSheetOpenRef.current = false;
+    setBuildSheetOpen(false);
+    setCameraStripOpen(false);
+    setSelectedHexSynced(null);
+    setGameState('title');
+  }, [setSelectedHexSynced]);
+
   const handleResetStarter = useCallback(() => {
     const starter = createStarterWorldState(HEX_ASSETS);
     worldStateRef.current = starter;
     setWorldState(starter);
+    setSelectedHexSynced(null);
     controllerRef.current?.syncWorldState(starter);
     controllerRef.current?.centerCamera();
     setGameState('playing');
     showToast('Ilha inicial restaurada');
-  }, [showToast]);
+  }, [setSelectedHexSynced, showToast]);
 
   const handleClearMap = useCallback(() => {
     const empty = createEmptyWorldState();
     worldStateRef.current = empty;
     setWorldState(empty);
+    setSelectedHexSynced(null);
     controllerRef.current?.syncWorldState(empty);
     controllerRef.current?.centerCamera();
     setGameState('playing');
     showToast('Mapa limpo — pronto para construir do zero');
-  }, [showToast]);
+  }, [setSelectedHexSynced, showToast]);
 
   const handleToggleMute = useCallback(() => {
     setMuted((prev) => {
@@ -213,6 +333,41 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       gameAudio.setMuted(next);
       return next;
     });
+  }, []);
+
+  const handleToggleDock = useCallback(() => {
+    setDockOpen((prev) => !prev);
+  }, []);
+
+  const handleSetBuildSheetOpen = useCallback((open: boolean) => {
+    buildSheetOpenRef.current = open;
+    setBuildSheetOpen(open);
+    if (open) {
+      setCameraStripOpen(false);
+    }
+  }, []);
+
+  const handleToggleCameraStrip = useCallback(() => {
+    setCameraStripOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        buildSheetOpenRef.current = false;
+        setBuildSheetOpen(false);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleCenterCamera = useCallback(() => {
+    controllerRef.current?.centerCamera();
+  }, []);
+
+  const handleZoom = useCallback((delta: number) => {
+    controllerRef.current?.zoomBy(delta);
+  }, []);
+
+  const handleRotateCamera = useCallback((radians: number) => {
+    controllerRef.current?.rotateCameraBy(radians);
   }, []);
 
   // Mount Three.js controller ONCE inside isolated mount container
@@ -226,6 +381,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       },
       onPlaceAt: handlePlaceAt,
       onDemolishAt: handleDemolishAt,
+      onTouchTapAt: handleTouchTapAt,
       onRotate: handleRotatePiece,
       onCycleStructure: handleCyclePiece,
       onLoadProgress: () => {},
@@ -243,7 +399,13 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       controller.dispose();
       controllerRef.current = null;
     };
-  }, [handlePlaceAt, handleDemolishAt, handleRotatePiece, handleCyclePiece]);
+  }, [
+    handlePlaceAt,
+    handleDemolishAt,
+    handleTouchTapAt,
+    handleRotatePiece,
+    handleCyclePiece,
+  ]);
 
   // Unified keyboard bindings for Title Start, Gameplay actions, and Pause
   useEffect(() => {
@@ -261,7 +423,17 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         return;
       }
 
-      if (e.code === 'Escape' || e.code === 'KeyP') {
+      if (e.code === 'Escape') {
+        e.preventDefault();
+        if (buildSheetOpenRef.current || selectedHexRef.current) {
+          handleCancelAction();
+          return;
+        }
+        setGameState((curr) => (curr === 'playing' ? 'paused' : 'playing'));
+        return;
+      }
+
+      if (e.code === 'KeyP') {
         e.preventDefault();
         setGameState((curr) => (curr === 'playing' ? 'paused' : 'playing'));
         return;
@@ -280,9 +452,10 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         handleRotatePiece();
       } else if (e.code === 'Delete' || e.code === 'Backspace') {
         e.preventDefault();
-        const hovered = controllerRef.current?.getHoveredCoord();
-        if (hovered) {
-          handleDemolishAt(hovered.q, hovered.r);
+        const target =
+          selectedHexRef.current ?? controllerRef.current?.getHoveredCoord();
+        if (target) {
+          handleDemolishAt(target.q, target.r);
         }
       } else if (e.code === 'F1') {
         e.preventDefault();
@@ -303,6 +476,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
     handleStartGame,
+    handleCancelAction,
     handleCyclePiece,
     handleRotatePiece,
     handleDemolishAt,
@@ -311,18 +485,28 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     handleToggleMute,
   ]);
 
-  const tileCount = Object.keys(worldState.hexes).length;
+  const tileCount = useMemo(
+    () => Object.keys(worldState.hexes).length,
+    [worldState.hexes]
+  );
+
+  const selectedTileAssetName = useMemo(() => {
+    if (!selectedHex) return null;
+    const existing = worldState.hexes[hexKey(selectedHex.q, selectedHex.r)];
+    if (!existing) return null;
+    return HEX_ASSETS[existing.structureIndex]?.name ?? null;
+  }, [selectedHex, worldState.hexes]);
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#cde6f5]">
+    <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-[#9bd2ee] hex-game-viewport">
       {/* Isolated WebGL canvas mount container (never re-rendered by HUD updates) */}
       <div
         ref={canvasMountRef}
         data-testid="hex-webgl-canvas"
-        className="w-full h-full"
+        className="w-full h-full touch-none"
       />
 
-      {/* Sibling DOM HUD overlay */}
+      {/* Sibling DOM HUD overlay (memoized to prevent unnecessary re-renders) */}
       <GameHud
         gameState={gameState}
         cash={worldState.cash}
@@ -331,26 +515,36 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         rotationDeg={rotationDeg}
         toolMode={toolMode}
         hoveredCoord={hoveredCoord}
+        selectedHex={selectedHex}
+        selectedTileAssetName={selectedTileAssetName}
         assets={HEX_ASSETS}
         muted={muted}
         dockOpen={dockOpen}
+        buildSheetOpen={buildSheetOpen}
+        cameraStripOpen={cameraStripOpen}
         toastMessage={toastMessage}
         onStartGame={handleStartGame}
-        onResume={() => setGameState('playing')}
-        onPause={() => setGameState('paused')}
-        onBackToTitle={() => setGameState('title')}
+        onResume={handleResume}
+        onPause={handlePause}
+        onBackToTitle={handleBackToTitle}
         onResetStarter={handleResetStarter}
         onClearMap={handleClearMap}
         onSelectPiece={handleSelectPiece}
         onCyclePiece={handleCyclePiece}
         onRotatePiece={handleRotatePiece}
         onSetToolMode={handleSetToolMode}
+        onConfirmSelectedHex={handleConfirmSelectedHex}
+        onDemolishSelectedHex={handleDemolishSelectedHex}
+        onCancelAction={handleCancelAction}
         onSaveMap={handleSaveMap}
         onLoadMap={handleLoadMap}
         onToggleMute={handleToggleMute}
-        onToggleDock={() => setDockOpen((prev) => !prev)}
-        onCenterCamera={() => controllerRef.current?.centerCamera()}
-        onZoom={(delta) => controllerRef.current?.zoomBy(delta)}
+        onToggleDock={handleToggleDock}
+        onSetBuildSheetOpen={handleSetBuildSheetOpen}
+        onToggleCameraStrip={handleToggleCameraStrip}
+        onCenterCamera={handleCenterCamera}
+        onZoom={handleZoom}
+        onRotateCamera={handleRotateCamera}
       />
     </div>
   );

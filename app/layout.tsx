@@ -1,21 +1,30 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: 'cover',
+  themeColor: '#9bd2ee',
+};
+
 export const metadata: Metadata = {
-  title: 'Hexagon World — Guia & Preparação Godot',
+  title: 'Hexagon World — Construtor 3D',
   description:
-    'Inspeção completa, documentação inicial (README e ROADMAP) e pacote independente pronto para GitHub do projeto de aprendizado em Godot baseado no Starter-Kit-Hexagon-World.',
+    'Construtor 3D de mundos hexagonais com 72 peças originais, controles táteis para celular e desktop, e documentação do Starter-Kit-Hexagon-World.',
   openGraph: {
-    title: 'Hexagon World — Guia & Preparação Godot',
+    title: 'Hexagon World — Construtor 3D',
     description:
-      'Inspeção completa, documentação inicial (README e ROADMAP) e pacote independente pronto para GitHub do Starter-Kit-Hexagon-World.',
+      'Construtor 3D de mundos hexagonais com 72 peças originais, controles táteis para celular e desktop, e documentação do Starter-Kit-Hexagon-World.',
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Hexagon World — Guia & Preparação Godot',
+    title: 'Hexagon World — Construtor 3D',
     description:
-      'Inspeção completa, documentação inicial (README e ROADMAP) e pacote independente pronto para GitHub do Starter-Kit-Hexagon-World.',
+      'Construtor 3D de mundos hexagonais com 72 peças originais, controles táteis para celular e desktop, e documentação do Starter-Kit-Hexagon-World.',
   },
 };
 
