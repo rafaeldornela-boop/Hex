@@ -1,6 +1,6 @@
 import type { HexAssetEntry } from './godot-docs';
 import { getBuildingLevel, getEffectiveBuildingStats } from './building-upgrade-engine';
-import { aggregateTileModuleEffects } from './building-modules-engine';
+import { aggregateTileModuleEffects, getInstalledModules } from './building-modules-engine';
 import { hexKey, type AxialCoord, type HexOwner, type HexWorldState } from './hex-engine';
 import { getHexTerrainAndResource, getTerrainDefenseBonus } from './terrain-engine';
 import { AXIAL_DIRECTIONS } from './territory-engine';
@@ -137,7 +137,7 @@ export function computeFactionMilitaryPower(
     if (underConstructionKeys?.has(hexKey(tile.q, tile.r))) continue;
     const assetName = assets[tile.structureIndex]?.name ?? '';
     const stats = getEffectiveBuildingStats(assetName, getBuildingLevel(tile));
-    const modDef = aggregateTileModuleEffects(assetName, tile.modules).defenseBonus;
+    const modDef = aggregateTileModuleEffects(assetName, getInstalledModules(tile)).defenseBonus;
     defensePower += stats.defenseBonus + modDef;
   }
 
@@ -159,7 +159,7 @@ export function computeHexDefenseScore(
 
   if (tile && !underConstructionKeys?.has(hexKey(q, r))) {
     const assetName = assets[tile.structureIndex]?.name ?? '';
-    const modDef = aggregateTileModuleEffects(assetName, tile.modules).defenseBonus;
+    const modDef = aggregateTileModuleEffects(assetName, getInstalledModules(tile)).defenseBonus;
     score += getEffectiveBuildingStats(assetName, getBuildingLevel(tile)).defenseBonus + modDef;
   }
 

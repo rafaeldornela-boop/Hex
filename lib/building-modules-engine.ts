@@ -55,6 +55,60 @@ export type BuildingModuleId =
 
 export type BuildingModuleStatus = 'built' | 'building' | 'available' | 'blocked';
 
+export type BuildingModuleVisualKind =
+  | 'silo'
+  | 'irrigation_canal'
+  | 'barn'
+  | 'seed_vault'
+  | 'drying_yard'
+  | 'wood_workshop'
+  | 'timber_carts'
+  | 'industrial_saw'
+  | 'ore_depot'
+  | 'toolshop'
+  | 'mine_drainage'
+  | 'deep_gallery'
+  | 'market_warehouse'
+  | 'expanded_stalls'
+  | 'exchange_hall'
+  | 'trade_center'
+  | 'smelter_depot'
+  | 'advanced_furnace'
+  | 'cooling_system'
+  | 'high_temp_furnace'
+  | 'port_warehouse'
+  | 'port_crane'
+  | 'port_lighthouse'
+  | 'expanded_dock'
+  | 'residential_wing'
+  | 'stone_well'
+  | 'street_lighting'
+  | 'garden_plaza'
+  | 'royal_archive'
+  | 'library_wing'
+  | 'scriptorium'
+  | 'observatory'
+  | 'armory'
+  | 'watch_beacon'
+  | 'training_yard';
+
+export interface BuildingModuleVisualSpec {
+  kind: BuildingModuleVisualKind;
+  footprintRadius: number;
+  defaultOffset: readonly [number, number];
+}
+
+export interface BuildingModuleVisualPlacement {
+  moduleId: BuildingModuleId;
+  visualKind: BuildingModuleVisualKind;
+  offsetX: number;
+  offsetZ: number;
+  groundY: number;
+  footprintRadius: number;
+  rotationY: number;
+  isOverWater: boolean;
+}
+
 export interface BuildingModuleEffect {
   prodPct?: Partial<
     Record<'gold' | 'wood' | 'stone' | 'food' | 'ore' | 'metal' | 'science', number>
@@ -86,6 +140,7 @@ export interface BuildingModuleDefinition {
   buildTimeTurns: number;
   requiredTech: TechId | null;
   effects: BuildingModuleEffect;
+  visual: BuildingModuleVisualSpec;
 }
 
 export interface BuildingModuleOptionState {
@@ -180,6 +235,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       storageFoodBonus: 35,
       winterResilience: 0.2,
     },
+    visual: { kind: 'silo', footprintRadius: 0.08, defaultOffset: [0.31, 0.0] },
   },
   farm_irrigation: {
     id: 'farm_irrigation',
@@ -194,6 +250,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { food: 0.15 },
       droughtResilience: 0.35,
     },
+    visual: { kind: 'irrigation_canal', footprintRadius: 0.095, defaultOffset: [0.0, 0.32] },
   },
   farm_barn: {
     id: 'farm_barn',
@@ -209,6 +266,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       storageGeneralBonus: 10,
       seasonalResilience: 0.15,
     },
+    visual: { kind: 'barn', footprintRadius: 0.085, defaultOffset: [-0.26, 0.2] },
   },
   farm_seed_vault: {
     id: 'farm_seed_vault',
@@ -224,6 +282,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       flatScience: 1,
       regionalWeights: { agricultural: 3 },
     },
+    visual: { kind: 'seed_vault', footprintRadius: 0.08, defaultOffset: [0.25, -0.2] },
   },
 
   // ======================== SERRARIA ========================
@@ -240,6 +299,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       storageGeneralBonus: 25,
       prodPct: { wood: 0.1 },
     },
+    visual: { kind: 'drying_yard', footprintRadius: 0.09, defaultOffset: [0.0, 0.32] },
   },
   lumber_workshop: {
     id: 'lumber_workshop',
@@ -254,6 +314,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { wood: 0.12 },
       flatGold: 2,
     },
+    visual: { kind: 'wood_workshop', footprintRadius: 0.085, defaultOffset: [-0.32, 0.0] },
   },
   lumber_carts: {
     id: 'lumber_carts',
@@ -268,6 +329,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       logisticsBonusPct: 0.12,
       prodPct: { wood: 0.1 },
     },
+    visual: { kind: 'timber_carts', footprintRadius: 0.08, defaultOffset: [0.32, -0.1] },
   },
   lumber_industrial_saw: {
     id: 'lumber_industrial_saw',
@@ -282,6 +344,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { wood: 0.22 },
       regionalWeights: { forestry: 3 },
     },
+    visual: { kind: 'industrial_saw', footprintRadius: 0.09, defaultOffset: [-0.22, 0.23] },
   },
 
   // ======================== MINA ========================
@@ -298,6 +361,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       storageGeneralBonus: 30,
       prodPct: { stone: 0.1 },
     },
+    visual: { kind: 'ore_depot', footprintRadius: 0.085, defaultOffset: [-0.32, -0.02] },
   },
   mine_toolshop: {
     id: 'mine_toolshop',
@@ -312,6 +376,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { ore: 0.15, stone: 0.15 },
       maintenanceDelta: -1,
     },
+    visual: { kind: 'toolshop', footprintRadius: 0.085, defaultOffset: [-0.24, 0.22] },
   },
   mine_drainage: {
     id: 'mine_drainage',
@@ -326,6 +391,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { ore: 0.1 },
       rainStormResilience: 0.45,
     },
+    visual: { kind: 'mine_drainage', footprintRadius: 0.09, defaultOffset: [-0.31, 0.12] },
   },
   mine_deep_gallery: {
     id: 'mine_deep_gallery',
@@ -340,6 +406,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { ore: 0.25, stone: 0.2 },
       regionalWeights: { mining: 3 },
     },
+    visual: { kind: 'deep_gallery', footprintRadius: 0.095, defaultOffset: [-0.28, -0.17] },
   },
 
   // ======================== MERCADO ========================
@@ -355,6 +422,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
     effects: {
       storageGeneralBonus: 35,
     },
+    visual: { kind: 'market_warehouse', footprintRadius: 0.085, defaultOffset: [-0.32, -0.02] },
   },
   market_expanded_stalls: {
     id: 'market_expanded_stalls',
@@ -368,6 +436,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
     effects: {
       prodPct: { gold: 0.15 },
     },
+    visual: { kind: 'expanded_stalls', footprintRadius: 0.09, defaultOffset: [0.0, 0.32] },
   },
   market_exchange: {
     id: 'market_exchange',
@@ -383,6 +452,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       flatScience: 1,
       logisticsBonusPct: 0.08,
     },
+    visual: { kind: 'exchange_hall', footprintRadius: 0.085, defaultOffset: [-0.24, 0.21] },
   },
   market_trade_center: {
     id: 'market_trade_center',
@@ -397,6 +467,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { gold: 0.24 },
       regionalWeights: { commercial: 4 },
     },
+    visual: { kind: 'trade_center', footprintRadius: 0.09, defaultOffset: [0.0, -0.32] },
   },
 
   // ======================== FUNDIÇÃO ========================
@@ -413,6 +484,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       storageGeneralBonus: 30,
       prodPct: { metal: 0.1 },
     },
+    visual: { kind: 'smelter_depot', footprintRadius: 0.085, defaultOffset: [-0.31, -0.04] },
   },
   smelter_advanced_furnace: {
     id: 'smelter_advanced_furnace',
@@ -426,6 +498,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
     effects: {
       prodPct: { metal: 0.18 },
     },
+    visual: { kind: 'advanced_furnace', footprintRadius: 0.085, defaultOffset: [0.32, -0.02] },
   },
   smelter_cooling: {
     id: 'smelter_cooling',
@@ -441,6 +514,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       seasonalResilience: 0.25,
       maintenanceDelta: -1,
     },
+    visual: { kind: 'cooling_system', footprintRadius: 0.085, defaultOffset: [-0.23, 0.22] },
   },
   smelter_high_temp_furnace: {
     id: 'smelter_high_temp_furnace',
@@ -455,6 +529,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { metal: 0.28 },
       regionalWeights: { mining: 3 },
     },
+    visual: { kind: 'high_temp_furnace', footprintRadius: 0.09, defaultOffset: [-0.24, -0.2] },
   },
 
   // ======================== PORTO & DOCA ========================
@@ -471,6 +546,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       storageGeneralBonus: 40,
       storageFoodBonus: 20,
     },
+    visual: { kind: 'port_warehouse', footprintRadius: 0.09, defaultOffset: [-0.3, -0.04] },
   },
   port_crane: {
     id: 'port_crane',
@@ -485,6 +561,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       logisticsBonusPct: 0.15,
       prodPct: { gold: 0.12, food: 0.1 },
     },
+    visual: { kind: 'port_crane', footprintRadius: 0.085, defaultOffset: [0.32, 0.0] },
   },
   port_lighthouse: {
     id: 'port_lighthouse',
@@ -501,6 +578,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { gold: 0.1 },
       defenseBonus: 2,
     },
+    visual: { kind: 'port_lighthouse', footprintRadius: 0.075, defaultOffset: [0.24, -0.2] },
   },
   port_expanded_dock: {
     id: 'port_expanded_dock',
@@ -515,6 +593,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { gold: 0.22, food: 0.18 },
       regionalWeights: { port: 4 },
     },
+    visual: { kind: 'expanded_dock', footprintRadius: 0.095, defaultOffset: [-0.22, 0.22] },
   },
 
   // ======================== RESIDÊNCIAS & CASTELO ========================
@@ -530,6 +609,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
     effects: {
       housingBonus: 2,
     },
+    visual: { kind: 'residential_wing', footprintRadius: 0.085, defaultOffset: [-0.31, -0.12] },
   },
   res_well: {
     id: 'res_well',
@@ -544,6 +624,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       urbanQualityBonus: 2,
       droughtResilience: 0.2,
     },
+    visual: { kind: 'stone_well', footprintRadius: 0.07, defaultOffset: [0.32, -0.06] },
   },
   res_lighting: {
     id: 'res_lighting',
@@ -559,6 +640,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       defenseBonus: 1,
       flatGold: 1,
     },
+    visual: { kind: 'street_lighting', footprintRadius: 0.055, defaultOffset: [-0.27, 0.2] },
   },
   res_plaza: {
     id: 'res_plaza',
@@ -574,12 +656,13 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       flatGold: 1,
       regionalWeights: { urban: 3 },
     },
+    visual: { kind: 'garden_plaza', footprintRadius: 0.095, defaultOffset: [-0.12, 0.32] },
   },
   castle_royal_archive: {
     id: 'castle_royal_archive',
     category: 'residential',
     labelPt: 'Arquivo Real',
-    summaryPt: '+2 Ciência · +25 Armazém Geral · +2 Qualidade Urbana',
+    summaryPt: '+2 Ciência · +25 Armazém Geral · +2 Qualidade Urbana · +2 Vocação Acadêmica',
     compatibleAssets: ['building-castle', 'unit-mansion'],
     baseCost: makeCost({ gold: 210, wood: 20, stone: 24, metal: 4 }),
     buildTimeTurns: 4,
@@ -590,6 +673,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       urbanQualityBonus: 2,
       regionalWeights: { academic: 2 },
     },
+    visual: { kind: 'royal_archive', footprintRadius: 0.085, defaultOffset: [0.32, -0.14] },
   },
 
   // ======================== ACADÊMICO & MILITAR ========================
@@ -606,6 +690,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { science: 0.2 },
       storageGeneralBonus: 15,
     },
+    visual: { kind: 'library_wing', footprintRadius: 0.085, defaultOffset: [-0.34, 0.0] },
   },
   acad_scriptorium: {
     id: 'acad_scriptorium',
@@ -620,6 +705,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       flatScience: 2,
       flatGold: 1,
     },
+    visual: { kind: 'scriptorium', footprintRadius: 0.085, defaultOffset: [-0.24, -0.21] },
   },
   acad_observatory: {
     id: 'acad_observatory',
@@ -634,6 +720,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       prodPct: { science: 0.28 },
       regionalWeights: { academic: 3 },
     },
+    visual: { kind: 'observatory', footprintRadius: 0.08, defaultOffset: [0.34, 0.0] },
   },
   mil_armory: {
     id: 'mil_armory',
@@ -648,6 +735,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       defenseBonus: 4,
       storageGeneralBonus: 20,
     },
+    visual: { kind: 'armory', footprintRadius: 0.085, defaultOffset: [-0.32, 0.06] },
   },
   mil_beacon: {
     id: 'mil_beacon',
@@ -663,6 +751,7 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       winterResilience: 0.25,
       rainStormResilience: 0.25,
     },
+    visual: { kind: 'watch_beacon', footprintRadius: 0.07, defaultOffset: [0.32, 0.0] },
   },
   mil_training_yard: {
     id: 'mil_training_yard',
@@ -677,8 +766,160 @@ export const BUILDING_MODULES: Record<BuildingModuleId, BuildingModuleDefinition
       defenseBonus: 3,
       urbanQualityBonus: 2,
     },
+    visual: { kind: 'training_yard', footprintRadius: 0.09, defaultOffset: [-0.22, 0.22] },
   },
 };
+
+const ASSET_MODULE_SLOT_OVERRIDES: Partial<
+  Record<string, Partial<Record<BuildingModuleId, readonly [number, number]>>>
+> = {
+  'building-mill': {
+    farm_silo: [0.29, -0.1],
+    farm_irrigation: [-0.28, 0.14],
+    farm_barn: [-0.26, -0.18],
+    farm_seed_vault: [0.33, 0.06],
+  },
+  'building-sheep': {
+    farm_silo: [0.32, 0.04],
+    farm_irrigation: [0.02, 0.33],
+    farm_barn: [-0.27, 0.19],
+    farm_seed_vault: [-0.25, -0.21],
+  },
+  'building-watermill': {
+    farm_silo: [0.24, -0.22],
+    farm_irrigation: [-0.24, 0.22],
+    farm_barn: [-0.25, -0.2],
+    farm_seed_vault: [0.25, 0.2],
+  },
+  'building-dock': {
+    port_warehouse: [0.0, 0.3],
+    port_crane: [0.22, -0.22],
+    port_lighthouse: [0.0, -0.32],
+    port_expanded_dock: [-0.25, 0.2],
+  },
+  bridge: {
+    port_crane: [0.0, -0.32],
+    port_lighthouse: [-0.24, 0.22],
+    res_lighting: [0.0, 0.32],
+  },
+  'building-cabin': {
+    res_extension: [0.28, -0.15],
+    res_well: [-0.24, 0.2],
+    res_lighting: [0.33, 0.04],
+    res_plaza: [-0.14, 0.3],
+  },
+  'building-village': {
+    res_extension: [-0.33, 0.0],
+    res_well: [0.33, 0.08],
+    res_lighting: [-0.23, 0.22],
+    res_plaza: [0.22, -0.22],
+  },
+  'unit-mansion': {
+    res_extension: [0.29, -0.02],
+    res_well: [-0.29, 0.02],
+    res_lighting: [0.24, 0.2],
+    res_plaza: [-0.24, 0.2],
+    castle_royal_archive: [-0.24, -0.2],
+  },
+  'building-castle': {
+    res_extension: [0.32, 0.12],
+    res_well: [0.0, 0.32],
+    res_lighting: [-0.36, 0.08],
+    res_plaza: [0.0, -0.32],
+    castle_royal_archive: [0.32, -0.14],
+    mil_armory: [-0.36, -0.14],
+  },
+  'building-wizard-tower': {
+    acad_library: [-0.34, 0.0],
+    acad_scriptorium: [-0.24, -0.21],
+    acad_observatory: [0.34, 0.0],
+    res_lighting: [-0.14, 0.3],
+  },
+  'building-archery': {
+    mil_armory: [-0.32, 0.06],
+    mil_beacon: [-0.24, 0.21],
+    mil_training_yard: [-0.12, 0.31],
+    res_lighting: [-0.33, -0.1],
+  },
+  'building-tower': {
+    mil_armory: [-0.32, -0.02],
+    mil_beacon: [0.32, 0.0],
+    mil_training_yard: [-0.22, 0.22],
+    res_lighting: [0.16, 0.3],
+  },
+  'unit-wall-tower': {
+    mil_armory: [0.28, 0.0],
+    mil_beacon: [-0.28, 0.0],
+    mil_training_yard: [0.0, 0.3],
+    res_lighting: [0.0, -0.3],
+  },
+  'building-wall': {
+    mil_armory: [-0.33, 0.0],
+    mil_beacon: [0.33, 0.0],
+    mil_training_yard: [-0.25, 0.21],
+    res_lighting: [0.32, -0.1],
+  },
+  'building-walls': {
+    mil_armory: [-0.18, 0.18],
+    mil_beacon: [0.18, -0.18],
+    mil_training_yard: [0.18, 0.18],
+    res_lighting: [-0.24, 0.0],
+  },
+};
+
+const HEX_SQRT3_OVER_2 = Math.sqrt(3) / 2;
+
+export function isPointInsideLocalHex(
+  x: number,
+  z: number,
+  radius = 0,
+  edgeMargin = 0.015
+): boolean {
+  const limit = 0.5 - edgeMargin;
+  const ax = Math.abs(x);
+  const az = Math.abs(z);
+  return ax + radius <= limit && 0.5 * ax + HEX_SQRT3_OVER_2 * az + radius <= limit;
+}
+
+export function getBuildingBaseSurfaceY(assetName: string): number {
+  if (assetName === 'dirt-lumber') return 0.1;
+  if (assetName === 'unit-mansion' || assetName === 'unit-wall-tower') return 0.0;
+  if (assetName === 'building-cabin' || assetName === 'building-wizard-tower') return 0.27;
+  return 0.2;
+}
+
+export function getBuildingModuleVisualPlacement(
+  assetName: string,
+  moduleId: BuildingModuleId,
+  buildingLevel = 1
+): BuildingModuleVisualPlacement {
+  const def = BUILDING_MODULES[moduleId];
+  const override = ASSET_MODULE_SLOT_OVERRIDES[assetName]?.[moduleId];
+  const [offsetX, offsetZ] = override ?? def.visual.defaultOffset;
+  const baseSurface = getBuildingBaseSurfaceY(assetName);
+  const isOverWater = moduleId === 'port_expanded_dock';
+  const hasStandardPlinthLift =
+    buildingLevel >= 2 &&
+    !isOverWater &&
+    Math.abs(baseSurface - 0.2) < 0.01 &&
+    Math.hypot(offsetX, offsetZ) <= 0.4;
+  const groundY = isOverWater ? 0.1 : baseSurface + (hasStandardPlinthLift ? 0.036 : 0);
+  const rotationY =
+    moduleId === 'farm_irrigation' || moduleId === 'mine_drainage'
+      ? Math.atan2(offsetX, offsetZ)
+      : Math.atan2(-offsetX, -offsetZ) * 0.25;
+
+  return {
+    moduleId,
+    visualKind: def.visual.kind,
+    offsetX,
+    offsetZ,
+    groundY,
+    footprintRadius: def.visual.footprintRadius,
+    rotationY,
+    isOverWater,
+  };
+}
 
 export function isValidBuildingModuleId(id: string): id is BuildingModuleId {
   return Object.prototype.hasOwnProperty.call(BUILDING_MODULES, id);
@@ -706,12 +947,18 @@ export function getModuleSlotsForBuilding(assetName: string, rawLevel = 1): numb
 }
 
 export function getInstalledModules(
-  tile: Pick<PlacedHex, 'modules'> | null | undefined
+  tile: Pick<PlacedHex, 'modules' | 'meta'> | null | undefined
 ): BuildingModuleId[] {
-  if (!tile || !Array.isArray(tile.modules)) return [];
+  if (!tile) return [];
+  const rawList = Array.isArray(tile.modules)
+    ? tile.modules
+    : Array.isArray(tile.meta?.modules)
+      ? tile.meta.modules
+      : null;
+  if (!rawList) return [];
   const seen = new Set<BuildingModuleId>();
   const valid: BuildingModuleId[] = [];
-  for (const raw of tile.modules) {
+  for (const raw of rawList) {
     if (typeof raw === 'string' && isValidBuildingModuleId(raw) && !seen.has(raw)) {
       seen.add(raw);
       valid.push(raw);

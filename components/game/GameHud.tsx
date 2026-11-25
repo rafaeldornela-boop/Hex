@@ -232,7 +232,11 @@ function formatLiveBuildingYield(
   const effective = getEffectiveBuildingStats(def.assetName, level);
   const parts: string[] = [];
   const p = report.actualProduction;
-  if (effective.housingCapacity > 0) parts.push(`+${effective.housingCapacity} Moradia`);
+  const housing = report.effectiveHousingCapacity ?? effective.housingCapacity;
+  const defense = report.effectiveDefenseBonus ?? effective.defenseBonus;
+  const storageGeneral = report.effectiveStorageGeneral ?? effective.storageBonus;
+  const storageFood = report.effectiveStorageFood ?? 0;
+  if (housing > 0) parts.push(`+${housing} Moradia`);
   if (p.gold > 0) parts.push(`+${p.gold} Ouro`);
   if (p.wood > 0) parts.push(`+${p.wood} Mad`);
   if (p.stone > 0) parts.push(`+${p.stone} Ped`);
@@ -240,8 +244,9 @@ function formatLiveBuildingYield(
   if (p.ore > 0) parts.push(`+${p.ore} Min`);
   if (p.metal > 0) parts.push(`+${p.metal} Met`);
   if (p.science > 0) parts.push(`+${p.science} Ciên`);
-  if (effective.defenseBonus > 0) parts.push(`+${effective.defenseBonus} Def`);
-  if (effective.storageBonus > 0) parts.push(`+${effective.storageBonus} Arm`);
+  if (defense > 0) parts.push(`+${defense} Def`);
+  if (storageGeneral > 0) parts.push(`+${storageGeneral} Arm`);
+  if (storageFood > 0) parts.push(`+${storageFood} Arm. Alim`);
   return parts.length > 0 ? parts.join(' · ') : def.summaryPt;
 }
 
@@ -418,7 +423,8 @@ const GameHud = memo(function GameHud({
     return `${selectedRoadCheck.isUpgrade ? 'Melhorar' : 'Estrada'}: ${def.shortNamePt} (${formatCompactCost(def.cost, def.cost.gold)})`;
   }, [selectedRoad, selectedRoadCheck]);
 
-  const [modulesDrawerOpen, setModulesDrawerOpen] = useState(false);
+  const selectedHexKey = selectedHex ? `${selectedHex.q},${selectedHex.r}` : null;
+  const [modulesDrawerHexKey, setModulesDrawerHexKey] = useState<string | null>(null);
 
   const isNewBuildInProgress = Boolean(
     selectedHexConstruction &&
@@ -438,7 +444,10 @@ const GameHud = memo(function GameHud({
       ? BUILDING_MODULES[selectedHexConstruction.moduleId].labelPt
       : null;
   const showModulesDrawer =
-    modulesDrawerOpen && Boolean(selectedBuildingModules) && !isNewBuildInProgress;
+    Boolean(selectedHexKey) &&
+    modulesDrawerHexKey === selectedHexKey &&
+    Boolean(selectedBuildingModules) &&
+    !isNewBuildInProgress;
 
   const selectedBuildingDef = selectedTileAssetName
     ? getBuildingDefinition(selectedTileAssetName)
@@ -1279,7 +1288,7 @@ const GameHud = memo(function GameHud({
                           <button
                             type="button"
                             data-testid="mobile-modules-button"
-                            onClick={() => setModulesDrawerOpen(true)}
+                            onClick={() => setModulesDrawerHexKey(selectedHexKey)}
                             className="min-h-[46px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5"
                           >
                             <Wrench className="w-4 h-4 shrink-0" aria-hidden="true" />
@@ -2060,7 +2069,7 @@ const GameHud = memo(function GameHud({
                       <button
                         type="button"
                         data-testid="desktop-modules-button"
-                        onClick={() => setModulesDrawerOpen(true)}
+                        onClick={() => setModulesDrawerHexKey(selectedHexKey)}
                         className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-[#1e2d24] bg-emerald-700 text-white shadow-[0_2px_0_#1e2d24] hover:bg-emerald-800 whitespace-nowrap cursor-pointer"
                       >
                         <Wrench className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
@@ -2482,6 +2491,9 @@ const GameHud = memo(function GameHud({
           role="dialog"
           aria-modal="true"
           aria-labelledby="building-modules-title"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setModulesDrawerHexKey(null);
+          }}
           className="fixed inset-0 z-40 bg-[#1a221d]/45 flex items-end sm:items-center justify-center sm:p-4 pointer-events-auto"
         >
           <div
@@ -2524,7 +2536,7 @@ const GameHud = memo(function GameHud({
 
               <button
                 type="button"
-                onClick={() => setModulesDrawerOpen(false)}
+                onClick={() => setModulesDrawerHexKey(null)}
                 aria-label="Fechar painel de melhorias"
                 className="w-11 h-11 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer hover:bg-[#e5dcc7]"
               >

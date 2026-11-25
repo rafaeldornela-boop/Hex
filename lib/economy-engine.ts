@@ -112,6 +112,11 @@ export interface BuildingOperationReport {
   roadBonusNotesPt: string[];
   potentialProduction: BuildingProduction;
   actualProduction: BuildingProduction;
+  effectiveHousingCapacity: number;
+  effectiveStorageGeneral: number;
+  effectiveStorageFood: number;
+  effectiveDefenseBonus: number;
+  effectiveMaintenanceGold: number;
   inputConsumed: Partial<Record<InputResourceKey, number>>;
 }
 
@@ -773,6 +778,11 @@ export function computeTurnEconomyBreakdown(params: {
         roadBonusNotesPt: [],
         potentialProduction: { ...stats.production },
         actualProduction: { ...ZERO_PROD },
+        effectiveHousingCapacity: 0,
+        effectiveStorageGeneral: 0,
+        effectiveStorageFood: 0,
+        effectiveDefenseBonus: 0,
+        effectiveMaintenanceGold: 0,
         inputConsumed: {},
       };
       continue;
@@ -927,13 +937,18 @@ export function computeTurnEconomyBreakdown(params: {
     if (item.stats.production.ore > 0) {
       const regMiningMult =
         citySpec?.id === 'mining' ? (citySpecTier === 3 ? 1.15 : citySpecTier === 2 ? 1.1 : 1.06) : 1;
+      const effRainOrePass1 =
+        weather.id === 'rain' || weather.id === 'storm'
+          ? 1 - 0.15 * (1 - Math.min(0.75, item.modEff.rainStormResilience))
+          : 1;
       extractedOreThisTurn +=
         item.stats.production.ore *
         (1 + item.modEff.prodPct.ore) *
         rawScale *
         mods.stoneOreMultiplier *
         mods.oreBonusMultiplier *
-        regMiningMult;
+        regMiningMult *
+        effRainOrePass1;
     }
     if (item.stats.production.food > 0) {
       const waterMitigation =
@@ -952,6 +967,7 @@ export function computeTurnEconomyBreakdown(params: {
         (season === 'winter' ? item.modEff.winterResilience : 0);
       const weatherModResilience =
         item.modEff.seasonalResilience +
+        (weather.id === 'frost' ? item.modEff.winterResilience : 0) +
         (weather.id === 'drought_weather' ? item.modEff.droughtResilience : 0) +
         (weather.id === 'rain' || weather.id === 'storm'
           ? item.modEff.rainStormResilience
@@ -1082,6 +1098,7 @@ export function computeTurnEconomyBreakdown(params: {
       (season === 'winter' ? item.modEff.winterResilience : 0);
     const weatherModRes =
       item.modEff.seasonalResilience +
+      (weather.id === 'frost' ? item.modEff.winterResilience : 0) +
       (weather.id === 'drought_weather' ? item.modEff.droughtResilience : 0) +
       (weather.id === 'rain' || weather.id === 'storm'
         ? item.modEff.rainStormResilience
@@ -1204,13 +1221,17 @@ export function computeTurnEconomyBreakdown(params: {
         const netFoodFactor = effSeasonFood * effWeatherFood;
         if (Math.abs(netFoodFactor - 1) >= 0.04) {
           const pct = Math.round((netFoodFactor - 1) * 100);
+          const totalProtPct = Math.min(
+            75,
+            Math.round(
+              (item.stats.seasonalResilience + Math.max(seasonModRes, weatherModRes)) * 100
+            )
+          );
           seasonalNotePt =
             pct >= 0
               ? `${seasonProfile.labelPt}: +${pct}% Alimento`
               : `${seasonProfile.labelPt}: ${pct}% Alimento${
-                  item.stats.seasonalResilience > 0
-                    ? ` (Nv.${item.level} protege ${Math.round(item.stats.seasonalResilience * 100)}%)`
-                    : ''
+                  totalProtPct > 0 ? ` (protege ${totalProtPct}%)` : ''
                 }`;
         }
       } else if (item.stats.production.wood > 0 && Math.abs(effSeasonWood * effWeatherWood - 1) >= 0.04) {
@@ -1219,6 +1240,12 @@ export function computeTurnEconomyBreakdown(params: {
       } else if (item.bDef.role === 'commerce' && Math.abs(effSeasonGold * effWeatherGold - 1) >= 0.04) {
         const pct = Math.round((effSeasonGold * effWeatherGold - 1) * 100);
         seasonalNotePt = `${seasonProfile.labelPt}: ${pct >= 0 ? '+' : ''}${pct}% Comércio`;
+      } else if ((item.stats.production.ore > 0 || item.stats.production.stone > 0) && effRainStoneOre < 0.99) {
+        const pct = Math.round((effRainStoneOre - 1) * 100);
+        const prot = Math.min(75, Math.round(item.modEff.rainStormResilience * 100));
+        seasonalNotePt = `${weather.labelPt}: ${pct}% Mineração${
+          prot > 0 ? ` (protege ${prot}%)` : ''
+        }`;
       }
     }
 
@@ -1295,6 +1322,11 @@ export function computeTurnEconomyBreakdown(params: {
       roadBonusNotesPt: item.roadBonusNotesPt,
       potentialProduction: { ...item.stats.production },
       actualProduction,
+      effectiveHousingCapacity: item.stats.housingCapacity + item.modEff.housingBonus,
+      effectiveStorageGeneral: item.stats.storageBonus + item.modEff.storageGeneralBonus,
+      effectiveStorageFood: item.modEff.storageFoodBonus,
+      effectiveDefenseBonus: item.stats.defenseBonus + item.modEff.defenseBonus,
+      effectiveMaintenanceGold: Math.max(0, item.stats.maintenanceGold + item.modEff.maintenanceDelta),
       inputConsumed: reqOreInput > 0 ? { ore: Math.round(oreUsed) } : {},
     };
   }

@@ -111,6 +111,7 @@ import {
 import {
   BUILDING_MODULES,
   evaluateBuildingModules,
+  getInstalledModules,
   isValidBuildingModuleId,
   type BuildingModuleId,
   type BuildingModulesEvaluation,
@@ -1808,6 +1809,22 @@ export function deserializeKingdomState(
 ): KingdomState | null {
   const worldState = deserializeWorldState(raw, totalAssets);
   if (!worldState) return null;
+
+  // Normalize & validate persisted building modules (supports tile.modules & legacy tile.meta.modules)
+  for (const tile of Object.values(worldState.hexes)) {
+    const validModules = getInstalledModules(tile);
+    if (validModules.length > 0) {
+      tile.modules = validModules;
+      if (tile.meta) {
+        tile.meta = { ...tile.meta, modules: validModules };
+      }
+    } else if (tile.modules !== undefined || tile.meta?.modules !== undefined) {
+      delete tile.modules;
+      if (tile.meta && 'modules' in tile.meta) {
+        tile.meta = { ...tile.meta, modules: undefined };
+      }
+    }
+  }
 
   try {
     const parsed = JSON.parse(raw) as Partial<KingdomState> & {

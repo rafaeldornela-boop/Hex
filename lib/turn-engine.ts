@@ -348,8 +348,9 @@ export function processKingdomTurn(
     underConstructionKeys: underKeysAfterBuild,
   });
 
-  // Strip player roads & lost city centers if rival factions captured tiles
+  // Strip player roads, active constructions, & lost city centers if rival factions captured tiles
   let nextRoads: RoadMap = workingRoads;
+  let finalConstructions = nextConstructions;
   if (aiResult.conqueredKeys.length > 0) {
     const conqueredSet = new Set(aiResult.conqueredKeys);
     const filtered: RoadMap = {};
@@ -359,6 +360,9 @@ export function processKingdomTurn(
       }
     }
     nextRoads = filtered;
+    finalConstructions = nextConstructions.filter(
+      (c) => !conqueredSet.has(hexKey(c.q, c.r))
+    );
   }
 
   const finalCities: CityEntity[] = citySync.cities.filter((c) => {
@@ -448,7 +452,7 @@ export function processKingdomTurn(
       research: researchStep.nextResearch,
       units: aiResult.units,
       factions: aiResult.factions,
-      constructions: nextConstructions,
+      constructions: finalConstructions,
       expansions: nextExpansions,
       roads: nextRoads,
       cities: finalCities,

@@ -57,6 +57,12 @@ import {
   getBuildingLevel,
   getBuildingUpgradeTier,
 } from '@/lib/building-upgrade-engine';
+import {
+  getBuildingBaseSurfaceY,
+  getBuildingModuleVisualPlacement,
+  getInstalledModules,
+  isValidBuildingModuleId,
+} from '@/lib/building-modules-engine';
 import { HEX_ASSETS } from '@/lib/repo-data';
 
 export type GameModeState = 'title' | 'playing' | 'paused';
@@ -592,6 +598,10 @@ export class HexSceneController {
   private upgradeTimberMat: THREE.MeshStandardMaterial;
   private upgradeRoofMat: THREE.MeshStandardMaterial;
   private upgradeGoldMat: THREE.MeshStandardMaterial;
+  private upgradeDarkMetalMat: THREE.MeshStandardMaterial;
+  private upgradeFoliageMat: THREE.MeshStandardMaterial;
+  private upgradeCanvasMat: THREE.MeshStandardMaterial;
+  private upgradeEmberMat: THREE.MeshStandardMaterial;
   private upgradeGeoCache = new Map<string, THREE.BufferGeometry>();
   private roadLanternsMesh: THREE.InstancedMesh;
   private springFlowersMesh: THREE.InstancedMesh;
@@ -870,6 +880,32 @@ export class HexSceneController {
       color: 0xe6b44c,
       roughness: 0.35,
       metalness: 0.6,
+      flatShading: true,
+    });
+    this.upgradeDarkMetalMat = new THREE.MeshStandardMaterial({
+      color: 0x3b424c,
+      roughness: 0.45,
+      metalness: 0.65,
+      flatShading: true,
+    });
+    this.upgradeFoliageMat = new THREE.MeshStandardMaterial({
+      color: 0x3f7a38,
+      roughness: 0.88,
+      metalness: 0.02,
+      flatShading: true,
+    });
+    this.upgradeCanvasMat = new THREE.MeshStandardMaterial({
+      color: 0xe9dec6,
+      roughness: 0.78,
+      metalness: 0.02,
+      flatShading: true,
+    });
+    this.upgradeEmberMat = new THREE.MeshStandardMaterial({
+      color: 0xd95326,
+      emissive: 0xff5a1f,
+      emissiveIntensity: 0.75,
+      roughness: 0.4,
+      metalness: 0.1,
       flatShading: true,
     });
 
@@ -2190,10 +2226,7 @@ export class HexSceneController {
   }
 
   private getTileModulesList(tile: PlacedHex | null | undefined): string[] {
-    if (!tile) return [];
-    if (Array.isArray(tile.modules)) return tile.modules;
-    if (Array.isArray(tile.meta?.modules)) return tile.meta.modules;
-    return [];
+    return getInstalledModules(tile);
   }
 
   private getModulesSig(tile: PlacedHex | null | undefined): string {
@@ -2212,7 +2245,8 @@ export class HexSceneController {
     if (level <= 1 && !hasLanternBaseline && modules.length === 0) return null;
 
     const group = new THREE.Group();
-    const yBase = 0.2; // local hex top surface inside GLB template coordinates
+    const yBase = getBuildingBaseSurfaceY(assetName);
+    const plinthY = yBase > 0.2 ? 0.2 : yBase;
 
     // Subtle courtyard lantern post for completed settlements/civic structures at night
     if (hasLanternBaseline) {
@@ -2233,7 +2267,7 @@ export class HexSceneController {
 
     // Modular building attachments (independent of structural Nv. I-IV)
     if (modules.length > 0) {
-      this.appendModuleAttachments(group, yBase, modules);
+      this.appendModuleAttachments(group, assetName, level, modules);
     }
 
     if (level < 2) {
@@ -2249,7 +2283,7 @@ export class HexSceneController {
       () => new THREE.CylinderGeometry(0.41, 0.44, 0.048, 6)
     );
     const plinth = new THREE.Mesh(plinthGeo, this.upgradeStoneMat);
-    plinth.position.set(0, yBase + 0.018, 0);
+    plinth.position.set(0, plinthY + 0.018, 0);
     group.add(plinth);
 
     const winGeo = this.getSharedUpgradeGeo(
@@ -2355,300 +2389,891 @@ export class HexSceneController {
 
   private appendModuleAttachments(
     group: THREE.Group,
-    yBase: number,
+    assetName: string,
+    level: number,
     modules: readonly string[]
   ): void {
-    const boxSmallGeo = this.getSharedUpgradeGeo(
-      'mod-box-sm',
-      () => new THREE.BoxGeometry(0.11, 0.085, 0.1)
+    const postSmGeo = this.getSharedUpgradeGeo(
+      'mod-post-sm',
+      () => new THREE.BoxGeometry(0.016, 0.095, 0.016)
     );
-    const roofCapGeo = this.getSharedUpgradeGeo(
-      'mod-roof-cap',
-      () => new THREE.ConeGeometry(0.095, 0.075, 4)
+    const orbSmGeo = this.getSharedUpgradeGeo(
+      'mod-globe-sm',
+      () => new THREE.SphereGeometry(0.022, 6, 5)
     );
-    const cylGeo = this.getSharedUpgradeGeo(
-      'mod-cyl',
-      () => new THREE.CylinderGeometry(0.06, 0.065, 0.18, 8)
+    const emberOrbGeo = this.getSharedUpgradeGeo(
+      'mod-ember-orb',
+      () => new THREE.SphereGeometry(0.032, 6, 5)
     );
-    const coneCapGeo = this.getSharedUpgradeGeo(
-      'mod-cone-cap',
-      () => new THREE.ConeGeometry(0.072, 0.07, 8)
+    const crateSmGeo = this.getSharedUpgradeGeo(
+      'mod-crate-sm',
+      () => new THREE.BoxGeometry(0.034, 0.03, 0.034)
     );
-    const chimneyGeo = this.getSharedUpgradeGeo(
-      'mod-chimney',
-      () => new THREE.CylinderGeometry(0.032, 0.044, 0.24, 6)
+    const shopBodyGeo = this.getSharedUpgradeGeo(
+      'mod-shop-body',
+      () => new THREE.BoxGeometry(0.1, 0.085, 0.095)
     );
-    const beamGeo = this.getSharedUpgradeGeo(
-      'mod-beam',
-      () => new THREE.BoxGeometry(0.16, 0.03, 0.04)
+    const shopRoofGeo = this.getSharedUpgradeGeo(
+      'mod-shop-roof',
+      () => new THREE.ConeGeometry(0.085, 0.068, 4)
     );
-    const postGeo = this.getSharedUpgradeGeo(
-      'lantern-post',
-      () => new THREE.CylinderGeometry(0.014, 0.02, 0.14, 5)
+    const finialSmGeo = this.getSharedUpgradeGeo(
+      'mod-finial-sm',
+      () => new THREE.OctahedronGeometry(0.024, 0)
     );
-    const orbGeo = this.getSharedUpgradeGeo(
-      'lantern-orb',
-      () => new THREE.SphereGeometry(0.028, 6, 5)
+    const winSmGeo = this.getSharedUpgradeGeo(
+      'mod-win-sm',
+      () => new THREE.BoxGeometry(0.048, 0.038, 0.016)
+    );
+    const logSmGeo = this.getSharedUpgradeGeo(
+      'mod-log-sm',
+      () => new THREE.CylinderGeometry(0.016, 0.016, 0.1, 6)
+    );
+    const oreBinGeo = this.getSharedUpgradeGeo(
+      'mod-orebin-wall',
+      () => new THREE.BoxGeometry(0.13, 0.055, 0.11)
+    );
+    const oreChunkGeo = this.getSharedUpgradeGeo(
+      'mod-ore-chunk',
+      () => new THREE.OctahedronGeometry(0.034, 0)
+    );
+    const whBaseGeo = this.getSharedUpgradeGeo(
+      'mod-wh-base',
+      () => new THREE.BoxGeometry(0.13, 0.058, 0.11)
+    );
+    const whLoftGeo = this.getSharedUpgradeGeo(
+      'mod-wh-loft',
+      () => new THREE.BoxGeometry(0.122, 0.05, 0.102)
+    );
+    const whRoofGeo = this.getSharedUpgradeGeo(
+      'mod-wh-roof',
+      () => new THREE.ConeGeometry(0.1, 0.068, 4)
+    );
+    const lhBaseGeo = this.getSharedUpgradeGeo(
+      'mod-lh-base',
+      () => new THREE.CylinderGeometry(0.065, 0.072, 0.05, 8)
+    );
+    const lhGalleryGeo = this.getSharedUpgradeGeo(
+      'mod-lh-gal',
+      () => new THREE.CylinderGeometry(0.05, 0.044, 0.024, 8)
+    );
+    const plazaPadGeo = this.getSharedUpgradeGeo(
+      'mod-plaza-pad',
+      () => new THREE.CylinderGeometry(0.088, 0.094, 0.024, 6)
+    );
+    const lampPoleGeo = this.getSharedUpgradeGeo(
+      'mod-lamp-pole',
+      () => new THREE.CylinderGeometry(0.01, 0.01, 0.08, 5)
     );
 
-    for (const modId of modules) {
-      switch (modId) {
-        case 'farm_silo': {
-          const silo = new THREE.Mesh(cylGeo, this.upgradeStoneMat);
-          silo.position.set(-0.28, yBase + 0.09, -0.04);
-          const cap = new THREE.Mesh(coneCapGeo, this.upgradeRoofMat);
-          cap.position.set(-0.28, yBase + 0.21, -0.04);
-          group.add(silo, cap);
+    const seen = new Set<string>();
+
+    for (const rawId of modules) {
+      if (seen.has(rawId) || !isValidBuildingModuleId(rawId)) continue;
+      seen.add(rawId);
+
+      const placement = getBuildingModuleVisualPlacement(assetName, rawId, level);
+      const sub = new THREE.Group();
+      sub.position.set(placement.offsetX, placement.groundY, placement.offsetZ);
+      sub.rotation.y = placement.rotationY;
+
+      const kind = placement.visualKind;
+      switch (kind) {
+        case 'silo': {
+          const pad = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-silo-pad', () => new THREE.CylinderGeometry(0.064, 0.068, 0.02, 8)),
+            this.upgradeStoneMat
+          );
+          pad.position.set(0, 0.004, 0);
+          const body = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-silo-body', () => new THREE.CylinderGeometry(0.054, 0.058, 0.175, 8)),
+            this.upgradeStoneMat
+          );
+          body.position.set(0, 0.095, 0);
+          const band = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-silo-band', () => new THREE.CylinderGeometry(0.058, 0.058, 0.016, 8)),
+            this.upgradeDarkMetalMat
+          );
+          band.position.set(0, 0.145, 0);
+          const cap = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-silo-cap', () => new THREE.ConeGeometry(0.065, 0.065, 8)),
+            this.upgradeRoofMat
+          );
+          cap.position.set(0, 0.215, 0);
+          sub.add(pad, body, band, cap);
           break;
         }
-        case 'farm_irrigation': {
-          const trough = new THREE.Mesh(beamGeo, this.upgradeStoneMat);
-          trough.position.set(0.27, yBase + 0.02, 0.08);
-          trough.rotation.y = Math.PI / 3;
-          const waterStrip = new THREE.Mesh(
-            this.getSharedUpgradeGeo('mod-water', () => new THREE.BoxGeometry(0.13, 0.018, 0.026)),
+        case 'irrigation_canal': {
+          const bed = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-canal-bed', () => new THREE.BoxGeometry(0.062, 0.032, 0.15)),
+            this.upgradeStoneMat
+          );
+          bed.position.set(0, 0.012, 0);
+          const flow = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-canal-water', () => new THREE.BoxGeometry(0.042, 0.02, 0.142)),
             this.waterMat
           );
-          waterStrip.position.set(0.27, yBase + 0.035, 0.08);
-          waterStrip.rotation.y = Math.PI / 3;
-          group.add(trough, waterStrip);
+          flow.position.set(0, 0.024, 0);
+          const sluice = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-canal-gate', () => new THREE.BoxGeometry(0.07, 0.065, 0.018)),
+            this.upgradeTimberMat
+          );
+          sluice.position.set(0, 0.042, -0.055);
+          sub.add(bed, flow, sluice);
           break;
         }
-        case 'farm_barn':
-        case 'farm_seed_vault': {
-          const posX = modId === 'farm_barn' ? 0.02 : -0.14;
-          const posZ = modId === 'farm_barn' ? -0.28 : 0.26;
-          const shed = new THREE.Mesh(
-            boxSmallGeo,
-            modId === 'farm_seed_vault' ? this.upgradeStoneMat : this.upgradeTimberMat
+        case 'barn': {
+          const body = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-barn-body', () => new THREE.BoxGeometry(0.125, 0.095, 0.105)),
+            this.upgradeTimberMat
           );
-          shed.position.set(posX, yBase + 0.045, posZ);
-          const roof = new THREE.Mesh(roofCapGeo, this.upgradeRoofMat);
-          roof.position.set(posX, yBase + 0.12, posZ);
+          body.position.set(0, 0.043, 0);
+          const roof = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-barn-roof', () => new THREE.ConeGeometry(0.096, 0.075, 4)),
+            this.upgradeRoofMat
+          );
+          roof.position.set(0, 0.125, 0);
           roof.rotation.y = Math.PI / 4;
-          group.add(shed, roof);
-          break;
-        }
-        case 'lumber_sawmill':
-        case 'lumber_cart':
-        case 'lumber_carpentry':
-        case 'lumber_replant': {
-          const offsetMap: Record<string, [number, number]> = {
-            lumber_sawmill: [-0.28, -0.04],
-            lumber_cart: [0.27, 0.1],
-            lumber_carpentry: [0.0, -0.27],
-            lumber_replant: [-0.22, 0.22],
-          };
-          const [ox, oz] = offsetMap[modId] ?? [-0.26, 0.0];
-          const rack = new THREE.Mesh(boxSmallGeo, this.upgradeTimberMat);
-          rack.position.set(ox, yBase + 0.045, oz);
-          const cap = new THREE.Mesh(
-            modId === 'lumber_replant' ? coneCapGeo : roofCapGeo,
-            modId === 'lumber_cart' ? this.upgradeGoldMat : this.upgradeRoofMat
+          const door = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-barn-door', () => new THREE.BoxGeometry(0.045, 0.058, 0.016)),
+            this.upgradeDarkMetalMat
           );
-          cap.position.set(ox, yBase + 0.12, oz);
-          cap.rotation.y = Math.PI / 4;
-          group.add(rack, cap);
-          break;
-        }
-        case 'mine_deep_shaft':
-        case 'mine_rail_carts':
-        case 'mine_pumps':
-        case 'mine_fortified_gal': {
-          const offsetMap: Record<string, [number, number]> = {
-            mine_deep_shaft: [-0.28, -0.04],
-            mine_rail_carts: [0.26, 0.08],
-            mine_pumps: [0.0, -0.27],
-            mine_fortified_gal: [-0.2, 0.24],
-          };
-          const [ox, oz] = offsetMap[modId] ?? [0.26, -0.04];
-          const base = new THREE.Mesh(
-            modId === 'mine_pumps' ? chimneyGeo : boxSmallGeo,
-            this.upgradeStoneMat
-          );
-          base.position.set(ox, yBase + (modId === 'mine_pumps' ? 0.12 : 0.05), oz);
-          const accent = new THREE.Mesh(
-            modId === 'mine_rail_carts' ? beamGeo : roofCapGeo,
-            modId === 'mine_deep_shaft' ? this.upgradeTimberMat : this.upgradeGoldMat
-          );
-          accent.position.set(ox, yBase + (modId === 'mine_pumps' ? 0.25 : 0.12), oz);
-          group.add(base, accent);
-          break;
-        }
-        case 'market_stalls':
-        case 'market_warehouse':
-        case 'market_guild':
-        case 'market_coin_scale': {
-          const offsetMap: Record<string, [number, number]> = {
-            market_stalls: [-0.28, 0.05],
-            market_warehouse: [0.27, -0.06],
-            market_guild: [0.0, -0.28],
-            market_coin_scale: [0.22, 0.22],
-          };
-          const [ox, oz] = offsetMap[modId] ?? [-0.27, 0.04];
-          const stall = new THREE.Mesh(
-            modId === 'market_coin_scale' ? postGeo : boxSmallGeo,
-            modId === 'market_guild' ? this.upgradeStoneMat : this.upgradeTimberMat
-          );
-          stall.position.set(ox, yBase + 0.055, oz);
-          const awning = new THREE.Mesh(
-            roofCapGeo,
-            modId === 'market_coin_scale' || modId === 'market_guild'
-              ? this.upgradeGoldMat
-              : this.upgradeRoofMat
-          );
-          awning.position.set(ox, yBase + 0.135, oz);
-          awning.rotation.y = Math.PI / 4;
-          group.add(stall, awning);
-          break;
-        }
-        case 'smelter_furnace':
-        case 'smelter_bellows':
-        case 'smelter_coal_depot':
-        case 'smelter_foundry_yard': {
-          const offsetMap: Record<string, [number, number]> = {
-            smelter_furnace: [-0.28, -0.06],
-            smelter_bellows: [0.28, 0.04],
-            smelter_coal_depot: [0.0, -0.28],
-            smelter_foundry_yard: [0.2, 0.22],
-          };
-          const [ox, oz] = offsetMap[modId] ?? [-0.28, -0.06];
-          const stack = new THREE.Mesh(
-            modId === 'smelter_furnace' ? chimneyGeo : boxSmallGeo,
-            this.upgradeStoneMat
-          );
-          stack.position.set(ox, yBase + (modId === 'smelter_furnace' ? 0.12 : 0.05), oz);
-          const ember = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
-          ember.position.set(ox, yBase + (modId === 'smelter_furnace' ? 0.25 : 0.13), oz);
-          group.add(stack, ember);
-          break;
-        }
-        case 'port_crane':
-        case 'port_lighthouse':
-        case 'port_expanded_dock': {
-          if (modId === 'port_lighthouse') {
-            const tower = new THREE.Mesh(chimneyGeo, this.upgradeStoneMat);
-            tower.position.set(-0.27, yBase + 0.12, -0.06);
-            const beacon = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
-            beacon.position.set(-0.27, yBase + 0.26, -0.06);
-            group.add(tower, beacon);
-          } else if (modId === 'port_crane') {
-            const mast = new THREE.Mesh(postGeo, this.upgradeTimberMat);
-            mast.position.set(0.26, yBase + 0.08, 0.08);
-            const boom = new THREE.Mesh(beamGeo, this.upgradeGoldMat);
-            boom.position.set(0.22, yBase + 0.15, 0.08);
-            boom.rotation.z = 0.25;
-            group.add(mast, boom);
-          } else {
-            const pier = new THREE.Mesh(boxSmallGeo, this.upgradeTimberMat);
-            pier.position.set(0.0, yBase + 0.03, 0.28);
-            group.add(pier);
-          }
-          break;
-        }
-        case 'res_extension': {
-          const wing = new THREE.Mesh(boxSmallGeo, this.upgradeTimberMat);
-          wing.position.set(-0.28, yBase + 0.048, -0.02);
-          const roof = new THREE.Mesh(roofCapGeo, this.upgradeRoofMat);
-          roof.position.set(-0.28, yBase + 0.125, -0.02);
-          roof.rotation.y = Math.PI / 4;
-          group.add(wing, roof);
-          break;
-        }
-        case 'res_well': {
-          const well = new THREE.Mesh(
-            this.getSharedUpgradeGeo('mod-well', () => new THREE.CylinderGeometry(0.055, 0.06, 0.08, 8)),
-            this.upgradeStoneMat
-          );
-          well.position.set(0.28, yBase + 0.04, 0.06);
-          const roof = new THREE.Mesh(coneCapGeo, this.upgradeRoofMat);
-          roof.position.set(0.28, yBase + 0.125, 0.06);
-          group.add(well, roof);
-          break;
-        }
-        case 'res_lighting': {
-          const p1 = new THREE.Mesh(postGeo, this.upgradeTimberMat);
-          p1.position.set(0.27, yBase + 0.07, -0.14);
-          const o1 = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
-          o1.position.set(0.27, yBase + 0.15, -0.14);
-          group.add(p1, o1);
-          break;
-        }
-        case 'res_plaza': {
-          const pad = new THREE.Mesh(
-            this.getSharedUpgradeGeo('mod-plaza-pad', () => new THREE.CylinderGeometry(0.11, 0.12, 0.025, 6)),
-            this.upgradeStoneMat
-          );
-          pad.position.set(0.0, yBase + 0.015, 0.27);
-          const obelisk = new THREE.Mesh(
-            this.getSharedUpgradeGeo('mod-obelisk', () => new THREE.ConeGeometry(0.036, 0.13, 4)),
+          door.position.set(0, 0.03, 0.052);
+          const bale = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-hay-bale', () => new THREE.CylinderGeometry(0.022, 0.022, 0.036, 6)),
             this.upgradeGoldMat
           );
-          obelisk.position.set(0.0, yBase + 0.09, 0.27);
-          group.add(pad, obelisk);
+          bale.position.set(0.058, 0.018, 0.052);
+          bale.rotation.z = Math.PI / 2;
+          sub.add(body, roof, door, bale);
           break;
         }
-        case 'castle_royal_archive': {
-          const archive = new THREE.Mesh(boxSmallGeo, this.upgradeStoneMat);
-          archive.position.set(0.26, yBase + 0.05, 0.15);
-          const crest = new THREE.Mesh(coneCapGeo, this.upgradeGoldMat);
-          crest.position.set(0.26, yBase + 0.13, 0.15);
-          group.add(archive, crest);
-          break;
-        }
-        case 'acad_library':
-        case 'acad_observatory':
-        case 'acad_laboratory': {
-          const offsetMap: Record<string, [number, number]> = {
-            acad_library: [-0.28, 0.0],
-            acad_observatory: [0.26, 0.05],
-            acad_laboratory: [0.0, -0.27],
-          };
-          const [ox, oz] = offsetMap[modId] ?? [0.26, 0.05];
+        case 'seed_vault': {
           const base = new THREE.Mesh(
-            modId === 'acad_observatory' ? cylGeo : boxSmallGeo,
+            this.getSharedUpgradeGeo('mod-vault-base', () => new THREE.BoxGeometry(0.115, 0.075, 0.115)),
             this.upgradeStoneMat
           );
-          base.position.set(ox, yBase + (modId === 'acad_observatory' ? 0.09 : 0.05), oz);
-          const top = new THREE.Mesh(
-            modId === 'acad_laboratory' ? orbGeo : coneCapGeo,
-            modId === 'acad_laboratory' ? this.nightLanternGlowMat : this.upgradeGoldMat
+          base.position.set(0, 0.034, 0);
+          const turf = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-vault-turf', () => new THREE.BoxGeometry(0.122, 0.024, 0.122)),
+            this.upgradeFoliageMat
           );
-          top.position.set(ox, yBase + (modId === 'acad_observatory' ? 0.2 : 0.13), oz);
-          group.add(base, top);
+          turf.position.set(0, 0.08, 0);
+          const portal = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-vault-door', () => new THREE.CylinderGeometry(0.034, 0.034, 0.02, 6)),
+            this.upgradeGoldMat
+          );
+          portal.position.set(0, 0.035, 0.056);
+          portal.rotation.x = Math.PI / 2;
+          sub.add(base, turf, portal);
           break;
         }
-        case 'mil_armory':
-        case 'mil_bastion_wall':
-        case 'mil_signal_beacon':
-        case 'mil_training_yard': {
-          if (modId === 'mil_signal_beacon') {
-            const tower = new THREE.Mesh(chimneyGeo, this.upgradeStoneMat);
-            tower.position.set(-0.27, yBase + 0.12, -0.05);
-            const flame = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
-            flame.position.set(-0.27, yBase + 0.255, -0.05);
-            group.add(tower, flame);
-          } else {
-            const offsetMap: Record<string, [number, number]> = {
-              mil_armory: [0.27, -0.04],
-              mil_bastion_wall: [0.0, 0.28],
-              mil_training_yard: [-0.24, 0.2],
-            };
-            const [ox, oz] = offsetMap[modId] ?? [0.27, -0.04];
-            const wallOrShed = new THREE.Mesh(
-              modId === 'mil_bastion_wall' ? beamGeo : boxSmallGeo,
-              this.upgradeStoneMat
-            );
-            wallOrShed.position.set(ox, yBase + 0.045, oz);
-            const roof = new THREE.Mesh(roofCapGeo, this.upgradeRoofMat);
-            roof.position.set(ox, yBase + 0.12, oz);
-            roof.rotation.y = Math.PI / 4;
-            group.add(wallOrShed, roof);
+        case 'drying_yard': {
+          const slab = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-dry-base', () => new THREE.BoxGeometry(0.125, 0.02, 0.1)),
+            this.upgradeStoneMat
+          );
+          slab.position.set(0, 0.008, 0);
+          sub.add(slab);
+          const corners: Array<[number, number]> = [
+            [-0.052, -0.038],
+            [0.052, -0.038],
+            [-0.052, 0.038],
+            [0.052, 0.038],
+          ];
+          for (const [px, pz] of corners) {
+            const post = new THREE.Mesh(postSmGeo, this.upgradeTimberMat);
+            post.position.set(px, 0.046, pz);
+            sub.add(post);
           }
+          const canopy = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-dry-roof', () => new THREE.BoxGeometry(0.135, 0.016, 0.11)),
+            this.upgradeRoofMat
+          );
+          canopy.position.set(0, 0.098, 0);
+          canopy.rotation.x = 0.14;
+          const log1 = new THREE.Mesh(logSmGeo, this.upgradeGoldMat);
+          log1.position.set(0, 0.032, -0.015);
+          log1.rotation.z = Math.PI / 2;
+          const log2 = new THREE.Mesh(logSmGeo, this.upgradeTimberMat);
+          log2.position.set(0, 0.032, 0.018);
+          log2.rotation.z = Math.PI / 2;
+          sub.add(canopy, log1, log2);
           break;
         }
-        default:
+        case 'wood_workshop': {
+          const cabin = new THREE.Mesh(shopBodyGeo, this.upgradeTimberMat);
+          cabin.position.set(0, 0.038, -0.008);
+          const roof = new THREE.Mesh(shopRoofGeo, this.upgradeRoofMat);
+          roof.position.set(0, 0.112, -0.008);
+          roof.rotation.y = Math.PI / 4;
+          const bench = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-bench', () => new THREE.BoxGeometry(0.09, 0.028, 0.04)),
+            this.upgradeGoldMat
+          );
+          bench.position.set(0, 0.025, 0.058);
+          const vise = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-vise', () => new THREE.BoxGeometry(0.025, 0.032, 0.02)),
+            this.upgradeDarkMetalMat
+          );
+          vise.position.set(0.028, 0.05, 0.058);
+          sub.add(cabin, roof, bench, vise);
           break;
+        }
+        case 'timber_carts': {
+          const bed = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-cart-bed', () => new THREE.BoxGeometry(0.072, 0.026, 0.11)),
+            this.upgradeTimberMat
+          );
+          bed.position.set(0, 0.036, 0);
+          const wheelGeo = this.getSharedUpgradeGeo(
+            'mod-cart-wheel',
+            () => new THREE.CylinderGeometry(0.028, 0.028, 0.014, 8)
+          );
+          const wl = new THREE.Mesh(wheelGeo, this.upgradeDarkMetalMat);
+          wl.position.set(-0.044, 0.026, 0);
+          wl.rotation.z = Math.PI / 2;
+          const wr = new THREE.Mesh(wheelGeo, this.upgradeDarkMetalMat);
+          wr.position.set(0.044, 0.026, 0);
+          wr.rotation.z = Math.PI / 2;
+          const l1 = new THREE.Mesh(logSmGeo, this.upgradeGoldMat);
+          l1.position.set(-0.016, 0.058, 0);
+          l1.rotation.x = Math.PI / 2;
+          const l2 = new THREE.Mesh(logSmGeo, this.upgradeGoldMat);
+          l2.position.set(0.016, 0.058, 0);
+          l2.rotation.x = Math.PI / 2;
+          const l3 = new THREE.Mesh(logSmGeo, this.upgradeTimberMat);
+          l3.position.set(0, 0.08, 0);
+          l3.rotation.x = Math.PI / 2;
+          sub.add(bed, wl, wr, l1, l2, l3);
+          break;
+        }
+        case 'industrial_saw': {
+          const trestle = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-saw-trestle', () => new THREE.BoxGeometry(0.13, 0.036, 0.08)),
+            this.upgradeStoneMat
+          );
+          trestle.position.set(0, 0.014, 0);
+          const gantry = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-saw-frame', () => new THREE.BoxGeometry(0.11, 0.085, 0.035)),
+            this.upgradeTimberMat
+          );
+          gantry.position.set(0, 0.068, 0);
+          const blade = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-saw-blade', () => new THREE.CylinderGeometry(0.048, 0.048, 0.012, 10)),
+            this.upgradeDarkMetalMat
+          );
+          blade.position.set(0, 0.095, 0.026);
+          blade.rotation.x = Math.PI / 2;
+          const hub = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-saw-hub', () => new THREE.BoxGeometry(0.032, 0.034, 0.038)),
+            this.upgradeGoldMat
+          );
+          hub.position.set(-0.035, 0.09, -0.01);
+          sub.add(trestle, gantry, blade, hub);
+          break;
+        }
+        case 'ore_depot': {
+          const bin = new THREE.Mesh(oreBinGeo, this.upgradeStoneMat);
+          bin.position.set(0, 0.022, 0);
+          const rail = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-orebin-rail', () => new THREE.BoxGeometry(0.136, 0.016, 0.116)),
+            this.upgradeTimberMat
+          );
+          rail.position.set(0, 0.054, 0);
+          const ore1 = new THREE.Mesh(oreChunkGeo, this.upgradeDarkMetalMat);
+          ore1.position.set(-0.022, 0.068, -0.005);
+          const ore2 = new THREE.Mesh(oreChunkGeo, this.upgradeGoldMat);
+          ore2.position.set(0.024, 0.062, 0.015);
+          sub.add(bin, rail, ore1, ore2);
+          break;
+        }
+        case 'toolshop': {
+          const wall = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-smith-body', () => new THREE.BoxGeometry(0.105, 0.08, 0.095)),
+            this.upgradeStoneMat
+          );
+          wall.position.set(0, 0.036, -0.006);
+          const roof = new THREE.Mesh(shopRoofGeo, this.upgradeRoofMat);
+          roof.position.set(0, 0.108, -0.006);
+          roof.rotation.y = Math.PI / 4;
+          const flue = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-flue', () => new THREE.CylinderGeometry(0.016, 0.022, 0.11, 6)),
+            this.upgradeDarkMetalMat
+          );
+          flue.position.set(-0.032, 0.13, -0.022);
+          const hearth = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-hearth', () => new THREE.BoxGeometry(0.042, 0.036, 0.018)),
+            this.upgradeEmberMat
+          );
+          hearth.position.set(0.006, 0.024, 0.045);
+          const anvil = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-anvil', () => new THREE.BoxGeometry(0.036, 0.028, 0.022)),
+            this.upgradeDarkMetalMat
+          );
+          anvil.position.set(0.038, 0.018, 0.058);
+          sub.add(wall, roof, flue, hearth, anvil);
+          break;
+        }
+        case 'mine_drainage': {
+          const basin = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-drain-basin', () => new THREE.BoxGeometry(0.09, 0.032, 0.135)),
+            this.upgradeStoneMat
+          );
+          basin.position.set(0, 0.012, 0);
+          const pool = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-drain-water', () => new THREE.BoxGeometry(0.06, 0.018, 0.12)),
+            this.waterMat
+          );
+          pool.position.set(0, 0.025, 0);
+          const pL = new THREE.Mesh(postSmGeo, this.upgradeTimberMat);
+          pL.position.set(-0.026, 0.065, -0.035);
+          const pR = new THREE.Mesh(postSmGeo, this.upgradeTimberMat);
+          pR.position.set(0.026, 0.065, -0.035);
+          const beam = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-rocker-beam', () => new THREE.BoxGeometry(0.095, 0.018, 0.022)),
+            this.upgradeDarkMetalMat
+          );
+          beam.position.set(0, 0.115, -0.035);
+          beam.rotation.z = 0.22;
+          sub.add(basin, pool, pL, pR, beam);
+          break;
+        }
+        case 'deep_gallery': {
+          const pillarGeo = this.getSharedUpgradeGeo(
+            'mod-gal-pillar',
+            () => new THREE.BoxGeometry(0.032, 0.11, 0.065)
+          );
+          const leftP = new THREE.Mesh(pillarGeo, this.upgradeStoneMat);
+          leftP.position.set(-0.048, 0.05, -0.01);
+          const rightP = new THREE.Mesh(pillarGeo, this.upgradeStoneMat);
+          rightP.position.set(0.048, 0.05, -0.01);
+          const lintel = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-gal-lintel', () => new THREE.BoxGeometry(0.13, 0.032, 0.072)),
+            this.upgradeStoneMat
+          );
+          lintel.position.set(0, 0.112, -0.01);
+          const recess = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-gal-tunnel', () => new THREE.BoxGeometry(0.064, 0.085, 0.055)),
+            this.upgradeDarkMetalMat
+          );
+          recess.position.set(0, 0.042, -0.015);
+          const shoring = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-gal-beam', () => new THREE.BoxGeometry(0.095, 0.016, 0.018)),
+            this.upgradeTimberMat
+          );
+          shoring.position.set(0, 0.092, 0.026);
+          const track = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-gal-rail', () => new THREE.BoxGeometry(0.045, 0.012, 0.065)),
+            this.upgradeDarkMetalMat
+          );
+          track.position.set(0, 0.008, 0.045);
+          sub.add(leftP, rightP, lintel, recess, shoring, track);
+          break;
+        }
+        case 'market_warehouse': {
+          const base = new THREE.Mesh(whBaseGeo, this.upgradeStoneMat);
+          base.position.set(0, 0.024, 0);
+          const loft = new THREE.Mesh(whLoftGeo, this.upgradeTimberMat);
+          loft.position.set(0, 0.078, 0);
+          const roof = new THREE.Mesh(whRoofGeo, this.upgradeRoofMat);
+          roof.position.set(0, 0.135, 0);
+          roof.rotation.y = Math.PI / 4;
+          const crate = new THREE.Mesh(crateSmGeo, this.upgradeGoldMat);
+          crate.position.set(0.045, 0.016, 0.062);
+          sub.add(base, loft, roof, crate);
+          break;
+        }
+        case 'expanded_stalls': {
+          const counterGeo = this.getSharedUpgradeGeo(
+            'mod-stall-counter',
+            () => new THREE.BoxGeometry(0.058, 0.036, 0.044)
+          );
+          const awningGeo = this.getSharedUpgradeGeo(
+            'mod-stall-awning',
+            () => new THREE.BoxGeometry(0.068, 0.014, 0.062)
+          );
+          const c1 = new THREE.Mesh(counterGeo, this.upgradeTimberMat);
+          c1.position.set(-0.038, 0.016, 0);
+          const c2 = new THREE.Mesh(counterGeo, this.upgradeTimberMat);
+          c2.position.set(0.038, 0.016, 0.015);
+          const a1 = new THREE.Mesh(awningGeo, this.upgradeRoofMat);
+          a1.position.set(-0.038, 0.068, 0);
+          a1.rotation.x = 0.25;
+          const a2 = new THREE.Mesh(awningGeo, this.upgradeCanvasMat);
+          a2.position.set(0.038, 0.068, 0.015);
+          a2.rotation.x = 0.25;
+          const pole1 = new THREE.Mesh(lampPoleGeo, this.upgradeTimberMat);
+          pole1.position.set(-0.056, 0.038, -0.018);
+          const pole2 = new THREE.Mesh(lampPoleGeo, this.upgradeTimberMat);
+          pole2.position.set(0.056, 0.038, -0.002);
+          const goods = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-basket', () => new THREE.CylinderGeometry(0.016, 0.012, 0.022, 6)),
+            this.upgradeGoldMat
+          );
+          goods.position.set(-0.035, 0.038, 0.026);
+          sub.add(c1, c2, a1, a2, pole1, pole2, goods);
+          break;
+        }
+        case 'exchange_hall': {
+          const body = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-exch-body', () => new THREE.BoxGeometry(0.12, 0.1, 0.11)),
+            this.upgradeStoneMat
+          );
+          body.position.set(0, 0.046, 0);
+          const dome = new THREE.Mesh(
+            this.getSharedUpgradeGeo(
+              'mod-exch-dome',
+              () => new THREE.SphereGeometry(0.052, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55)
+            ),
+            this.upgradeGoldMat
+          );
+          dome.position.set(0, 0.095, 0);
+          const windowPane = new THREE.Mesh(winSmGeo, this.nightLanternGlowMat);
+          windowPane.position.set(0, 0.055, 0.054);
+          sub.add(body, dome, windowPane);
+          break;
+        }
+        case 'trade_center': {
+          const base = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-tc-base', () => new THREE.BoxGeometry(0.135, 0.09, 0.115)),
+            this.upgradeStoneMat
+          );
+          base.position.set(0, 0.04, 0);
+          const roof = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-tc-roof', () => new THREE.ConeGeometry(0.102, 0.065, 4)),
+            this.upgradeRoofMat
+          );
+          roof.position.set(0, 0.115, 0);
+          roof.rotation.y = Math.PI / 4;
+          const cupola = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-tc-spire', () => new THREE.CylinderGeometry(0.026, 0.032, 0.06, 6)),
+            this.upgradeCanvasMat
+          );
+          cupola.position.set(0, 0.155, 0);
+          const crown = new THREE.Mesh(finialSmGeo, this.upgradeGoldMat);
+          crown.position.set(0, 0.195, 0);
+          sub.add(base, roof, cupola, crown);
+          break;
+        }
+        case 'smelter_depot': {
+          const wall = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-hopper-side', () => new THREE.BoxGeometry(0.14, 0.048, 0.105)),
+            this.upgradeStoneMat
+          );
+          wall.position.set(0, 0.02, 0);
+          const hopper = new THREE.Mesh(oreBinGeo, this.upgradeDarkMetalMat);
+          hopper.position.set(0, 0.046, -0.005);
+          const ore = new THREE.Mesh(oreChunkGeo, this.upgradeDarkMetalMat);
+          ore.position.set(0.015, 0.072, 0);
+          const ramp = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-ramp', () => new THREE.BoxGeometry(0.05, 0.016, 0.068)),
+            this.upgradeTimberMat
+          );
+          ramp.position.set(-0.04, 0.036, 0.048);
+          ramp.rotation.x = -0.35;
+          sub.add(wall, hopper, ore, ramp);
+          break;
+        }
+        case 'advanced_furnace': {
+          const drum = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-furn-drum', () => new THREE.CylinderGeometry(0.062, 0.068, 0.125, 8)),
+            this.upgradeStoneMat
+          );
+          drum.position.set(0, 0.058, 0);
+          const stackGeo = this.getSharedUpgradeGeo(
+            'mod-stack-sm',
+            () => new THREE.CylinderGeometry(0.018, 0.022, 0.12, 6)
+          );
+          const s1 = new THREE.Mesh(stackGeo, this.upgradeDarkMetalMat);
+          s1.position.set(-0.026, 0.155, -0.01);
+          const s2 = new THREE.Mesh(stackGeo, this.upgradeDarkMetalMat);
+          s2.position.set(0.026, 0.145, 0.01);
+          const tap = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-tap-glow', () => new THREE.BoxGeometry(0.036, 0.038, 0.022)),
+            this.upgradeEmberMat
+          );
+          tap.position.set(0, 0.032, 0.058);
+          sub.add(drum, s1, s2, tap);
+          break;
+        }
+        case 'cooling_system': {
+          const vat = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-cool-vat', () => new THREE.CylinderGeometry(0.065, 0.072, 0.055, 8)),
+            this.upgradeStoneMat
+          );
+          vat.position.set(0, 0.024, 0);
+          const pool = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-cool-water', () => new THREE.CylinderGeometry(0.054, 0.054, 0.015, 8)),
+            this.waterMat
+          );
+          pool.position.set(0, 0.049, 0);
+          const tower = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-cool-tower', () => new THREE.CylinderGeometry(0.036, 0.048, 0.11, 6)),
+            this.upgradeTimberMat
+          );
+          tower.position.set(0, 0.105, -0.012);
+          const copperCoil = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-silo-band', () => new THREE.CylinderGeometry(0.058, 0.058, 0.016, 8)),
+            this.upgradeGoldMat
+          );
+          copperCoil.position.set(0, 0.06, 0);
+          sub.add(vat, pool, tower, copperCoil);
+          break;
+        }
+        case 'high_temp_furnace': {
+          const crucible = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-ht-base', () => new THREE.CylinderGeometry(0.068, 0.075, 0.055, 8)),
+            this.upgradeStoneMat
+          );
+          crucible.position.set(0, 0.024, 0);
+          const stack = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-ht-stack', () => new THREE.CylinderGeometry(0.042, 0.056, 0.17, 8)),
+            this.upgradeDarkMetalMat
+          );
+          stack.position.set(0, 0.13, 0);
+          const crown = new THREE.Mesh(emberOrbGeo, this.upgradeEmberMat);
+          crown.position.set(0, 0.225, 0);
+          const vent = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-tap-glow', () => new THREE.BoxGeometry(0.036, 0.038, 0.022)),
+            this.upgradeEmberMat
+          );
+          vent.position.set(0, 0.042, 0.062);
+          sub.add(crucible, stack, crown, vent);
+          break;
+        }
+        case 'port_warehouse': {
+          const base = new THREE.Mesh(whBaseGeo, this.upgradeStoneMat);
+          base.position.set(0, 0.024, 0);
+          const shed = new THREE.Mesh(whLoftGeo, this.upgradeTimberMat);
+          shed.position.set(0, 0.074, 0);
+          const roof = new THREE.Mesh(whRoofGeo, this.upgradeCanvasMat);
+          roof.position.set(0, 0.13, 0);
+          roof.rotation.y = Math.PI / 4;
+          const barrelGeo = this.getSharedUpgradeGeo(
+            'mod-barrel',
+            () => new THREE.CylinderGeometry(0.016, 0.016, 0.034, 6)
+          );
+          const b1 = new THREE.Mesh(barrelGeo, this.upgradeTimberMat);
+          b1.position.set(-0.036, 0.016, 0.062);
+          const b2 = new THREE.Mesh(barrelGeo, this.upgradeTimberMat);
+          b2.position.set(0.036, 0.016, 0.062);
+          sub.add(base, shed, roof, b1, b2);
+          break;
+        }
+        case 'port_crane': {
+          const ped = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-crane-ped', () => new THREE.BoxGeometry(0.065, 0.045, 0.065)),
+            this.upgradeStoneMat
+          );
+          ped.position.set(0, 0.018, 0);
+          const mast = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-crane-mast', () => new THREE.CylinderGeometry(0.016, 0.02, 0.175, 6)),
+            this.upgradeTimberMat
+          );
+          mast.position.set(0, 0.115, 0);
+          const boom = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-crane-boom', () => new THREE.BoxGeometry(0.135, 0.02, 0.022)),
+            this.upgradeTimberMat
+          );
+          boom.position.set(0.036, 0.185, 0);
+          boom.rotation.z = 0.35;
+          const crate = new THREE.Mesh(crateSmGeo, this.upgradeGoldMat);
+          crate.position.set(0.068, 0.145, 0);
+          sub.add(ped, mast, boom, crate);
+          break;
+        }
+        case 'port_lighthouse': {
+          const base = new THREE.Mesh(lhBaseGeo, this.upgradeStoneMat);
+          base.position.set(0, 0.02, 0);
+          const shaft = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-lh-shaft', () => new THREE.CylinderGeometry(0.042, 0.058, 0.175, 8)),
+            this.upgradeCanvasMat
+          );
+          shaft.position.set(0, 0.13, 0);
+          const stripe = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-lh-band', () => new THREE.CylinderGeometry(0.049, 0.052, 0.042, 8)),
+            this.upgradeRoofMat
+          );
+          stripe.position.set(0, 0.12, 0);
+          const gallery = new THREE.Mesh(lhGalleryGeo, this.upgradeDarkMetalMat);
+          gallery.position.set(0, 0.222, 0);
+          const lens = new THREE.Mesh(emberOrbGeo, this.nightLanternGlowMat);
+          lens.position.set(0, 0.246, 0);
+          const cap = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-lh-cap', () => new THREE.ConeGeometry(0.048, 0.055, 8)),
+            this.upgradeRoofMat
+          );
+          cap.position.set(0, 0.285, 0);
+          sub.add(base, shaft, stripe, gallery, lens, cap);
+          break;
+        }
+        case 'expanded_dock': {
+          const deck = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-pier-deck', () => new THREE.BoxGeometry(0.14, 0.022, 0.15)),
+            this.upgradeTimberMat
+          );
+          deck.position.set(0, 0.095, 0);
+          sub.add(deck);
+          const pileGeo = this.getSharedUpgradeGeo(
+            'mod-pier-pile',
+            () => new THREE.CylinderGeometry(0.014, 0.015, 0.15, 6)
+          );
+          const pileCoords: Array<[number, number]> = [
+            [-0.054, -0.056],
+            [0.054, -0.056],
+            [-0.054, 0.056],
+            [0.054, 0.056],
+          ];
+          for (const [px, pz] of pileCoords) {
+            const pile = new THREE.Mesh(pileGeo, this.upgradeTimberMat);
+            pile.position.set(px, 0.025, pz);
+            sub.add(pile);
+          }
+          const bollard = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-anvil', () => new THREE.BoxGeometry(0.036, 0.028, 0.022)),
+            this.upgradeDarkMetalMat
+          );
+          bollard.position.set(-0.044, 0.114, 0.05);
+          const quayPost = new THREE.Mesh(lampPoleGeo, this.upgradeTimberMat);
+          quayPost.position.set(0.046, 0.145, 0.05);
+          const quayGlow = new THREE.Mesh(orbSmGeo, this.nightLanternGlowMat);
+          quayGlow.position.set(0.046, 0.188, 0.05);
+          sub.add(bollard, quayPost, quayGlow);
+          break;
+        }
+        case 'residential_wing': {
+          const base = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-res-base', () => new THREE.BoxGeometry(0.115, 0.032, 0.1)),
+            this.upgradeStoneMat
+          );
+          base.position.set(0, 0.012, 0);
+          const body = new THREE.Mesh(shopBodyGeo, this.upgradeCanvasMat);
+          body.position.set(0, 0.062, 0);
+          const roof = new THREE.Mesh(shopRoofGeo, this.upgradeRoofMat);
+          roof.position.set(0, 0.135, 0);
+          roof.rotation.y = Math.PI / 4;
+          const windowPane = new THREE.Mesh(winSmGeo, this.nightLanternGlowMat);
+          windowPane.position.set(0, 0.068, 0.049);
+          sub.add(base, body, roof, windowPane);
+          break;
+        }
+        case 'stone_well': {
+          const curb = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-well', () => new THREE.CylinderGeometry(0.052, 0.058, 0.068, 8)),
+            this.upgradeStoneMat
+          );
+          curb.position.set(0, 0.03, 0);
+          const water = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-well-water', () => new THREE.CylinderGeometry(0.038, 0.038, 0.012, 8)),
+            this.waterMat
+          );
+          water.position.set(0, 0.06, 0);
+          const u1 = new THREE.Mesh(lampPoleGeo, this.upgradeTimberMat);
+          u1.position.set(-0.042, 0.075, 0);
+          const u2 = new THREE.Mesh(lampPoleGeo, this.upgradeTimberMat);
+          u2.position.set(0.042, 0.075, 0);
+          const roof = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-well-roof', () => new THREE.ConeGeometry(0.068, 0.058, 6)),
+            this.upgradeRoofMat
+          );
+          roof.position.set(0, 0.132, 0);
+          sub.add(curb, water, u1, u2, roof);
+          break;
+        }
+        case 'street_lighting': {
+          const ped = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-lamp-ped', () => new THREE.CylinderGeometry(0.028, 0.036, 0.03, 6)),
+            this.upgradeStoneMat
+          );
+          ped.position.set(0, 0.012, 0);
+          const tall = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-lamp-tall', () => new THREE.CylinderGeometry(0.011, 0.016, 0.155, 6)),
+            this.upgradeDarkMetalMat
+          );
+          tall.position.set(0, 0.095, 0);
+          const arm = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-crossarm', () => new THREE.BoxGeometry(0.082, 0.012, 0.014)),
+            this.upgradeDarkMetalMat
+          );
+          arm.position.set(0, 0.165, 0);
+          const gL = new THREE.Mesh(orbSmGeo, this.nightLanternGlowMat);
+          gL.position.set(-0.036, 0.184, 0);
+          const gR = new THREE.Mesh(orbSmGeo, this.nightLanternGlowMat);
+          gR.position.set(0.036, 0.184, 0);
+          const finial = new THREE.Mesh(finialSmGeo, this.upgradeGoldMat);
+          finial.position.set(0, 0.19, 0);
+          sub.add(ped, tall, arm, gL, gR, finial);
+          break;
+        }
+        case 'garden_plaza': {
+          const pad = new THREE.Mesh(plazaPadGeo, this.upgradeStoneMat);
+          pad.position.set(0, 0.008, 0);
+          sub.add(pad);
+          const hedgeGeo = this.getSharedUpgradeGeo(
+            'mod-hedge',
+            () => new THREE.BoxGeometry(0.028, 0.028, 0.028)
+          );
+          const hedgeOffsets: Array<[number, number]> = [
+            [-0.042, -0.042],
+            [0.042, -0.042],
+            [-0.042, 0.042],
+            [0.042, 0.042],
+          ];
+          for (const [hx, hz] of hedgeOffsets) {
+            const hedge = new THREE.Mesh(hedgeGeo, this.upgradeFoliageMat);
+            hedge.position.set(hx, 0.032, hz);
+            sub.add(hedge);
+          }
+          const obelisk = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-obelisk', () => new THREE.ConeGeometry(0.024, 0.105, 4)),
+            this.upgradeGoldMat
+          );
+          obelisk.position.set(0, 0.07, 0);
+          sub.add(obelisk);
+          break;
+        }
+        case 'royal_archive': {
+          const body = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-arch-body', () => new THREE.BoxGeometry(0.115, 0.095, 0.105)),
+            this.upgradeStoneMat
+          );
+          body.position.set(0, 0.044, 0);
+          const roof = new THREE.Mesh(shopRoofGeo, this.upgradeRoofMat);
+          roof.position.set(0, 0.122, 0);
+          roof.rotation.y = Math.PI / 4;
+          const crest = new THREE.Mesh(finialSmGeo, this.upgradeGoldMat);
+          crest.position.set(0, 0.165, 0);
+          const windowPane = new THREE.Mesh(winSmGeo, this.nightLanternGlowMat);
+          windowPane.position.set(0, 0.052, 0.052);
+          sub.add(body, roof, crest, windowPane);
+          break;
+        }
+        case 'library_wing': {
+          const body = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-lib-body', () => new THREE.BoxGeometry(0.125, 0.095, 0.095)),
+            this.upgradeStoneMat
+          );
+          body.position.set(0, 0.044, 0);
+          const roof = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-lib-roof', () => new THREE.ConeGeometry(0.094, 0.072, 4)),
+            this.upgradeRoofMat
+          );
+          roof.position.set(0, 0.125, 0);
+          roof.rotation.y = Math.PI / 4;
+          const windowPane = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-win-tall', () => new THREE.BoxGeometry(0.032, 0.056, 0.018)),
+            this.nightLanternGlowMat
+          );
+          windowPane.position.set(0, 0.055, 0.046);
+          sub.add(body, roof, windowPane);
+          break;
+        }
+        case 'scriptorium': {
+          const body = new THREE.Mesh(shopBodyGeo, this.upgradeCanvasMat);
+          body.position.set(0, 0.038, -0.005);
+          const roof = new THREE.Mesh(shopRoofGeo, this.upgradeRoofMat);
+          roof.position.set(0, 0.112, -0.005);
+          roof.rotation.y = Math.PI / 4;
+          const skylight = new THREE.Mesh(orbSmGeo, this.nightLanternGlowMat);
+          skylight.position.set(0, 0.128, 0.018);
+          const lectern = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-lectern', () => new THREE.CylinderGeometry(0.016, 0.022, 0.048, 6)),
+            this.upgradeGoldMat
+          );
+          lectern.position.set(0.054, 0.02, 0.042);
+          sub.add(body, roof, skylight, lectern);
+          break;
+        }
+        case 'observatory': {
+          const tower = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-obs-tower', () => new THREE.CylinderGeometry(0.056, 0.064, 0.145, 8)),
+            this.upgradeStoneMat
+          );
+          tower.position.set(0, 0.068, 0);
+          const dome = new THREE.Mesh(
+            this.getSharedUpgradeGeo(
+              'mod-exch-dome',
+              () => new THREE.SphereGeometry(0.052, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55)
+            ),
+            this.upgradeGoldMat
+          );
+          dome.position.set(0, 0.138, 0);
+          const telescope = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-tele-tube', () => new THREE.CylinderGeometry(0.014, 0.018, 0.095, 6)),
+            this.upgradeDarkMetalMat
+          );
+          telescope.position.set(0.035, 0.168, 0.035);
+          telescope.rotation.z = -0.75;
+          telescope.rotation.y = -Math.PI / 4;
+          sub.add(tower, dome, telescope);
+          break;
+        }
+        case 'armory': {
+          const bunker = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-arm-body', () => new THREE.BoxGeometry(0.12, 0.088, 0.105)),
+            this.upgradeStoneMat
+          );
+          bunker.position.set(0, 0.04, 0);
+          const parapet = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-arm-parapet', () => new THREE.BoxGeometry(0.128, 0.022, 0.112)),
+            this.upgradeDarkMetalMat
+          );
+          parapet.position.set(0, 0.094, 0);
+          const rack = new THREE.Mesh(crateSmGeo, this.upgradeGoldMat);
+          rack.position.set(0, 0.046, 0.054);
+          sub.add(bunker, parapet, rack);
+          break;
+        }
+        case 'watch_beacon': {
+          const base = new THREE.Mesh(lhBaseGeo, this.upgradeStoneMat);
+          base.position.set(0, 0.02, 0);
+          const shaft = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-beacon-shaft', () => new THREE.CylinderGeometry(0.036, 0.048, 0.145, 4)),
+            this.upgradeTimberMat
+          );
+          shaft.position.set(0, 0.115, 0);
+          const brazier = new THREE.Mesh(lhGalleryGeo, this.upgradeDarkMetalMat);
+          brazier.position.set(0, 0.195, 0);
+          const flame = new THREE.Mesh(emberOrbGeo, this.upgradeEmberMat);
+          flame.position.set(0, 0.228, 0);
+          const crownGlow = new THREE.Mesh(orbSmGeo, this.nightLanternGlowMat);
+          crownGlow.position.set(0, 0.242, 0);
+          sub.add(base, shaft, brazier, flame, crownGlow);
+          break;
+        }
+        case 'training_yard': {
+          const pad = new THREE.Mesh(plazaPadGeo, this.upgradeStoneMat);
+          pad.position.set(0, 0.008, 0);
+          const rack = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-yard-rack', () => new THREE.BoxGeometry(0.11, 0.052, 0.018)),
+            this.upgradeTimberMat
+          );
+          rack.position.set(0, 0.038, -0.045);
+          const targetGeo = this.getSharedUpgradeGeo(
+            'mod-target',
+            () => new THREE.CylinderGeometry(0.024, 0.024, 0.016, 8)
+          );
+          const t1 = new THREE.Mesh(targetGeo, this.upgradeCanvasMat);
+          t1.position.set(-0.036, 0.042, 0.025);
+          t1.rotation.x = Math.PI / 2;
+          const t2 = new THREE.Mesh(targetGeo, this.upgradeRoofMat);
+          t2.position.set(0.036, 0.042, 0.025);
+          t2.rotation.x = Math.PI / 2;
+          const spear = new THREE.Mesh(lampPoleGeo, this.upgradeDarkMetalMat);
+          spear.position.set(0.056, 0.055, -0.045);
+          sub.add(pad, rack, t1, t2, spear);
+          break;
+        }
+        default: {
+          const _exhaustive: never = kind;
+          void _exhaustive;
+          break;
+        }
+      }
+
+      if (sub.children.length > 0) {
+        group.add(sub);
       }
     }
   }
@@ -4503,6 +5128,10 @@ export class HexSceneController {
     materials.add(this.upgradeTimberMat);
     materials.add(this.upgradeRoofMat);
     materials.add(this.upgradeGoldMat);
+    materials.add(this.upgradeDarkMetalMat);
+    materials.add(this.upgradeFoliageMat);
+    materials.add(this.upgradeCanvasMat);
+    materials.add(this.upgradeEmberMat);
     materials.add(this.fertileOverlayMat);
 
     geometries.add(this.conquestRingGeo);

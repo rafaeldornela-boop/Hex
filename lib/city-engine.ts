@@ -1,7 +1,7 @@
 import type { HexAssetEntry } from './godot-docs';
 import { getBuildingDefinition } from './buildings-catalog';
 import { getBuildingLevel, getEffectiveBuildingStats } from './building-upgrade-engine';
-import { aggregateTileModuleEffects } from './building-modules-engine';
+import { aggregateTileModuleEffects, getInstalledModules } from './building-modules-engine';
 import { hexKey, type AxialCoord, type HexOwner, type HexWorldState } from './hex-engine';
 import {
   evaluateRegionalWorld,
@@ -349,7 +349,7 @@ export function syncAndEvolveCities(params: {
       const assetName = assets[tile.structureIndex]?.name ?? '';
       const lv = getBuildingLevel(tile);
       const stats = getEffectiveBuildingStats(assetName, lv);
-      const modEff = aggregateTileModuleEffects(assetName, tile.modules);
+      const modEff = aggregateTileModuleEffects(assetName, getInstalledModules(tile));
       hw += stats.housingCapacity + modEff.housingBonus;
     }
     return Math.max(4, hw);
@@ -398,7 +398,7 @@ export function syncAndEvolveCities(params: {
       const assetName = assets[tile.structureIndex]?.name ?? '';
       const lv = getBuildingLevel(tile);
       const stats = getEffectiveBuildingStats(assetName, lv);
-      const modEff = aggregateTileModuleEffects(assetName, tile.modules);
+      const modEff = aggregateTileModuleEffects(assetName, getInstalledModules(tile));
 
       const tileHousing = stats.housingCapacity + modEff.housingBonus;
       if (tileHousing > 0) {

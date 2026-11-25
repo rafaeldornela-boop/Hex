@@ -39,7 +39,7 @@ function makeTile(
   owner: 'player' | 'neutral' = 'player'
 ) {
   const chosenAsset = assetName ?? TERRAIN_METADATA[terrainType].defaultAssetName;
-  const resourceMap: Record<TerrainType, 'wood' | 'stone' | 'food' | 'ore' | 'water'> = {
+  const resourceMap: Record<TerrainType, 'none' | 'wood' | 'food' | 'ore' | 'water'> = {
     plains: 'food',
     forest: 'wood',
     mountain: 'ore',

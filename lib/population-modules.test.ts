@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { HEX_ASSETS } from './repo-data';
 import { DEFAULT_ROTATION_DEG, hexKey } from './hex-engine';
 import {
@@ -23,10 +25,21 @@ import {
 import { getCityStageForMetrics } from './city-engine';
 import {
   BUILDING_MODULES,
+  aggregateTileModuleEffects,
   computeModuleScaledCost,
+  getBuildingModuleVisualPlacement,
   getCompatibleModulesForBuilding,
+  getInstalledModules,
   getModuleSlotsForBuilding,
+  isPointInsideLocalHex,
+  isValidBuildingModuleId,
 } from './building-modules-engine';
+import { isConstructibleBuildingName } from './buildings-catalog';
+import { getBuildingMaxLevel } from './building-upgrade-engine';
+import { evaluateRegionalWorld } from './regional-engine';
+import { computeRoadConnectivity } from './road-engine';
+import { computeCalendarSnapshot } from './calendar-engine';
+import { normalizeClimateWeather } from './season-engine';
 import { computeHexDefenseScore } from './military-engine';
 import { TERRAIN_METADATA, type TerrainType } from './terrain-engine';
 
@@ -46,7 +59,7 @@ function makeTile(
   modules?: string[]
 ) {
   const chosenAsset = assetName ?? TERRAIN_METADATA[terrainType].defaultAssetName;
-  const resourceMap: Record<TerrainType, 'wood' | 'stone' | 'food' | 'ore' | 'water'> = {
+  const resourceMap: Record<TerrainType, 'none' | 'wood' | 'food' | 'ore' | 'water'> = {
     plains: 'food',
     forest: 'wood',
     mountain: 'ore',
@@ -160,22 +173,22 @@ test('worker shortage smoothly scales partial production instead of all-or-nothi
   );
 
   const econ = getKingdomEconomy(state, HEX_ASSETS);
-  const mineReport = econ.buildingsByKey['-1,0'];
-  assert.equal(mineReport.status, 'partial');
-  assert.equal(mineReport.workersAssigned, 1);
-  assert.equal(mineReport.workersRequired, 2);
-  assert.ok(mineReport.actualProduction.ore > 0);
+  const lumberReport = econ.buildingsByKey['0,-1'];
+  assert.equal(lumberReport.status, 'partial');
+  assert.equal(lumberReport.workersAssigned, 1);
+  assert.equal(lumberReport.workersRequired, 2);
+  assert.ok(lumberReport.actualProduction.wood > 0);
 });
 
 test('city evolution requires BOTH developmentScore AND minimum population thresholds', () => {
   // Score 120 without enough population cannot skip to Grande Cidade
-  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 6 }).level, 1);
-  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 8 }).level, 2);
-  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 18 }).level, 3);
-  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 28 }).level, 4);
-  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 40 }).level, 5);
+  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 6 }), 1);
+  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 8 }), 2);
+  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 18 }), 3);
+  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 28 }), 4);
+  assert.equal(getCityStageForMetrics({ developmentScore: 120, population: 40 }), 5);
   // High population without score is also gated by score
-  assert.equal(getCityStageForMetrics({ developmentScore: 10, population: 50 }).level, 1);
+  assert.equal(getCityStageForMetrics({ developmentScore: 10, population: 50 }), 1);
 });
 
 test('module slots scale with structural building level and always require strategic choice (< compatible)', () => {
@@ -249,9 +262,11 @@ test('installed modules modify economy, housing, storage, defense, and cost scal
     []
   );
 
-  assert.equal(moddedEcon.storageCaps.food - baseEcon.storageCaps.food, 35);
+  // Food cap increase: +25 (Farm Nv2) + 15 (House Nv2) + 20 (mil_armory general) + 35 (farm_silo food) = 95
+  assert.equal(moddedEcon.storageCaps.food - baseEcon.storageCaps.food, 95);
+  assert.equal(moddedEcon.storageCaps.wood - baseEcon.storageCaps.wood, 60);
   assert.ok(moddedEcon.foodProduced > baseEcon.foodProduced);
-  assert.equal(moddedEcon.population.capacity - baseEcon.population.capacity, 2 + 1); // +2 res_extension, +1 Nv.2 house
+  assert.equal(moddedEcon.population.capacity - baseEcon.population.capacity, 2 + 4); // +2 res_extension, +4 Nv.2 house
   assert.equal(moddedDef - baseDef, 4); // +4 mil_armory
 });
 
@@ -265,7 +280,7 @@ test('module installation shares construction queue, preserves active building, 
       population: 12,
       resources: { wood: 120, stone: 120, food: 80, ore: 40, metal: 30, science: 0 },
       research: {
-        unlocked: ['agriculture', 'construction', 'masonry'],
+        unlocked: ['agriculture', 'construction'],
         activeTechId: null,
         progressScience: 0,
       },
@@ -277,10 +292,15 @@ test('module installation shares construction queue, preserves active building, 
   assert.equal(evalBefore.slotsMax, 1);
   assert.equal(evalBefore.slotsUsed, 0);
 
-  // Install farm_silo (2 turns)
+  const goldBefore = state.worldState.cash;
+  const woodBefore = state.resources.wood;
+
+  // Install farm_silo (2 turns) — cost deducted immediately up front
   const installRes = installBuildingModuleInKingdom(state, 1, 0, 'farm_silo', HEX_ASSETS);
   assert.equal(installRes.started, true);
   state = installRes.nextState;
+  assert.ok(state.worldState.cash < goldBefore);
+  assert.ok(state.resources.wood < woodBefore);
 
   // Parent Farm must remain operational while module is installing!
   const econDuring = getKingdomEconomy(state, HEX_ASSETS);
@@ -332,3 +352,350 @@ test('module installation shares construction queue, preserves active building, 
   assert.equal(dem.removed, true);
   assert.equal(dem.nextState.worldState.hexes['1,0']?.modules, undefined);
 });
+
+test('all 35 building modules pass catalog integrity, compatible assets, effects, visual kinds, and hex-bound checks', () => {
+  const modules = Object.values(BUILDING_MODULES);
+  assert.equal(modules.length, 35);
+  assert.equal(isValidBuildingModuleId('nonexistent_module_id'), false);
+
+  const sceneSource = readFileSync(
+    join(process.cwd(), 'components/game/HexSceneController.ts'),
+    'utf8'
+  );
+  const assetNameSet = new Set(HEX_ASSETS.map((a) => a.name));
+
+  for (const mod of modules) {
+    assert.equal(isValidBuildingModuleId(mod.id), true);
+    assert.ok(mod.labelPt.trim().length > 0, `Missing labelPt for ${mod.id}`);
+    assert.ok(mod.summaryPt.trim().length > 0, `Missing summaryPt for ${mod.id}`);
+    assert.ok(mod.buildTimeTurns >= 1, `Invalid buildTimeTurns for ${mod.id}`);
+    assert.ok(mod.compatibleAssets.length >= 1, `No compatible assets for ${mod.id}`);
+
+    // Verify compatible buildings exist in asset catalog & build rules (capital castle also valid)
+    for (const assetName of mod.compatibleAssets) {
+      assert.ok(assetNameSet.has(assetName), `Asset ${assetName} missing in HEX_ASSETS for ${mod.id}`);
+      assert.ok(
+        assetName === 'building-castle' || isConstructibleBuildingName(assetName),
+        `Compatible asset ${assetName} for ${mod.id} is neither castle nor constructible`
+      );
+    }
+
+    // Verify valid concrete effect in engine aggregation
+    const agg = aggregateTileModuleEffects(mod.compatibleAssets[0], [mod.id]);
+    const prodSum = Object.values(agg.prodPct).reduce((a, b) => a + b, 0);
+    const hasEffect =
+      prodSum !== 0 ||
+      agg.springSummerFoodPct !== 0 ||
+      agg.flatGold !== 0 ||
+      agg.flatScience !== 0 ||
+      agg.housingBonus !== 0 ||
+      agg.storageGeneralBonus !== 0 ||
+      agg.storageFoodBonus !== 0 ||
+      agg.defenseBonus !== 0 ||
+      agg.maintenanceDelta !== 0 ||
+      agg.urbanQualityBonus !== 0 ||
+      agg.logisticsBonusPct !== 0 ||
+      agg.seasonalResilience !== 0 ||
+      agg.winterResilience !== 0 ||
+      agg.droughtResilience !== 0 ||
+      agg.rainStormResilience !== 0 ||
+      Object.keys(agg.regionalWeights).length > 0;
+    assert.equal(hasEffect, true, `Module ${mod.id} has empty effect`);
+
+    // Verify 3D visual coverage in HexSceneController.ts
+    assert.ok(mod.visual.footprintRadius > 0 && mod.visual.footprintRadius <= 0.12);
+    assert.ok(
+      sceneSource.includes(`case '${mod.visual.kind}':`),
+      `HexSceneController.ts missing case '${mod.visual.kind}' for module ${mod.id}`
+    );
+
+    // Verify strict hex containment across every compatible asset and level
+    for (const assetName of mod.compatibleAssets) {
+      const maxLv = getBuildingMaxLevel(assetName);
+      for (let lv = 1; lv <= maxLv; lv++) {
+        const placement = getBuildingModuleVisualPlacement(assetName, mod.id, lv);
+        assert.ok(Number.isFinite(placement.groundY));
+        assert.ok(
+          isPointInsideLocalHex(
+            placement.offsetX,
+            placement.offsetZ,
+            placement.footprintRadius
+          ),
+          `Module ${mod.id} on ${assetName} Nv.${lv} overflows hex bounds: (${placement.offsetX}, ${placement.offsetZ}) r=${placement.footprintRadius}`
+        );
+        if (mod.id === 'port_expanded_dock') {
+          assert.equal(placement.isOverWater, true);
+          assert.equal(placement.groundY, 0.1);
+        }
+      }
+    }
+  }
+
+  assert.match(BUILDING_MODULES.castle_royal_archive.summaryPt, /Vocação Acadêmica/);
+});
+
+test('isolated silo storage, irrigation production, incompatible blocking, and deduplication (no doubled bonuses)', () => {
+  const farmBase = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'fertile', 'building-farm', 'player', 2),
+      makeTile(-1, 0, 'mountain', 'building-mine', 'player', 1),
+    ],
+    {
+      population: 12,
+      resources: { wood: 100, stone: 100, food: 100, ore: 50, metal: 20, science: 0 },
+      research: {
+        unlocked: ['agriculture', 'mining'],
+        activeTechId: null,
+        progressScience: 0,
+      },
+    }
+  );
+  const econBase = getKingdomEconomy(farmBase, HEX_ASSETS);
+
+  // Silo only alters food storage (+35) and report matches
+  const farmSilo = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'fertile', 'building-farm', 'player', 2, ['farm_silo']),
+      makeTile(-1, 0, 'mountain', 'building-mine', 'player', 1),
+    ],
+    {
+      population: 12,
+      resources: { wood: 100, stone: 100, food: 100, ore: 50, metal: 20, science: 0 },
+      research: {
+        unlocked: ['agriculture', 'mining'],
+        activeTechId: null,
+        progressScience: 0,
+      },
+    }
+  );
+  const econSilo = getKingdomEconomy(farmSilo, HEX_ASSETS);
+  assert.equal(econSilo.storageCaps.food - econBase.storageCaps.food, 35);
+  assert.equal(econSilo.storageCaps.wood - econBase.storageCaps.wood, 0);
+  assert.equal(econSilo.buildingsByKey['1,0'].effectiveStorageFood, 35);
+
+  // Duplicate IDs on the same tile must NOT duplicate bonuses
+  const farmSiloDup = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'fertile', 'building-farm', 'player', 2, ['farm_silo', 'farm_silo']),
+      makeTile(-1, 0, 'mountain', 'building-mine', 'player', 1),
+    ],
+    {
+      population: 12,
+      resources: { wood: 100, stone: 100, food: 100, ore: 50, metal: 20, science: 0 },
+      research: {
+        unlocked: ['agriculture', 'mining'],
+        activeTechId: null,
+        progressScience: 0,
+      },
+    }
+  );
+  assert.deepEqual(getInstalledModules(farmSiloDup.worldState.hexes['1,0']), ['farm_silo']);
+  const econSiloDup = getKingdomEconomy(farmSiloDup, HEX_ASSETS);
+  assert.equal(econSiloDup.storageCaps.food, econSilo.storageCaps.food);
+  assert.equal(econSiloDup.buildingsByKey['1,0'].effectiveStorageFood, 35);
+
+  // Irrigation alters food production
+  const farmIrrig = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'fertile', 'building-farm', 'player', 2, ['farm_irrigation']),
+      makeTile(-1, 0, 'mountain', 'building-mine', 'player', 1),
+    ],
+    {
+      population: 12,
+      resources: { wood: 100, stone: 100, food: 100, ore: 50, metal: 20, science: 0 },
+      research: {
+        unlocked: ['agriculture', 'mining'],
+        activeTechId: null,
+        progressScience: 0,
+      },
+    }
+  );
+  const econIrrig = getKingdomEconomy(farmIrrig, HEX_ASSETS);
+  assert.ok(econIrrig.foodProduced > econBase.foodProduced);
+  assert.ok(
+    econIrrig.buildingsByKey['1,0'].actualProduction.food >
+      econBase.buildingsByKey['1,0'].actualProduction.food
+  );
+
+  // Incompatible modules are blocked by installer and ignored by engine aggregation
+  const incompatOnMine = installBuildingModuleInKingdom(farmBase, -1, 0, 'farm_silo', HEX_ASSETS);
+  assert.equal(incompatOnMine.started, false);
+  const incompatOnFarm = installBuildingModuleInKingdom(farmBase, 1, 0, 'mine_deep_gallery', HEX_ASSETS);
+  assert.equal(incompatOnFarm.started, false);
+  const bogusEff = aggregateTileModuleEffects('building-mine', ['farm_silo']);
+  assert.equal(bogusEff.storageFoodBonus, 0);
+  assert.equal(bogusEff.winterResilience, 0);
+});
+
+test('seasonal weather resilience, regional specialization boost, and legacy meta.modules migration', () => {
+  // 1. Seasonal drought mitigation (farm_irrigation) & winter frost mitigation (farm_silo)
+  const drought = normalizeClimateWeather({ id: 'drought_weather', turnsRemaining: 2 });
+  const frost = normalizeClimateWeather({ id: 'frost', turnsRemaining: 2 });
+  const summerCal = computeCalendarSnapshot(15);
+  const autumnCal = computeCalendarSnapshot(27);
+  const winterCal = computeCalendarSnapshot(39);
+
+  const farmPlainSummer = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'plains', 'building-farm', 'player', 1),
+    ],
+    {
+      calendar: summerCal,
+      climateWeather: drought,
+      population: 10,
+      resources: { wood: 100, stone: 100, food: 100, ore: 40, metal: 20, science: 0 },
+    }
+  );
+  const farmIrrigSummer = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'plains', 'building-farm', 'player', 1, ['farm_irrigation']),
+    ],
+    {
+      calendar: summerCal,
+      climateWeather: drought,
+      population: 10,
+      resources: { wood: 100, stone: 100, food: 100, ore: 40, metal: 20, science: 0 },
+    }
+  );
+  const econDryBase = getKingdomEconomy(farmPlainSummer, HEX_ASSETS);
+  const econDryIrrig = getKingdomEconomy(farmIrrigSummer, HEX_ASSETS);
+  assert.ok(econDryIrrig.foodProduced > econDryBase.foodProduced);
+
+  const farmPlainWinter = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'fertile', 'building-farm', 'player', 1),
+    ],
+    {
+      calendar: winterCal,
+      climateWeather: frost,
+      population: 10,
+      resources: { wood: 100, stone: 100, food: 100, ore: 40, metal: 20, science: 0 },
+    }
+  );
+  const farmSiloWinter = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'fertile', 'building-farm', 'player', 1, ['farm_silo']),
+    ],
+    {
+      calendar: winterCal,
+      climateWeather: frost,
+      population: 10,
+      resources: { wood: 100, stone: 100, food: 100, ore: 40, metal: 20, science: 0 },
+    }
+  );
+  const econFrostBase = getKingdomEconomy(farmPlainWinter, HEX_ASSETS);
+  const econFrostSilo = getKingdomEconomy(farmSiloWinter, HEX_ASSETS);
+  assert.ok(econFrostSilo.foodProduced > econFrostBase.foodProduced);
+
+  // Rain storm mitigation on Mine with mine_drainage
+  const storm = normalizeClimateWeather({ id: 'storm', turnsRemaining: 2 });
+  const mineStormBase = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'mountain', 'building-mine', 'player', 2),
+    ],
+    {
+      calendar: autumnCal,
+      climateWeather: storm,
+      population: 12,
+      resources: { wood: 100, stone: 100, food: 100, ore: 40, metal: 20, science: 0 },
+    }
+  );
+  const mineStormDrain = makeSandbox(
+    [
+      makeTile(0, 0, 'plains', 'building-castle'),
+      makeTile(1, 0, 'mountain', 'building-mine', 'player', 2, ['mine_drainage']),
+    ],
+    {
+      calendar: autumnCal,
+      climateWeather: storm,
+      population: 12,
+      resources: { wood: 100, stone: 100, food: 100, ore: 40, metal: 20, science: 0 },
+    }
+  );
+  const econStormBase = getKingdomEconomy(mineStormBase, HEX_ASSETS);
+  const econStormDrain = getKingdomEconomy(mineStormDrain, HEX_ASSETS);
+  assert.ok(
+    econStormDrain.buildingsByKey['1,0'].actualProduction.ore >
+      econStormBase.buildingsByKey['1,0'].actualProduction.ore
+  );
+
+  // 2. Regional specialization incorporates modules (e.g. farm_seed_vault -> +3 agricultural)
+  const cities = [
+    { id: 'cap', name: 'Capital', center: { q: 0, r: 0 }, owner: 'player' as const, level: 2 },
+  ];
+  const sampleRoads = {
+    '0,0': { q: 0, r: 0, level: 1 as const, owner: 'player' as const },
+    '1,0': { q: 1, r: 0, level: 1 as const, owner: 'player' as const },
+  };
+  const connBase = computeRoadConnectivity({
+    worldState: farmBaseCheckWorld(farmPlainWinter),
+    cityCenters: cities,
+    roads: sampleRoads,
+    assets: HEX_ASSETS,
+  });
+  const regBase = evaluateRegionalWorld({
+    worldState: farmPlainWinter.worldState,
+    cities,
+    roads: sampleRoads,
+    connectivity: connBase,
+    assets: HEX_ASSETS,
+  });
+  const farmAgroModded = makeSandbox([
+    makeTile(0, 0, 'plains', 'building-castle'),
+    makeTile(1, 0, 'fertile', 'building-farm', 'player', 2, ['farm_seed_vault', 'farm_silo']),
+  ]);
+  const connMod = computeRoadConnectivity({
+    worldState: farmAgroModded.worldState,
+    cityCenters: cities,
+    roads: sampleRoads,
+    assets: HEX_ASSETS,
+  });
+  const regMod = evaluateRegionalWorld({
+    worldState: farmAgroModded.worldState,
+    cities,
+    roads: sampleRoads,
+    connectivity: connMod,
+    assets: HEX_ASSETS,
+  });
+  const agroBaseScore =
+    regBase.cityProfilesById['cap']?.specializations.find((s) => s.id === 'agricultural')?.score ??
+    0;
+  const agroModScore =
+    regMod.cityProfilesById['cap']?.specializations.find((s) => s.id === 'agricultural')?.score ??
+    0;
+  assert.ok(agroBaseScore > 0);
+  assert.equal(agroModScore - agroBaseScore, 3);
+
+  // 3. Save migration preserves legacy meta.modules and strips invalid/duplicate entries
+  const legacySaved = JSON.parse(serializeKingdomState(farmBaseCheckState(farmPlainWinter)));
+  const farmEntry = (legacySaved.structures as Array<{ q: number; r: number; modules?: string[]; meta?: Record<string, unknown> }>).find(
+    (s) => s.q === 1 && s.r === 0
+  );
+  assert.ok(farmEntry);
+  delete farmEntry.modules;
+  farmEntry.meta = {
+    ...(farmEntry.meta ?? {}),
+    modules: ['farm_silo', 'farm_silo', 'invalid_mod_x'],
+  };
+  const migrated = deserializeKingdomState(JSON.stringify(legacySaved), HEX_ASSETS.length);
+  assert.ok(migrated !== null);
+  assert.deepEqual(migrated.worldState.hexes['1,0']?.modules, ['farm_silo']);
+  assert.deepEqual(migrated.worldState.hexes['1,0']?.meta?.modules, ['farm_silo']);
+});
+
+function farmBaseCheckWorld(state: KingdomState) {
+  return state.worldState;
+}
+
+function farmBaseCheckState(state: KingdomState) {
+  return state;
+}

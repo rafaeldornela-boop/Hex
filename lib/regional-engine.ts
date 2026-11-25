@@ -1,6 +1,6 @@
 import type { HexAssetEntry } from './godot-docs';
 import { getBuildingDefinition } from './buildings-catalog';
-import { aggregateTileModuleEffects } from './building-modules-engine';
+import { aggregateTileModuleEffects, getInstalledModules } from './building-modules-engine';
 import { hexKey, type AxialCoord, type HexOwner, type HexWorldState } from './hex-engine';
 import type { RoadConnectivitySummary, RoadMap } from './road-engine';
 import { getHexTerrainAndResource } from './terrain-engine';
@@ -408,7 +408,7 @@ export function evaluateRegionalWorld(params: {
         academicKeys.push(key);
       }
 
-      const modWeights = aggregateTileModuleEffects(assetName, tile.modules).regionalWeights;
+      const modWeights = aggregateTileModuleEffects(assetName, getInstalledModules(tile)).regionalWeights;
       for (const specId of Object.keys(modWeights) as RegionalSpecializationId[]) {
         scores[specId] += modWeights[specId] ?? 0;
       }

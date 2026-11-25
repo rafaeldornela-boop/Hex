@@ -104,8 +104,8 @@ test('createStarterKingdomState seeds 32x32 world, player core, 2 rival factions
 
   const capSummary = getKingdomTerritoryCapacity(state, HEX_ASSETS);
   assert.equal(capSummary.controlled, 7);
-  assert.equal(capSummary.capacity, 14);
-  assert.equal(capSummary.remaining, 7);
+  assert.equal(capSummary.capacity, 15);
+  assert.equal(capSummary.remaining, 8);
   assert.equal(capSummary.maxAnchorReach, 2);
 
   const prog = getKingdomProgression(state, HEX_ASSETS);
