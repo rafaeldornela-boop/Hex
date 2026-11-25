@@ -69,7 +69,7 @@ export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
     storageBonus: 100,
     defenseBonus: 15,
     production: { gold: 10, wood: 0, stone: 0, food: 0, ore: 0, science: 2 },
-    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    allowedTerrains: ['plains', 'fertile'],
     requiredTech: 'engineering',
     canRecruitUnits: true,
   },
@@ -86,7 +86,7 @@ export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
     storageBonus: 0,
     defenseBonus: 0,
     production: ZERO_PROD,
-    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    allowedTerrains: ['plains', 'fertile', 'forest'],
     requiredTech: null,
     canRecruitUnits: false,
   },
@@ -103,7 +103,7 @@ export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
     storageBonus: 10,
     defenseBonus: 0,
     production: ZERO_PROD,
-    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    allowedTerrains: ['plains', 'fertile', 'forest'],
     requiredTech: null,
     canRecruitUnits: false,
   },
@@ -341,7 +341,7 @@ export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
     storageBonus: 10,
     defenseBonus: 6,
     production: ZERO_PROD,
-    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    allowedTerrains: ['plains', 'fertile', 'forest'],
     requiredTech: 'military',
     canRecruitUnits: true,
   },
@@ -358,7 +358,7 @@ export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
     storageBonus: 20,
     defenseBonus: 14,
     production: { gold: 6, wood: 0, stone: 0, food: 0, ore: 0, science: 0 },
-    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    allowedTerrains: ['plains', 'fertile', 'mountain'],
     requiredTech: 'metallurgy',
     canRecruitUnits: true,
   },
@@ -409,7 +409,7 @@ export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
     storageBonus: 0,
     defenseBonus: 12,
     production: ZERO_PROD,
-    allowedTerrains: ['plains', 'fertile', 'forest', 'mountain'],
+    allowedTerrains: ['plains', 'fertile', 'mountain'],
     requiredTech: 'engineering',
     canRecruitUnits: false,
   },
@@ -417,7 +417,7 @@ export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
     assetName: 'bridge',
     labelPt: 'Ponte',
     role: 'infrastructure',
-    summaryPt: 'Travessia · +4 Ouro · 1 turno',
+    summaryPt: 'Travessia · +4 Ouro · 1 turno · Água',
     buildCost: { gold: 100, wood: 15, stone: 10, food: 0, ore: 0 },
     buildTimeTurns: 1,
     maintenanceGold: 1,
@@ -426,11 +426,15 @@ export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
     storageBonus: 0,
     defenseBonus: 0,
     production: { gold: 4, wood: 0, stone: 0, food: 0, ore: 0, science: 0 },
-    allowedTerrains: null,
+    allowedTerrains: ['water'],
     requiredTech: null,
     canRecruitUnits: false,
   },
 };
+
+export function isConstructibleBuildingName(assetName: string): boolean {
+  return Object.prototype.hasOwnProperty.call(BUILDING_CATALOG, assetName);
+}
 
 export function getBuildingDefinition(assetName: string): BuildingDefinition {
   const known = BUILDING_CATALOG[assetName];

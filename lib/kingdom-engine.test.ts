@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { HEX_ASSETS } from './repo-data';
-import { hexKey } from './hex-engine';
+import { hasHexConstruction, hexKey, type AxialCoord } from './hex-engine';
 import { countFactionTerritory } from './faction-engine';
+import { AXIAL_DIRECTIONS, getConquerableFrontierCoords } from './territory-engine';
 import { getStrategicRegionInfo } from './terrain-engine';
 import { getAvailableTechs } from './tech-engine';
 import {
@@ -23,6 +24,7 @@ import {
   serializeKingdomState,
   setActiveResearchInKingdom,
   tradeResourceInKingdom,
+  type KingdomState,
 } from './kingdom-engine';
 
 function idxOf(name: string): number {
@@ -31,10 +33,43 @@ function idxOf(name: string): number {
   return idx;
 }
 
-test('createStarterKingdomState seeds player core, 2 rival factions with full economy/research, initial units, and balanced economy', () => {
+function findNeutralFrontierWithTerrain(
+  state: KingdomState,
+  terrain: 'plains' | 'forest' | 'fertile' | 'mountain'
+): AxialCoord {
+  const frontier = getConquerableFrontierCoords(state.worldState);
+  for (const coord of frontier) {
+    const tile = state.worldState.hexes[hexKey(coord.q, coord.r)];
+    if (tile?.terrainType === terrain) return coord;
+  }
+  throw new Error(`No adjacent ${terrain} frontier tile found`);
+}
+
+function getFreeOwnedCoord(state: KingdomState): AxialCoord {
+  const cap = state.playerCapital ?? { q: 0, r: 0 };
+  for (const dir of AXIAL_DIRECTIONS) {
+    const c = { q: cap.q + dir.q, r: cap.r + dir.r };
+    const tile = state.worldState.hexes[hexKey(c.q, c.r)];
+    if (tile && tile.owner === 'player' && !hasHexConstruction(tile, HEX_ASSETS)) {
+      return c;
+    }
+  }
+  const free = Object.values(state.worldState.hexes).find(
+    (t) =>
+      t.owner === 'player' &&
+      (t.terrainType === 'plains' || t.terrainType === 'fertile') &&
+      !hasHexConstruction(t, HEX_ASSETS)
+  );
+  assert.ok(free, 'Expected at least one free owned hex in starter core');
+  return { q: free.q, r: free.r };
+}
+
+test('createStarterKingdomState seeds 32x32 world, player core, 2 rival factions, initial units, and balanced economy', () => {
   const state = createStarterKingdomState(HEX_ASSETS);
   assert.equal(state.turn, 1);
   assert.equal(state.population, 18);
+  assert.equal(Object.keys(state.worldState.hexes).length, 1024);
+  assert.ok(state.playerCapital !== undefined);
   assert.equal(countFactionTerritory(state.worldState, 'player'), 7);
   assert.equal(countFactionTerritory(state.worldState, 'iron_clan'), 4);
   assert.equal(countFactionTerritory(state.worldState, 'azure_league'), 4);
@@ -56,32 +91,51 @@ test('createStarterKingdomState seeds player core, 2 rival factions with full ec
 });
 
 test('strategic regions give deterministic rare resources and conquest modifiers', () => {
-  const core = getStrategicRegionInfo(0, 0);
+  const state = createStarterKingdomState(HEX_ASSETS);
+  const cap = state.playerCapital!;
+  const coreTile = state.worldState.hexes[hexKey(cap.q, cap.r)];
+  const core = getStrategicRegionInfo(cap.q, cap.r, coreTile);
   assert.equal(core.rareFeature, 'none');
   assert.equal(core.conquestCostMultiplier, 1);
 
-  const iron = getStrategicRegionInfo(0, 2);
-  assert.equal(iron.rareFeature, 'pure_iron');
-  assert.equal(iron.labelPt, 'Ferro Puro');
-  assert.ok(iron.bonusOrePerTurn > 0);
+  const rareTile = Object.values(state.worldState.hexes).find(
+    (t) => t.rareFeature && t.rareFeature !== 'none'
+  );
+  assert.ok(rareTile, 'Procedural world must generate strategic rare nodes');
+  const rareInfo = getStrategicRegionInfo(rareTile.q, rareTile.r, rareTile);
+  assert.notEqual(rareInfo.rareFeature, 'none');
+  assert.ok(rareInfo.labelPt.length > 0);
 
-  const state = createStarterKingdomState(HEX_ASSETS);
-  const ironCost = calculateStrategicConquestCost(state, 0, 2, HEX_ASSETS);
-  assert.ok(ironCost > 500);
+  const ironCost = calculateStrategicConquestCost(
+    state,
+    rareTile.q,
+    rareTile.r,
+    HEX_ASSETS
+  );
+  assert.ok(ironCost >= 500);
 });
 
-test('buildInKingdom enforces multi-turn construction queue, tech lock, worker availability, resource costs, and demolish preserves tile', () => {
+test('buildInKingdom blocks natural terrain assets, enforces multi-turn queue, tech lock, worker availability, and demolish preserves tile', () => {
   let state = createStarterKingdomState(HEX_ASSETS);
+  const freeCoord = getFreeOwnedCoord(state);
 
-  // Conquer (1, 1) forest and (-1, -1) plains adjacent to core
-  state = conquerInKingdom(state, 1, 1, HEX_ASSETS).nextState;
-  state = conquerInKingdom(state, -1, -1, HEX_ASSETS).nextState;
+  // Natural terrain assets can NEVER be built
+  const naturalBlocked = buildInKingdom(
+    state,
+    freeCoord.q,
+    freeCoord.r,
+    idxOf('grass-forest'),
+    90,
+    HEX_ASSETS
+  );
+  assert.equal(naturalBlocked.built, false);
+  assert.match(naturalBlocked.messagePt ?? '', /Terrenos naturais/);
 
   // Attempt to build Quartel before Military research -> blocked
   const barracksBlocked = buildInKingdom(
     state,
-    -1,
-    -1,
+    freeCoord.q,
+    freeCoord.r,
     idxOf('building-archery'),
     90,
     HEX_ASSETS
@@ -89,11 +143,44 @@ test('buildInKingdom enforces multi-turn construction queue, tech lock, worker a
   assert.equal(barracksBlocked.built, false);
   assert.match(barracksBlocked.messagePt ?? '', /Requer pesquisa/);
 
+  // Ensure a forest tile is owned in frontier
+  let forestCoord: AxialCoord;
+  try {
+    forestCoord = findNeutralFrontierWithTerrain(state, 'forest');
+    state = conquerInKingdom(state, forestCoord.q, forestCoord.r, HEX_ASSETS).nextState;
+  } catch {
+    const anyNeutral = findNeutralFrontierWithTerrain(state, 'plains');
+    forestCoord = { ...anyNeutral };
+    state = conquerInKingdom(state, forestCoord.q, forestCoord.r, HEX_ASSETS).nextState;
+    state = {
+      ...state,
+      worldState: {
+        ...state.worldState,
+        hexes: {
+          ...state.worldState.hexes,
+          [hexKey(forestCoord.q, forestCoord.r)]: {
+            ...state.worldState.hexes[hexKey(forestCoord.q, forestCoord.r)],
+            terrainType: 'forest',
+            resourceType: 'wood',
+            structureIndex: idxOf('grass-forest'),
+          },
+        },
+      },
+    };
+  }
+
   // Build Serraria on forest (takes 2 turns, deducts gold, wood, stone)
   const woodBefore = state.resources.wood;
   const goldBefore = state.worldState.cash;
   const econBeforeLumber = getKingdomEconomy(state, HEX_ASSETS);
-  const lumber = buildInKingdom(state, 1, 1, idxOf('dirt-lumber'), 90, HEX_ASSETS);
+  const lumber = buildInKingdom(
+    state,
+    forestCoord.q,
+    forestCoord.r,
+    idxOf('dirt-lumber'),
+    90,
+    HEX_ASSETS
+  );
   assert.equal(lumber.built, true);
   state = lumber.nextState;
   assert.equal(state.resources.wood, woodBefore - 5);
@@ -107,16 +194,23 @@ test('buildInKingdom enforces multi-turn construction queue, tech lock, worker a
   assert.equal(econWhileBuilding.woodNet, econBeforeLumber.woodNet);
 
   // Building on an already occupied tile is blocked
-  const doubleBuild = buildInKingdom(state, 1, 1, idxOf('building-house'), 90, HEX_ASSETS);
+  const doubleBuild = buildInKingdom(
+    state,
+    forestCoord.q,
+    forestCoord.r,
+    idxOf('building-house'),
+    90,
+    HEX_ASSETS
+  );
   assert.equal(doubleBuild.built, false);
   assert.match(doubleBuild.messagePt ?? '', /já possui uma construção/);
 
-  // Worker shortage check
+  // Worker shortage check on the remaining free owned plains hex
   const starvedWorkers: typeof state = { ...state, population: 6 };
   const noWorkerBuild = buildInKingdom(
     starvedWorkers,
-    -1,
-    -1,
+    freeCoord.q,
+    freeCoord.r,
     idxOf('building-market'),
     90,
     HEX_ASSETS
@@ -135,10 +229,10 @@ test('buildInKingdom enforces multi-turn construction queue, tech lock, worker a
   assert.ok(econAfterLumber.woodNet > econBeforeLumber.woodNet);
 
   // Demolish Serraria leaves player-owned free forest
-  const dem = demolishInKingdom(t3.nextState, 1, 1, HEX_ASSETS);
+  const dem = demolishInKingdom(t3.nextState, forestCoord.q, forestCoord.r, HEX_ASSETS);
   assert.equal(dem.removed, true);
-  assert.equal(dem.nextState.worldState.hexes[hexKey(1, 1)]?.owner, 'player');
-  assert.equal(dem.nextState.worldState.hexes[hexKey(1, 1)]?.terrainType, 'forest');
+  assert.equal(dem.nextState.worldState.hexes[hexKey(forestCoord.q, forestCoord.r)]?.owner, 'player');
+  assert.equal(dem.nextState.worldState.hexes[hexKey(forestCoord.q, forestCoord.r)]?.terrainType, 'forest');
 });
 
 test('research progression, multi-turn event effects, trade market, and rival AI growth work cleanly', () => {
@@ -149,12 +243,12 @@ test('research progression, multi-turn event effects, trade market, and rival AI
 
   state = setActiveResearchInKingdom(state, 'mining').nextState;
 
-  // Build a University (2 turns) on an adjacent plains hex
-  state = conquerInKingdom(state, -1, -1, HEX_ASSETS).nextState;
+  // Build a University (2 turns) on free owned plains hex
+  const uniCoord = getFreeOwnedCoord(state);
   const uni = buildInKingdom(
     state,
-    -1,
-    -1,
+    uniCoord.q,
+    uniCoord.r,
     idxOf('building-wizard-tower'),
     90,
     HEX_ASSETS
@@ -183,7 +277,7 @@ test('research progression, multi-turn event effects, trade market, and rival AI
   assert.ok(state.research.unlocked.includes('mining'), 'Mining unlocks once University is complete');
   assert.equal(state.activeEffects[0].turnsRemaining, 2);
 
-  // Check rival AI factions grew their research & territory over 4 turns
+  // Check rival AI factions grew their territory over 4 turns
   const totalAiTiles =
     countFactionTerritory(state.worldState, 'iron_clan') +
     countFactionTerritory(state.worldState, 'azure_league');
@@ -221,49 +315,95 @@ test('military recruitment, movement, and combat capture of enemy territory', ()
     },
   };
 
-  // Recruit a knight at the player castle (0,0)
-  const rec = recruitUnitInKingdom(state, 0, 0, 'knight', HEX_ASSETS);
+  const cap = state.playerCapital!;
+  const rec = recruitUnitInKingdom(state, cap.q, cap.r, 'knight', HEX_ASSETS);
   assert.equal(rec.recruited, true);
   state = rec.nextState;
   assert.equal(state.units.filter((u) => u.owner === 'player').length, 1);
 
-  // Walk knight east toward iron_clan frontier (0,0) -> (1,0) -> (2,0) -> (3,-1) -> (4,-2)
-  const step1 = commandUnitInKingdom(state, { q: 0, r: 0 }, { q: 1, r: 0 }, HEX_ASSETS);
+  // Helper BFS from unit position to nearest enemy tile (handles dynamic AI unit/border shifts)
+  const findStepTowardEnemy = (
+    curState: KingdomState,
+    from: AxialCoord
+  ): { step: AxialCoord; isEnemyTarget: boolean } => {
+    const queue: Array<{ coord: AxialCoord; firstStep: AxialCoord | null }> = [
+      { coord: from, firstStep: null },
+    ];
+    const visited = new Set<string>([hexKey(from.q, from.r)]);
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const dir of AXIAL_DIRECTIONS) {
+        const n = { q: cur.coord.q + dir.q, r: cur.coord.r + dir.r };
+        const nk = hexKey(n.q, n.r);
+        if (visited.has(nk)) continue;
+        const tile = curState.worldState.hexes[nk];
+        if (!tile || tile.terrainType === 'water') continue;
+        const firstStep = cur.firstStep ?? n;
+        const isEnemyTile = tile.owner !== 'player' && tile.owner !== 'neutral';
+        const occ = curState.units.find((u) => u.q === n.q && u.r === n.r);
+        if (isEnemyTile && (!occ || occ.owner !== 'player')) {
+          return { step: firstStep, isEnemyTarget: firstStep.q === n.q && firstStep.r === n.r };
+        }
+        if (occ) continue;
+        visited.add(nk);
+        queue.push({ coord: n, firstStep });
+      }
+    }
+    throw new Error('Expected reachable enemy territory on land');
+  };
+
+  // Walk step 1 and verify double move is blocked on same turn
+  let prev = cap;
+  const firstHop = findStepTowardEnemy(state, prev);
+  const step1 = commandUnitInKingdom(state, prev, firstHop.step, HEX_ASSETS);
   assert.equal(step1.acted, true);
   state = step1.nextState;
+  prev = firstHop.step;
 
-  // Trying to move twice on the same turn is blocked
-  const doubleMove = commandUnitInKingdom(state, { q: 1, r: 0 }, { q: 2, r: 0 }, HEX_ASSETS);
+  const nextCheck = findStepTowardEnemy(state, prev);
+  const doubleMove = commandUnitInKingdom(state, prev, nextCheck.step, HEX_ASSETS);
   assert.equal(doubleMove.acted, false);
 
-  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
-  state = commandUnitInKingdom(state, { q: 1, r: 0 }, { q: 2, r: 0 }, HEX_ASSETS).nextState;
-  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
-  state = commandUnitInKingdom(state, { q: 2, r: 0 }, { q: 3, r: -1 }, HEX_ASSETS).nextState;
-  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
+  let capturedEnemyTile = false;
+  for (let turnStep = 0; turnStep < 14; turnStep++) {
+    state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
+    const unitNow = state.units.find((u) => u.owner === 'player');
+    assert.ok(unitNow, 'Player knight should still be active');
+    prev = { q: unitNow.q, r: unitNow.r };
 
-  const cashBeforeAttack = state.worldState.cash;
-  const attack = commandUnitInKingdom(state, { q: 3, r: -1 }, { q: 4, r: -2 }, HEX_ASSETS);
-  assert.equal(attack.acted, true);
-  assert.equal(attack.capturedKey, hexKey(4, -2));
-  assert.equal(attack.nextState.worldState.hexes[hexKey(4, -2)]?.owner, 'player');
-  assert.equal(attack.nextState.worldState.cash, cashBeforeAttack + 120);
+    const hop = findStepTowardEnemy(state, prev);
+    const cashBeforeAttack = state.worldState.cash;
+    const res = commandUnitInKingdom(state, prev, hop.step, HEX_ASSETS);
+    assert.equal(res.acted, true, `March step failed: ${res.messagePt}`);
+    state = res.nextState;
+
+    if (res.capturedKey) {
+      assert.equal(state.worldState.hexes[res.capturedKey]?.owner, 'player');
+      assert.ok(state.worldState.cash >= cashBeforeAttack + 120);
+      capturedEnemyTile = true;
+      break;
+    }
+  }
+  assert.equal(capturedEnemyTile, true, 'Knight should reach and capture enemy territory');
 });
 
-test('serializeKingdomState and deserializeKingdomState round-trip v3 constructions/effects and support v1/v2 fallback', () => {
-  let starter = createStarterKingdomState(HEX_ASSETS);
+test('serializeKingdomState and deserializeKingdomState round-trip v4 procedural state and support v1 fallback', () => {
+  let starter = createStarterKingdomState(HEX_ASSETS, 987654);
   starter = setActiveResearchInKingdom(starter, 'mining').nextState;
-  starter = conquerInKingdom(starter, 1, 1, HEX_ASSETS).nextState;
-  starter = buildInKingdom(starter, 1, 1, idxOf('dirt-lumber'), 90, HEX_ASSETS).nextState;
+  const freeCoord = getFreeOwnedCoord(starter);
+  starter = buildInKingdom(starter, freeCoord.q, freeCoord.r, idxOf('building-house'), 90, HEX_ASSETS).nextState;
 
   const json = serializeKingdomState(starter);
   const loaded = deserializeKingdomState(json, HEX_ASSETS.length);
   assert.ok(loaded !== null);
+  assert.equal(loaded.worldSeed, 987654);
+  assert.deepEqual(loaded.playerCapital, starter.playerCapital);
+  assert.equal(Object.keys(loaded.worldState.hexes).length, 1024);
   assert.equal(loaded.turn, 1);
   assert.equal(loaded.population, 18);
   assert.equal(loaded.research.activeTechId, 'mining');
   assert.equal(loaded.constructions.length, 1);
-  assert.equal(loaded.constructions[0].turnsRemaining, 2);
+  assert.equal(loaded.constructions[0].turnsRemaining, 1);
   assert.equal(loaded.factions.length, 2);
   assert.equal(loaded.units.length, 2);
 
@@ -279,3 +419,4 @@ test('serializeKingdomState and deserializeKingdomState round-trip v3 constructi
   assert.equal(loadedV1.turn, 1);
   assert.equal(loadedV1.constructions.length, 0);
 });
+

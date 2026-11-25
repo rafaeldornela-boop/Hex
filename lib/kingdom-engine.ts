@@ -1,8 +1,7 @@
 import type { HexAssetEntry } from './godot-docs';
-import { getBuildingDefinition, type ResourceCost } from './buildings-catalog';
+import { getBuildingDefinition } from './buildings-catalog';
 import {
   canAffordCost,
-  computeEffectiveBuildCost,
   computeTurnEconomyBreakdown,
   createInitialResources,
   getKingdomStage,
@@ -21,22 +20,24 @@ import {
   createInitialFactions,
   getTradePactBonusGold,
   normalizeFactionState,
-  seedRivalFactionTilesAndUnits,
   type FactionState,
 } from './faction-engine';
 import {
   DEFAULT_ROTATION_DEG,
   createEmptyWorldState,
-  createStarterWorldState,
   demolishHexInState,
   deserializeWorldState,
-  hasHexConstruction,
   hexKey,
   placeHexInState,
   type AxialCoord,
   type HexOwner,
   type HexWorldState,
 } from './hex-engine';
+import { validateBuildCandidateOnHex } from './build-rules';
+import {
+  DEFAULT_WORLD_SEED,
+  generateProceduralKingdomWorld,
+} from './world-generator';
 import {
   UNIT_CATALOG,
   computeFactionMilitaryPower,
@@ -89,6 +90,8 @@ export interface ActiveConstruction {
 
 export interface KingdomState {
   turn: number;
+  worldSeed?: number;
+  playerCapital?: AxialCoord;
   worldState: HexWorldState;
   resources: KingdomResources;
   population: number;
@@ -114,18 +117,22 @@ export function getConstructionAt(
   return state.constructions.find((c) => c.q === q && c.r === r) ?? null;
 }
 
-export function createStarterKingdomState(assets: HexAssetEntry[]): KingdomState {
-  const baseWorld = createStarterWorldState(assets);
-  const { worldState, units } = seedRivalFactionTilesAndUnits(baseWorld, assets);
+export function createStarterKingdomState(
+  assets: HexAssetEntry[],
+  seed: number = DEFAULT_WORLD_SEED
+): KingdomState {
+  const generated = generateProceduralKingdomWorld(assets, seed);
 
   return {
     turn: 1,
-    worldState,
+    worldSeed: generated.seed,
+    playerCapital: generated.playerCapital,
+    worldState: generated.worldState,
     resources: createInitialResources(),
     population: 18,
     research: createInitialResearchState(),
-    units,
-    factions: createInitialFactions(),
+    units: generated.units,
+    factions: generated.factions,
     constructions: [],
     activeEffects: [],
     activeEvent: null,
@@ -225,7 +232,7 @@ export function calculateStrategicConquestCost(
 ): number {
   const existing = state.worldState.hexes[hexKey(q, r)];
   const base = calculateConquestCost({ q, r }, existing, assets);
-  const strategic = getStrategicRegionInfo(q, r);
+  const strategic = getStrategicRegionInfo(q, r, existing);
   const mods = getTechModifiers(state.research.unlocked);
   return Math.round(base * strategic.conquestCostMultiplier * mods.expansionCostMultiplier);
 }
@@ -342,55 +349,30 @@ export function buildInKingdom(
     return { nextState: state, built: false, messagePt: null };
   }
 
-  if (!existing || existing.owner !== 'player') {
-    return { nextState: state, built: false, messagePt: NOT_OWNED_BUILD_MESSAGE };
-  }
-
-  if (hasHexConstruction(existing, assets) || getConstructionAt(state, q, r)) {
-    return {
-      nextState: state,
-      built: false,
-      messagePt: ALREADY_OCCUPIED_BUILD_MESSAGE,
-    };
-  }
-
-  const bDef = getBuildingDefinition(asset.name);
-  if (bDef.requiredTech && !state.research.unlocked.includes(bDef.requiredTech)) {
-    const techName = TECH_BY_ID[bDef.requiredTech]?.namePt ?? bDef.requiredTech;
-    return {
-      nextState: state,
-      built: false,
-      messagePt: `Requer pesquisa: ${techName}.`,
-    };
-  }
-
-  const terrainInfo = getHexTerrainAndResource(q, r, existing);
-  if (bDef.allowedTerrains && !bDef.allowedTerrains.includes(terrainInfo.terrainType)) {
-    return {
-      nextState: state,
-      built: false,
-      messagePt: INCOMPATIBLE_TERRAIN_MESSAGE,
-    };
-  }
-
   const econ = getKingdomEconomy(state, assets);
-  if (bDef.workersRequired > 0 && econ.population.availableWorkers < bDef.workersRequired) {
+  const validation = validateBuildCandidateOnHex({
+    worldState: state.worldState,
+    resources: state.resources,
+    unlockedTechs: state.research.unlocked,
+    availableWorkers: econ.population.availableWorkers,
+    hasActiveConstructionAtCoord: Boolean(getConstructionAt(state, q, r)),
+    q,
+    r,
+    structureIndex,
+    assets,
+    checkAffordability: true,
+  });
+
+  if (!validation.allowed || !validation.definition || !validation.effectiveCost) {
     return {
       nextState: state,
       built: false,
-      messagePt: `Sem trabalhadores livres (precisa ${bDef.workersRequired}). Construa Casas.`,
+      messagePt: validation.reasonPt,
     };
   }
 
-  const cost: ResourceCost = computeEffectiveBuildCost(asset.name, state.research.unlocked);
-  const afford = canAffordCost(state.worldState.cash, state.resources, cost);
-  if (!afford.affordable) {
-    return {
-      nextState: state,
-      built: false,
-      messagePt: afford.missingLabelPt ?? 'Recursos insuficientes.',
-    };
-  }
+  const bDef = validation.definition;
+  const cost = validation.effectiveCost;
 
   const zeroPricedAssets = assets.map((a, idx) =>
     idx === structureIndex ? { ...a, price: 0 } : a
@@ -500,6 +482,14 @@ export function conquerInKingdom(
 } {
   const key = hexKey(q, r);
   const existing = state.worldState.hexes[key];
+  if (typeof state.worldState.worldCols === 'number' && !existing) {
+    return {
+      nextState: state,
+      conquered: false,
+      cost: 0,
+      messagePt: 'Fora dos limites deste mundo.',
+    };
+  }
   const owner = existing?.owner ?? 'neutral';
 
   if (owner === 'player') {
@@ -565,7 +555,7 @@ export function conquerInKingdom(
         resourceAmount: terrainInfo.resourceAmount,
       };
 
-  const strategic = getStrategicRegionInfo(q, r);
+  const strategic = getStrategicRegionInfo(q, r, existing);
 
   return {
     nextState: {
@@ -763,6 +753,13 @@ export function commandUnitInKingdom(
 
   const targetKey = hexKey(to.q, to.r);
   const targetTile = state.worldState.hexes[targetKey];
+  if (typeof state.worldState.worldCols === 'number' && !targetTile) {
+    return {
+      nextState: state,
+      acted: false,
+      messagePt: 'Limite do mapa alcançado.',
+    };
+  }
   const terrainInfo = getHexTerrainAndResource(to.q, to.r, targetTile);
   const uDef = UNIT_CATALOG[unit.type];
 
@@ -1276,33 +1273,40 @@ export function advanceKingdomTurn(
     summaryParts.push(aiResult.newsPt);
   }
 
-  return {
-    nextState: {
-      turn: nextTurn,
-      worldState: aiResult.worldState,
-      resources: nextResources,
-      population: nextPop,
-      research: researchStep.nextResearch,
-      units: aiResult.units,
-      factions: aiResult.factions,
-      constructions: nextConstructions,
-      activeEffects: nextEffects,
-      activeEvent: newEvent,
-      eventHistory: working.eventHistory,
-      lastTurnSummaryPt: summaryParts.join(' · '),
-    },
-    completedTech: researchStep.completedTech,
-    completedBuildings,
-    newEvent,
-    conqueredByAiKeys: aiResult.conqueredKeys,
-    headlinePt: summaryParts.join(' · '),
-  };
+    return {
+      nextState: {
+        turn: nextTurn,
+        worldSeed: working.worldSeed ?? working.worldState.seed,
+        playerCapital: working.playerCapital,
+        worldState: aiResult.worldState,
+        resources: nextResources,
+        population: nextPop,
+        research: researchStep.nextResearch,
+        units: aiResult.units,
+        factions: aiResult.factions,
+        constructions: nextConstructions,
+        activeEffects: nextEffects,
+        activeEvent: newEvent,
+        eventHistory: working.eventHistory,
+        lastTurnSummaryPt: summaryParts.join(' · '),
+      },
+      completedTech: researchStep.completedTech,
+      completedBuildings,
+      newEvent,
+      conqueredByAiKeys: aiResult.conqueredKeys,
+      headlinePt: summaryParts.join(' · '),
+    };
 }
 
 export function serializeKingdomState(state: KingdomState): string {
   return JSON.stringify({
-    version: 3,
+    version: 4,
     turn: state.turn,
+    worldSeed: state.worldSeed ?? state.worldState.seed,
+    playerCapital: state.playerCapital,
+    seed: state.worldState.seed ?? state.worldSeed,
+    worldCols: state.worldState.worldCols,
+    worldRows: state.worldState.worldRows,
     cash: state.worldState.cash,
     structures: Object.values(state.worldState.hexes),
     resources: state.resources,
@@ -1325,7 +1329,10 @@ export function deserializeKingdomState(
   if (!worldState) return null;
 
   try {
-    const parsed = JSON.parse(raw) as Partial<KingdomState> & { version?: number };
+    const parsed = JSON.parse(raw) as Partial<KingdomState> & {
+      version?: number;
+      seed?: number;
+    };
     const defaults = createInitialResources();
     const resources: KingdomResources =
       parsed.resources && typeof parsed.resources === 'object'
@@ -1361,8 +1368,34 @@ export function deserializeKingdomState(
         )
       : [];
 
+    let playerCapital: AxialCoord | undefined =
+      parsed.playerCapital &&
+      typeof parsed.playerCapital.q === 'number' &&
+      typeof parsed.playerCapital.r === 'number'
+        ? {
+            q: Math.round(parsed.playerCapital.q),
+            r: Math.round(parsed.playerCapital.r),
+          }
+        : undefined;
+
+    if (!playerCapital) {
+      const playerTiles = Object.values(worldState.hexes).filter(
+        (t) => t.owner === 'player'
+      );
+      if (playerTiles.length > 0) {
+        playerCapital = { q: playerTiles[0].q, r: playerTiles[0].r };
+      }
+    }
+
+    const worldSeed =
+      typeof parsed.worldSeed === 'number' && Number.isFinite(parsed.worldSeed)
+        ? Math.round(parsed.worldSeed)
+        : worldState.seed;
+
     return {
       turn: typeof parsed.turn === 'number' && parsed.turn >= 1 ? parsed.turn : 1,
+      ...(typeof worldSeed === 'number' ? { worldSeed } : {}),
+      ...(playerCapital ? { playerCapital } : {}),
       worldState,
       resources,
       population:

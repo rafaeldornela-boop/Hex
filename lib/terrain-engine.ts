@@ -263,6 +263,10 @@ export function getStructureRequiredTerrain(
       return 'mountain';
     case 'dirt-lumber':
       return 'forest';
+    case 'building-port':
+    case 'building-dock':
+    case 'building-watermill':
+      return 'water';
     default:
       return null;
   }
@@ -272,7 +276,9 @@ export function canBuildStructureOnTerrain(
   structure: Pick<HexAssetEntry, 'name'> | string,
   terrainType: TerrainType
 ): boolean {
-  const required = getStructureRequiredTerrain(structure);
+  const name = typeof structure === 'string' ? structure : structure.name;
+  if (isNaturalTerrainAssetName(name)) return false;
+  const required = getStructureRequiredTerrain(name);
   if (!required) return true;
   return required === terrainType;
 }
@@ -288,6 +294,12 @@ export function getStructureDisplayInfo(assetName: string): {
       return { labelPt: 'Mina', requiredTerrain: 'mountain' };
     case 'dirt-lumber':
       return { labelPt: 'Serraria', requiredTerrain: 'forest' };
+    case 'building-port':
+      return { labelPt: 'Porto', requiredTerrain: 'water' };
+    case 'building-dock':
+      return { labelPt: 'Doca de Pesca', requiredTerrain: 'water' };
+    case 'building-watermill':
+      return { labelPt: 'Moinho Fluvial', requiredTerrain: 'water' };
     default:
       return { labelPt: '', requiredTerrain: null };
   }
@@ -327,6 +339,19 @@ export type RareFeatureType =
   | 'rich_soil'
   | 'natural_harbor';
 
+const VALID_RARE_FEATURES = new Set<RareFeatureType>([
+  'none',
+  'gold_vein',
+  'pure_iron',
+  'arcane_crystal',
+  'rich_soil',
+  'natural_harbor',
+]);
+
+export function isValidRareFeatureType(value: unknown): value is RareFeatureType {
+  return typeof value === 'string' && VALID_RARE_FEATURES.has(value as RareFeatureType);
+}
+
 export interface StrategicRegionInfo {
   rareFeature: RareFeatureType;
   labelPt: string | null;
@@ -354,44 +379,55 @@ export function getTerrainDefenseBonus(terrainType: TerrainType): number {
 }
 
 /**
- * Deterministic strategic region / rare resource generator for hexes beyond
- * the immediate 7-hex starter core.
+ * Resolves strategic region / rare resource info.
+ * Uses persisted `tile.rareFeature` when present (for procedural worlds), or
+ * falls back to deterministic axial lookup for legacy starter tiles.
  */
-export function getStrategicRegionInfo(q: number, r: number): StrategicRegionInfo {
-  const terrain = getTerrainForHex(q, r);
+export function getStrategicRegionInfo(
+  q: number,
+  r: number,
+  tile?: Pick<PlacedHex, 'terrainType' | 'resourceType' | 'resourceAmount' | 'rareFeature'> | null
+): StrategicRegionInfo {
+  const terrain = isValidTerrainType(tile?.terrainType)
+    ? tile.terrainType
+    : getTerrainForHex(q, r);
   const baseDefense = getTerrainDefenseBonus(terrain);
-  const dist = Math.max(Math.abs(q), Math.abs(r), Math.abs(-q - r));
 
-  if (dist <= 1) {
-    return {
-      rareFeature: 'none',
-      labelPt: null,
-      bonusGoldPerTurn: 0,
-      bonusSciencePerTurn: 0,
-      bonusOrePerTurn: 0,
-      bonusFoodPerTurn: 0,
-      defenseBonus: baseDefense,
-      conquestCostMultiplier: 1,
-    };
-  }
-
-  // Deterministic well-placed rare nodes on Ring 2..5
-  const key = hexKey(q, r);
   let feature: RareFeatureType = 'none';
+  if (tile !== undefined && tile !== null) {
+    if (isValidRareFeatureType(tile.rareFeature)) {
+      feature = tile.rareFeature;
+    }
+  } else {
+    const dist = Math.max(Math.abs(q), Math.abs(r), Math.abs(-q - r));
+    if (dist <= 1) {
+      return {
+        rareFeature: 'none',
+        labelPt: null,
+        bonusGoldPerTurn: 0,
+        bonusSciencePerTurn: 0,
+        bonusOrePerTurn: 0,
+        bonusFoodPerTurn: 0,
+        defenseBonus: baseDefense,
+        conquestCostMultiplier: 1,
+      };
+    }
 
-  if (key === '0,2' || key === '-2,2') feature = 'pure_iron';
-  else if (key === '2,-2') feature = 'rich_soil';
-  else if (key === '2,-1' || key === '-1,2') feature = 'arcane_crystal';
-  else if (key === '0,-3') feature = 'natural_harbor';
-  else if (key === '3,-1' || key === '-3,2') feature = 'gold_vein';
-  else {
-    const roll = hashAxial(q + 71, r - 43) % 24;
-    if (terrain === 'mountain' && roll <= 3) feature = 'pure_iron';
-    else if (terrain === 'mountain' && roll === 4) feature = 'gold_vein';
-    else if (terrain === 'fertile' && roll <= 2) feature = 'rich_soil';
-    else if (terrain === 'water' && roll <= 1) feature = 'natural_harbor';
-    else if ((terrain === 'forest' || terrain === 'plains') && roll === 5) {
-      feature = 'arcane_crystal';
+    const key = hexKey(q, r);
+    if (key === '0,2' || key === '-2,2') feature = 'pure_iron';
+    else if (key === '2,-2') feature = 'rich_soil';
+    else if (key === '2,-1' || key === '-1,2') feature = 'arcane_crystal';
+    else if (key === '0,-3') feature = 'natural_harbor';
+    else if (key === '3,-1' || key === '-3,2') feature = 'gold_vein';
+    else {
+      const roll = hashAxial(q + 71, r - 43) % 24;
+      if (terrain === 'mountain' && roll <= 3) feature = 'pure_iron';
+      else if (terrain === 'mountain' && roll === 4) feature = 'gold_vein';
+      else if (terrain === 'fertile' && roll <= 2) feature = 'rich_soil';
+      else if (terrain === 'water' && roll <= 1) feature = 'natural_harbor';
+      else if ((terrain === 'forest' || terrain === 'plains') && roll === 5) {
+        feature = 'arcane_crystal';
+      }
     }
   }
 

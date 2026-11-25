@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   DEFAULT_ROTATION_DEG,
   HEX_OUTER_RADIUS,
+  HEX_WORLD_SCALE,
   axialToWorld,
   hasHexConstruction,
   hexKey,
@@ -33,8 +34,8 @@ import {
 import {
   getHexTerrainAndResource,
   getStrategicRegionInfo,
-  canBuildStructureOnTerrain,
 } from '@/lib/terrain-engine';
+import { isBuildingAllowedOnTerrain } from '@/lib/build-rules';
 import type { UnitEntity } from '@/lib/military-engine';
 import { HEX_ASSETS } from '@/lib/repo-data';
 
@@ -77,9 +78,17 @@ interface ParticleState {
   scale: number;
 }
 
-const CAMERA_MIN_DIST = 5.5;
-const CAMERA_MAX_DIST = 22;
-const CAMERA_PAN_BOUND = 15;
+interface CachedSubMesh {
+  geometry: THREE.BufferGeometry;
+  material: THREE.Material | THREE.Material[];
+  localMatrix: THREE.Matrix4;
+}
+
+const CAMERA_MIN_DIST = 6.5;
+const CAMERA_MAX_DIST = 54;
+const CAMERA_PAN_BOUND_X = 24;
+const CAMERA_PAN_BOUND_Z = 27;
+const TILE_SURFACE_Y = 0.2 * HEX_WORLD_SCALE;
 
 // Pre-allocated scratch helpers (zero GC inside animation loop)
 const _raycaster = new THREE.Raycaster();
@@ -88,6 +97,12 @@ const _groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const _hitPoint = new THREE.Vector3();
 const _moveVec = new THREE.Vector3();
 const _dummy = new THREE.Object3D();
+const _tileMatrix = new THREE.Matrix4();
+const _finalMatrix = new THREE.Matrix4();
+const _quat = new THREE.Quaternion();
+const _yAxis = new THREE.Vector3(0, 1, 0);
+const _posVec = new THREE.Vector3();
+const _scaleVec = new THREE.Vector3(HEX_WORLD_SCALE, HEX_WORLD_SCALE, HEX_WORLD_SCALE);
 const _colorTmp = new THREE.Color();
 
 function detectSoftwareWebGL(): boolean {
@@ -188,39 +203,55 @@ function createHexRingGeometry(outerR: number, innerR: number): THREE.BufferGeom
   return geo;
 }
 
-function buildSubtleHexGridLines(radiusRings: number): THREE.LineSegments {
+function buildHexGridGeometryFromState(
+  state: HexWorldState,
+  fallbackRings: number
+): THREE.BufferGeometry {
   const positions: number[] = [];
   const r = HEX_OUTER_RADIUS;
+  const tiles = Object.values(state.hexes);
 
-  for (let q = -radiusRings; q <= radiusRings; q++) {
-    const r1 = Math.max(-radiusRings, -q - radiusRings);
-    const r2 = Math.min(radiusRings, -q + radiusRings);
-    for (let row = r1; row <= r2; row++) {
-      const center = axialToWorld(q, row);
+  if (tiles.length > 0) {
+    for (const tile of tiles) {
+      const center = axialToWorld(tile.q, tile.r);
       for (let side = 0; side < 6; side++) {
         const a0 = (Math.PI / 3) * side;
         const a1 = (Math.PI / 3) * ((side + 1) % 6);
         positions.push(
           center.x + Math.cos(a0) * r,
-          0.015,
+          0.02,
           center.z + Math.sin(a0) * r,
           center.x + Math.cos(a1) * r,
-          0.015,
+          0.02,
           center.z + Math.sin(a1) * r
         );
+      }
+    }
+  } else {
+    for (let q = -fallbackRings; q <= fallbackRings; q++) {
+      const r1 = Math.max(-fallbackRings, -q - fallbackRings);
+      const r2 = Math.min(fallbackRings, -q + fallbackRings);
+      for (let row = r1; row <= r2; row++) {
+        const center = axialToWorld(q, row);
+        for (let side = 0; side < 6; side++) {
+          const a0 = (Math.PI / 3) * side;
+          const a1 = (Math.PI / 3) * ((side + 1) % 6);
+          positions.push(
+            center.x + Math.cos(a0) * r,
+            0.02,
+            center.z + Math.sin(a0) * r,
+            center.x + Math.cos(a1) * r,
+            0.02,
+            center.z + Math.sin(a1) * r
+          );
+        }
       }
     }
   }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  const mat = new THREE.LineBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    opacity: 0.2,
-    depthWrite: false,
-  });
-  return new THREE.LineSegments(geo, mat);
+  return geo;
 }
 
 function appendHexEdgeQuad(
@@ -293,7 +324,7 @@ function buildConquerableFrontierGeometry(state: HexWorldState): THREE.BufferGeo
   for (const coord of frontier) {
     const center = axialToWorld(coord.q, coord.r);
     const hasTile = Boolean(state.hexes[hexKey(coord.q, coord.r)]);
-    const y = hasTile ? 0.209 : 0.032;
+    const y = hasTile ? TILE_SURFACE_Y + 0.012 : 0.036;
     for (let edge = 0; edge < 6; edge++) {
       appendHexEdgeQuad(positions, center.x, center.z, y, edge, outerR, innerR);
     }
@@ -313,10 +344,15 @@ const BASE_FERTILE_VISUAL_ASSETS = new Set(['dirt', 'grass', 'grass-hill']);
  */
 function buildFertileFurrowsGeometry(state: HexWorldState): THREE.BufferGeometry {
   const positions: number[] = [];
-  const y = 0.207;
-  const halfLen = 0.28;
-  const halfWidth = 0.028;
-  const offsets = [-0.21, -0.07, 0.07, 0.21];
+  const y = TILE_SURFACE_Y + 0.01;
+  const halfLen = 0.28 * HEX_WORLD_SCALE;
+  const halfWidth = 0.028 * HEX_WORLD_SCALE;
+  const offsets = [
+    -0.21 * HEX_WORLD_SCALE,
+    -0.07 * HEX_WORLD_SCALE,
+    0.07 * HEX_WORLD_SCALE,
+    0.21 * HEX_WORLD_SCALE,
+  ];
 
   for (const tile of Object.values(state.hexes)) {
     const terrainInfo = getHexTerrainAndResource(tile.q, tile.r, tile);
@@ -326,7 +362,7 @@ function buildFertileFurrowsGeometry(state: HexWorldState): THREE.BufferGeometry
 
     const center = axialToWorld(tile.q, tile.r);
     for (const dz of offsets) {
-      const lenScale = Math.abs(dz) > 0.15 ? 0.72 : 1.0;
+      const lenScale = Math.abs(dz) > 0.15 * HEX_WORLD_SCALE ? 0.72 : 1.0;
       const hx = halfLen * lenScale;
       const x0 = center.x - hx;
       const x1 = center.x + hx;
@@ -394,6 +430,7 @@ export class HexSceneController {
   private waterMesh: THREE.Mesh;
 
   private modelCache = new Map<string, THREE.Group>();
+  private terrainSubMeshes = new Map<string, CachedSubMesh[]>();
   private ownerMaterialPairs = new Map<
     string,
     {
@@ -405,7 +442,10 @@ export class HexSceneController {
     }
   >();
   private loadingPromises = new Map<string, Promise<THREE.Group>>();
+  private terrainInstancesGroup = new THREE.Group();
   private hexesGroup = new THREE.Group();
+  private gridLinesMesh: THREE.LineSegments;
+  private lastGridTileCount = -1;
   private placedMeshes = new Map<
     string,
     {
@@ -444,16 +484,18 @@ export class HexSceneController {
   private hoveredCoord: AxialCoord | null = null;
   private selectedCoord: AxialCoord | null = null;
   private currentWorldState: HexWorldState = { cash: 10000, hexes: {} };
+  private homeCoord: AxialCoord = { q: 0, r: 0 };
 
   // Camera state
+  private sunLight: THREE.DirectionalLight;
   private gameState: GameModeState = 'title';
   private titleOrbitAngle = 0.65;
   private camTarget = new THREE.Vector3(0, 0, 0);
   private camTargetGoal = new THREE.Vector3(0, 0, 0);
   private camYaw = Math.PI / 4; // 45° isometric view
   private camYawGoal = Math.PI / 4;
-  private camDistance = 11.5;
-  private camDistanceGoal = 11.5;
+  private camDistance = 15.5;
+  private camDistanceGoal = 15.5;
   private camPitch = 0.66; // ~38° down-angle
 
   // Desktop pointer + keyboard input state
@@ -520,11 +562,11 @@ export class HexSceneController {
     canvas.style.userSelect = 'none';
     container.appendChild(canvas);
 
-    // Scene & Atmosphere (linear horizon fog keeps foreground island crisp and vivid)
+    // Scene & Atmosphere (wide horizon fog supports regional zoom-out across 32x32 world)
     this.scene = new THREE.Scene();
     const skyColor = new THREE.Color(0x9bd2ee);
     this.scene.background = skyColor;
-    this.scene.fog = new THREE.Fog(0x9bd2ee, 18, 66);
+    this.scene.fog = new THREE.Fog(0x9bd2ee, 36, 130);
 
     // Studio RoomEnvironment for subtle PBR sheen without washing out pastel colormaps
     const pmrem = new THREE.PMREMGenerator(this.renderer);
@@ -533,50 +575,52 @@ export class HexSceneController {
     this.scene.environmentIntensity = 0.32;
     pmrem.dispose();
 
-    // Camera (portrait-aware starting distance so vertical phone frames the whole island cleanly)
+    // Camera (close enough for readable hex details while framing regional context)
     const aspect = width / height;
     const defaultDist = this.getDefaultCameraDistance(aspect);
     this.camDistance = defaultDist;
     this.camDistanceGoal = defaultDist;
-    this.camera = new THREE.PerspectiveCamera(aspect < 0.8 ? 36 : 32, aspect, 0.1, 180);
-    this.updateCameraTransform(1);
+    this.camera = new THREE.PerspectiveCamera(aspect < 0.8 ? 36 : 32, aspect, 0.1, 260);
 
-    // Warm/Cool 3-Point Outdoor Lighting Rig (1 shadow caster)
+    // Warm/Cool 3-Point Outdoor Lighting Rig (1 shadow caster following camTarget)
     const hemiLight = new THREE.HemisphereLight(0x8ecbf5, 0x566842, 0.58);
     hemiLight.position.set(0, 30, 0);
     this.scene.add(hemiLight);
 
-    const sunLight = new THREE.DirectionalLight(0xfff1d0, 1.65);
-    sunLight.position.set(14, 22, 12);
+    this.sunLight = new THREE.DirectionalLight(0xfff1d0, 1.65);
+    this.sunLight.position.set(14, 24, 12);
     if (this.quality.shadowsEnabled) {
-      sunLight.castShadow = true;
-      sunLight.shadow.mapSize.set(
+      this.sunLight.castShadow = true;
+      this.sunLight.shadow.mapSize.set(
         this.quality.shadowMapSize,
         this.quality.shadowMapSize
       );
-      const d = 11;
-      sunLight.shadow.camera.left = -d;
-      sunLight.shadow.camera.right = d;
-      sunLight.shadow.camera.top = d;
-      sunLight.shadow.camera.bottom = -d;
-      sunLight.shadow.camera.near = 2;
-      sunLight.shadow.camera.far = 55;
-      sunLight.shadow.bias = -0.0005;
-      sunLight.shadow.normalBias = 0.02;
+      const d = 18;
+      this.sunLight.shadow.camera.left = -d;
+      this.sunLight.shadow.camera.right = d;
+      this.sunLight.shadow.camera.top = d;
+      this.sunLight.shadow.camera.bottom = -d;
+      this.sunLight.shadow.camera.near = 2;
+      this.sunLight.shadow.camera.far = 75;
+      this.sunLight.shadow.bias = -0.0005;
+      this.sunLight.shadow.normalBias = 0.02;
     }
-    this.scene.add(sunLight);
+    this.scene.add(this.sunLight);
+    this.scene.add(this.sunLight.target);
+    this.updateCameraTransform(1);
 
     const rimLight = new THREE.DirectionalLight(0xbbe0ff, 0.28);
     rimLight.position.set(-14, 10, -14);
     this.scene.add(rimLight);
 
-    // Expansive ocean surface extending to horizon fog (no floating slab in void)
+    // Expansive ocean surface extending to horizon fog
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
     this.waterTexture = createWaterCanvasTexture(
       this.quality.waterTextureSize,
       maxAniso
     );
-    const waterGeo = new THREE.PlaneGeometry(240, 240);
+    this.waterTexture.repeat.set(38, 38);
+    const waterGeo = new THREE.PlaneGeometry(420, 420);
     waterGeo.rotateX(-Math.PI / 2);
     const waterMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
@@ -585,14 +629,24 @@ export class HexSceneController {
       metalness: 0.06,
     });
     this.waterMesh = new THREE.Mesh(waterGeo, waterMat);
-    this.waterMesh.position.y = -0.025;
+    this.waterMesh.position.y = -0.025 * HEX_WORLD_SCALE;
     this.waterMesh.receiveShadow = this.quality.shadowsEnabled;
     this.scene.add(this.waterMesh);
 
-    // Subtle hex grid guide lines near island
-    this.scene.add(buildSubtleHexGridLines(this.quality.gridGuideRings));
+    // Subtle hex grid guide lines aligned to generated world tiles
+    this.gridLinesMesh = new THREE.LineSegments(
+      buildHexGridGeometryFromState(this.currentWorldState, this.quality.gridGuideRings),
+      new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.16,
+        depthWrite: false,
+      })
+    );
+    this.scene.add(this.gridLinesMesh);
 
-    // Placed hexes container
+    // Batched terrain instances & placed building meshes
+    this.scene.add(this.terrainInstancesGroup);
     this.scene.add(this.hexesGroup);
 
     // Territorial overlays: crisp royal-gold kingdom perimeter with dark backing + adjacent frontier highlight
@@ -716,7 +770,7 @@ export class HexSceneController {
       HEX_OUTER_RADIUS * 0.8
     );
 
-    // Selector cursor (hex ring elevated cleanly above the 0.20 tile surface + preview container)
+    // Selector cursor (hex ring elevated cleanly above scaled tile surface + preview container)
     const ringGeo = createHexRingGeometry(
       HEX_OUTER_RADIUS * 1.03,
       HEX_OUTER_RADIUS * 0.83
@@ -731,16 +785,21 @@ export class HexSceneController {
       polygonOffsetUnits: -3,
     });
     this.selectorRingMesh = new THREE.Mesh(ringGeo, this.selectorRingMat);
-    this.selectorRingMesh.position.y = 0.22;
+    this.selectorRingMesh.position.y = TILE_SURFACE_Y + 0.025;
     this.selectorGroup.add(this.selectorRingMesh);
-    this.selectorPreviewGroup.position.y = 0.26;
+    this.selectorPreviewGroup.position.y = TILE_SURFACE_Y + 0.06;
+    this.selectorPreviewGroup.scale.setScalar(HEX_WORLD_SCALE);
     this.selectorPreviewGroup.visible = false;
     this.selectorGroup.add(this.selectorPreviewGroup);
     this.selectorGroup.visible = false;
     this.scene.add(this.selectorGroup);
 
     // Pooled instanced particles
-    const particleGeo = new THREE.BoxGeometry(0.08, 0.08, 0.08);
+    const particleGeo = new THREE.BoxGeometry(
+      0.08 * HEX_WORLD_SCALE,
+      0.08 * HEX_WORLD_SCALE,
+      0.08 * HEX_WORLD_SCALE
+    );
     const particleMat = new THREE.MeshStandardMaterial({
       color: 0xfff5d6,
       roughness: 0.65,
@@ -793,7 +852,23 @@ export class HexSceneController {
   }
 
   private getDefaultCameraDistance(aspect: number): number {
-    return aspect < 0.8 ? 15.6 : 11.2;
+    return aspect < 0.8 ? 21.5 : 15.5;
+  }
+
+  private getHomeWorldPos(): { x: number; z: number } {
+    return axialToWorld(this.homeCoord.q, this.homeCoord.r);
+  }
+
+  public setHomeCoord(coord: AxialCoord, snap = false) {
+    this.homeCoord = { q: coord.q, r: coord.r };
+    if (snap || this.gameState === 'title') {
+      const home = this.getHomeWorldPos();
+      this.camTarget.set(home.x, 0, home.z);
+      this.camTargetGoal.set(home.x, 0, home.z);
+      if (snap) {
+        this.updateCameraTransform(1);
+      }
+    }
   }
 
   public getQualityProfile(): RenderQualityProfile {
@@ -869,11 +944,12 @@ export class HexSceneController {
     this.keysHeld.add(e.code);
 
     if (e.code === 'KeyF') {
-      this.camTargetGoal.set(0, 0, 0);
+      const home = this.getHomeWorldPos();
+      this.camTargetGoal.set(home.x, 0, home.z);
     } else if (e.code === 'Equal' || e.code === 'NumpadAdd') {
-      this.zoomBy(-1.4);
+      this.zoomBy(-2.0);
     } else if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
-      this.zoomBy(1.4);
+      this.zoomBy(2.0);
     }
   };
 
@@ -906,13 +982,13 @@ export class HexSceneController {
     );
     this.camTargetGoal.x = THREE.MathUtils.clamp(
       this.camTargetGoal.x + dx,
-      -CAMERA_PAN_BOUND,
-      CAMERA_PAN_BOUND
+      -CAMERA_PAN_BOUND_X,
+      CAMERA_PAN_BOUND_X
     );
     this.camTargetGoal.z = THREE.MathUtils.clamp(
       this.camTargetGoal.z + dz,
-      -CAMERA_PAN_BOUND,
-      CAMERA_PAN_BOUND
+      -CAMERA_PAN_BOUND_Z,
+      CAMERA_PAN_BOUND_Z
     );
   }
 
@@ -1103,11 +1179,11 @@ export class HexSceneController {
   private onWheel = (e: WheelEvent) => {
     if (this.gameState !== 'playing') return;
     e.preventDefault();
-    if (e.ctrlKey || e.metaKey) {
-      this.zoomBy(e.deltaY > 0 ? 1.1 : -1.1);
-    } else {
-      // Matches Godot project.godot where mouse wheel cycles structure_next / structure_previous
+    if (e.shiftKey) {
       this.callbacks.onCycleStructure(e.deltaY > 0 ? 1 : -1);
+    } else {
+      const zoomStep = e.ctrlKey || e.metaKey ? 1.4 : 2.4;
+      this.zoomBy(e.deltaY > 0 ? zoomStep : -zoomStep);
     }
   };
 
@@ -1151,7 +1227,7 @@ export class HexSceneController {
       this.currentWorldState.hexes[hexKey(activeCoord.q, activeCoord.r)]
     );
     this.selectorGroup.position.set(worldPos.x, 0, worldPos.z);
-    this.selectorRingMesh.position.y = hasTile ? 0.222 : 0.042;
+    this.selectorRingMesh.position.y = hasTile ? TILE_SURFACE_Y + 0.025 : 0.045;
     this.selectorGroup.visible = true;
 
     if (this.toolMode === 'command') {
@@ -1193,7 +1269,8 @@ export class HexSceneController {
       const terrainInfo = getHexTerrainAndResource(activeCoord.q, activeCoord.r, existing);
       const activeAsset = HEX_ASSETS[this.currentPreviewIndex];
       const terrainAllowed =
-        !activeAsset || canBuildStructureOnTerrain(activeAsset, terrainInfo.terrainType);
+        Boolean(activeAsset) &&
+        isBuildingAllowedOnTerrain(activeAsset.name, terrainInfo.terrainType);
       this.selectorRingMat.color.setHex(
         ownedByPlayer && !occupied && terrainAllowed ? 0x059669 : 0xdc2626
       );
@@ -1218,7 +1295,8 @@ export class HexSceneController {
       const aspect =
         Math.max(this.container.clientWidth, 1) /
         Math.max(this.container.clientHeight, 1);
-      this.camTargetGoal.set(0, 0, 0);
+      const home = this.getHomeWorldPos();
+      this.camTargetGoal.set(home.x, 0, home.z);
       this.camYawGoal = Math.PI / 4;
       this.camDistanceGoal = this.getDefaultCameraDistance(aspect);
       if (this.pointerInside) {
@@ -1240,7 +1318,8 @@ export class HexSceneController {
     const aspect =
       Math.max(this.container.clientWidth, 1) /
       Math.max(this.container.clientHeight, 1);
-    this.camTargetGoal.set(0, 0, 0);
+    const home = this.getHomeWorldPos();
+    this.camTargetGoal.set(home.x, 0, home.z);
     this.camDistanceGoal = this.getDefaultCameraDistance(aspect);
   }
 
@@ -1306,6 +1385,9 @@ export class HexSceneController {
         url,
         (gltf) => {
           const root = gltf.scene;
+          root.updateMatrixWorld(true);
+          const rootInv = root.matrixWorld.clone().invert();
+          const subMeshes: CachedSubMesh[] = [];
           let meshOrdinal = 0;
           root.traverse((obj) => {
             if ((obj as THREE.Mesh).isMesh) {
@@ -1316,6 +1398,12 @@ export class HexSceneController {
               if (mat && 'envMapIntensity' in mat) {
                 (mat as THREE.MeshStandardMaterial).envMapIntensity = 0.28;
               }
+              const localMatrix = rootInv.clone().multiply(mesh.matrixWorld);
+              subMeshes.push({
+                geometry: mesh.geometry,
+                material: mat,
+                localMatrix,
+              });
               // Store only a plain string key in userData so Object3D.clone()
               // (which JSON-clones userData) never corrupts THREE.Material instances.
               const matKey = `${assetName}:${meshOrdinal++}`;
@@ -1329,6 +1417,7 @@ export class HexSceneController {
               });
             }
           });
+          this.terrainSubMeshes.set(assetName, subMeshes);
           this.modelCache.set(assetName, root);
           this.loadingPromises.delete(assetName);
           resolve(root);
@@ -1380,7 +1469,15 @@ export class HexSceneController {
       if (!tile) continue;
       const center = axialToWorld(tile.q, tile.r);
       for (let edge = 0; edge < 6; edge++) {
-        appendHexEdgeQuad(positions, center.x, center.z, 0.221, edge, outerR, innerR);
+        appendHexEdgeQuad(
+          positions,
+          center.x,
+          center.z,
+          TILE_SURFACE_Y + 0.024,
+          edge,
+          outerR,
+          innerR
+        );
       }
     }
 
@@ -1402,28 +1499,28 @@ export class HexSceneController {
       state,
       HEX_OUTER_RADIUS * 1.03,
       HEX_OUTER_RADIUS * 0.875,
-      0.212,
+      TILE_SURFACE_Y + 0.015,
       'player'
     );
     this.territoryBorderMesh.geometry = buildTerritoryPerimeterGeometry(
       state,
       HEX_OUTER_RADIUS * 1.005,
       HEX_OUTER_RADIUS * 0.9,
-      0.216,
+      TILE_SURFACE_Y + 0.02,
       'player'
     );
     this.ironClanBorderMesh.geometry = buildTerritoryPerimeterGeometry(
       state,
       HEX_OUTER_RADIUS * 1.005,
       HEX_OUTER_RADIUS * 0.89,
-      0.215,
+      TILE_SURFACE_Y + 0.018,
       'iron_clan'
     );
     this.azureLeagueBorderMesh.geometry = buildTerritoryPerimeterGeometry(
       state,
       HEX_OUTER_RADIUS * 1.005,
       HEX_OUTER_RADIUS * 0.89,
-      0.215,
+      TILE_SURFACE_Y + 0.018,
       'azure_league'
     );
     this.frontierOverlayMesh.geometry = buildConquerableFrontierGeometry(state);
@@ -1436,6 +1533,17 @@ export class HexSceneController {
     oldFrontier.dispose();
     oldFertile.dispose();
     this.rebuildRareMarkers(state);
+
+    const tileCount = Object.keys(state.hexes).length;
+    if (tileCount !== this.lastGridTileCount) {
+      this.lastGridTileCount = tileCount;
+      const oldGrid = this.gridLinesMesh.geometry;
+      this.gridLinesMesh.geometry = buildHexGridGeometryFromState(
+        state,
+        this.quality.gridGuideRings
+      );
+      oldGrid.dispose();
+    }
   }
 
   private rebuildRareMarkers(state: HexWorldState) {
@@ -1448,9 +1556,9 @@ export class HexSceneController {
       }
     }
 
-    const gemGeo = new THREE.OctahedronGeometry(0.068, 0);
+    const gemGeo = new THREE.OctahedronGeometry(0.068 * HEX_WORLD_SCALE, 0);
     for (const tile of Object.values(state.hexes)) {
-      const strategic = getStrategicRegionInfo(tile.q, tile.r);
+      const strategic = getStrategicRegionInfo(tile.q, tile.r, tile);
       if (strategic.rareFeature === 'none') continue;
 
       const colorHex =
@@ -1474,8 +1582,13 @@ export class HexSceneController {
       });
       const marker = new THREE.Mesh(gemGeo.clone(), mat);
       const pos = axialToWorld(tile.q, tile.r);
-      marker.position.set(pos.x + 0.28, 0.35, pos.z - 0.16);
-      marker.userData.baseY = 0.35;
+      const baseY = TILE_SURFACE_Y + 0.16 * HEX_WORLD_SCALE;
+      marker.position.set(
+        pos.x + 0.28 * HEX_WORLD_SCALE,
+        baseY,
+        pos.z - 0.16 * HEX_WORLD_SCALE
+      );
+      marker.userData.baseY = baseY;
       marker.userData.phase = (tile.q * 3 + tile.r * 5) * 0.7;
       this.rareMarkersGroup.add(marker);
     }
@@ -1496,7 +1609,7 @@ export class HexSceneController {
     for (const coord of validTargets) {
       const center = axialToWorld(coord.q, coord.r);
       const hasTile = Boolean(this.currentWorldState.hexes[hexKey(coord.q, coord.r)]);
-      const y = hasTile ? 0.224 : 0.045;
+      const y = hasTile ? TILE_SURFACE_Y + 0.028 : 0.048;
       for (let edge = 0; edge < 6; edge++) {
         appendHexEdgeQuad(targetPositions, center.x, center.z, y, edge, outerR, innerR);
       }
@@ -1527,9 +1640,10 @@ export class HexSceneController {
     for (const unit of units) {
       if (unit.hp <= 0) continue;
       const unitGroup = new THREE.Group();
+      unitGroup.scale.setScalar(HEX_WORLD_SCALE);
       const pos = axialToWorld(unit.q, unit.r);
       const hasTile = Boolean(this.currentWorldState.hexes[hexKey(unit.q, unit.r)]);
-      const baseY = hasTile ? 0.23 : 0.04;
+      const baseY = hasTile ? TILE_SURFACE_Y + 0.03 * HEX_WORLD_SCALE : 0.045;
       unitGroup.position.set(pos.x, baseY, pos.z);
 
       const primaryColor =
@@ -1632,10 +1746,68 @@ export class HexSceneController {
       depthWrite: false,
     });
     const mesh = new THREE.Mesh(this.conquestRingGeo, mat);
-    mesh.position.set(x, 0.23, z);
+    mesh.position.set(x, TILE_SURFACE_Y + 0.03, z);
     mesh.scale.setScalar(0.95);
     this.scene.add(mesh);
-    this.conquestWaves.push({ mesh, material: mat, progress: 0, baseY: 0.23 });
+    this.conquestWaves.push({
+      mesh,
+      material: mat,
+      progress: 0,
+      baseY: TILE_SURFACE_Y + 0.03,
+    });
+  }
+
+  private rebuildTerrainInstances(
+    terrainBuckets: Map<string, Array<{ tile: PlacedHex; owner: HexOwner }>>
+  ) {
+    while (this.terrainInstancesGroup.children.length > 0) {
+      const child = this.terrainInstancesGroup.children[0] as THREE.InstancedMesh;
+      this.terrainInstancesGroup.remove(child);
+      child.dispose();
+    }
+
+    for (const [assetName, entries] of terrainBuckets.entries()) {
+      if (entries.length === 0) continue;
+      const subMeshes = this.terrainSubMeshes.get(assetName);
+      if (!subMeshes || subMeshes.length === 0) continue;
+
+      for (const sub of subMeshes) {
+        const im = new THREE.InstancedMesh(
+          sub.geometry,
+          sub.material,
+          entries.length
+        );
+        im.castShadow = false;
+        im.receiveShadow = this.quality.shadowsEnabled;
+
+        for (let i = 0; i < entries.length; i++) {
+          const { tile, owner } = entries[i];
+          const pos = axialToWorld(tile.q, tile.r);
+          _posVec.set(pos.x, 0, pos.z);
+          _quat.setFromAxisAngle(_yAxis, THREE.MathUtils.degToRad(tile.orientation));
+          _tileMatrix.compose(_posVec, _quat, _scaleVec);
+          _finalMatrix.multiplyMatrices(_tileMatrix, sub.localMatrix);
+          im.setMatrixAt(i, _finalMatrix);
+
+          const tintHex =
+            owner === 'player'
+              ? 0xffffff
+              : owner === 'iron_clan'
+                ? 0xf2b5b5
+                : owner === 'azure_league'
+                  ? 0xb5d0f2
+                  : 0x8fa7be;
+          im.setColorAt(i, _colorTmp.setHex(tintHex));
+        }
+
+        im.instanceMatrix.needsUpdate = true;
+        if (im.instanceColor) {
+          im.instanceColor.needsUpdate = true;
+        }
+        im.computeBoundingSphere();
+        this.terrainInstancesGroup.add(im);
+      }
+    }
   }
 
   public async syncWorldState(
@@ -1654,20 +1826,65 @@ export class HexSceneController {
     this.rebuildUnderConstructionOverlay(nextState, underSet);
     this.refreshSelectorAnchor();
 
-    // Update or remove existing meshes
+    // Classify tiles into batched natural terrain vs. individual construction meshes
+    const uniqueNames = new Set<string>();
+    const terrainBuckets = new Map<
+      string,
+      Array<{ tile: PlacedHex; owner: HexOwner }>
+    >();
+    const individualTiles: Array<[string, PlacedHex, HexOwner, boolean]> = [];
+
+    for (const [key, tile] of Object.entries(nextState.hexes)) {
+      const asset = HEX_ASSETS[tile.structureIndex];
+      if (!asset) continue;
+      uniqueNames.add(asset.name);
+
+      const owner: HexOwner =
+        typeof tile.owner === 'string' && tile.owner.trim().length > 0
+          ? tile.owner.trim()
+          : 'neutral';
+      const isUnder = underSet.has(key);
+      const needsIndividualMesh = hasHexConstruction(tile, HEX_ASSETS) || isUnder;
+
+      if (needsIndividualMesh) {
+        individualTiles.push([key, tile, owner, isUnder]);
+      } else {
+        let bucket = terrainBuckets.get(asset.name);
+        if (!bucket) {
+          bucket = [];
+          terrainBuckets.set(asset.name, bucket);
+        }
+        bucket.push({ tile, owner });
+      }
+    }
+
+    const individualKeys = new Set(individualTiles.map(([k]) => k));
+
+    // Remove individual building meshes that were demolished or replaced by natural terrain
     for (const [key, entry] of this.placedMeshes.entries()) {
       const target = nextState.hexes[key];
-      if (!target || target.structureIndex !== entry.structureIndex) {
+      if (
+        !target ||
+        !individualKeys.has(key) ||
+        target.structureIndex !== entry.structureIndex
+      ) {
         const hadConstruction = hasHexConstruction(
           { structureIndex: entry.structureIndex },
           HEX_ASSETS
         );
-        const nowRestoredTerrain = Boolean(target) && !hasHexConstruction(target, HEX_ASSETS);
+        const nowRestoredTerrain =
+          Boolean(target) && !hasHexConstruction(target, HEX_ASSETS);
         this.hexesGroup.remove(entry.group);
         this.placedMeshes.delete(key);
         if (animSet.has(key) && (!target || (hadConstruction && nowRestoredTerrain))) {
           const pos = entry.group.position;
-          this.spawnParticleBurst(pos.x, 0.25, pos.z, 0xdc2626, 8);
+          this.spawnParticleBurst(
+            pos.x,
+            TILE_SURFACE_Y + 0.08,
+            pos.z,
+            0xdc2626,
+            8
+          );
         }
       } else {
         if (target.orientation !== entry.orientation) {
@@ -1689,56 +1906,76 @@ export class HexSceneController {
           this.applyOwnerMaterials(entry.group, nextOwner, nextUnder);
           if (conquestSet.has(key)) {
             const pos = entry.group.position;
-            entry.group.scale.set(1.12, 0.65, 1.12);
+            entry.group.scale.set(
+              1.12 * HEX_WORLD_SCALE,
+              0.65 * HEX_WORLD_SCALE,
+              1.12 * HEX_WORLD_SCALE
+            );
             this.popAnims.push({ mesh: entry.group, progress: 0 });
             this.spawnConquestWave(pos.x, pos.z);
-            this.spawnParticleBurst(pos.x, 0.26, pos.z, 0xfbbf24, 12);
+            this.spawnParticleBurst(
+              pos.x,
+              TILE_SURFACE_Y + 0.08,
+              pos.z,
+              0xfbbf24,
+              12
+            );
           } else if (justCompleted) {
             const pos = entry.group.position;
-            entry.group.scale.set(1.1, 0.72, 1.1);
+            entry.group.scale.set(
+              1.1 * HEX_WORLD_SCALE,
+              0.72 * HEX_WORLD_SCALE,
+              1.1 * HEX_WORLD_SCALE
+            );
             this.popAnims.push({ mesh: entry.group, progress: 0 });
-            this.spawnParticleBurst(pos.x, 0.28, pos.z, 0x34d399, 10);
+            this.spawnParticleBurst(
+              pos.x,
+              TILE_SURFACE_Y + 0.1,
+              pos.z,
+              0x34d399,
+              10
+            );
           }
         }
       }
     }
 
-    // Collect unique asset names needed for missing tiles
-    const missingEntries: [string, PlacedHex][] = [];
-    const uniqueNames = new Set<string>();
-    for (const [key, tile] of Object.entries(nextState.hexes)) {
-      if (!this.placedMeshes.has(key)) {
-        missingEntries.push([key, tile]);
-        const asset = HEX_ASSETS[tile.structureIndex];
-        if (asset) uniqueNames.add(asset.name);
-      }
-    }
-
-    if (missingEntries.length === 0) {
-      if (!this.disposed) {
-        this.renderer.render(this.scene, this.camera);
-      }
-      return;
-    }
-
-    const namesList = Array.from(uniqueNames);
-    let loadedCount = 0;
-    const totalCount = namesList.length;
-
-    await Promise.all(
-      namesList.map(async (name) => {
-        try {
-          await this.loadModel(name);
-        } finally {
-          loadedCount++;
-          this.callbacks.onLoadProgress(loadedCount, totalCount);
-        }
-      })
+    // Load any uncached .glb assets required by this world
+    const uncachedNames = Array.from(uniqueNames).filter(
+      (name) => !this.modelCache.has(name)
     );
+    if (uncachedNames.length > 0) {
+      let loadedCount = 0;
+      const totalCount = uncachedNames.length;
+      await Promise.all(
+        uncachedNames.map(async (name) => {
+          try {
+            await this.loadModel(name);
+          } finally {
+            loadedCount++;
+            this.callbacks.onLoadProgress(loadedCount, totalCount);
+          }
+        })
+      );
+    }
 
     if (this.disposed) return;
 
-    for (const [key, tile] of missingEntries) {
+    // Rebuild batched terrain InstancedMeshes (~10-20 draw calls for 1,000+ hexes!)
+    this.rebuildTerrainInstances(terrainBuckets);
+
+    // Spawn burst feedback on newly conquered natural terrain tiles
+    for (const key of conquestSet) {
+      if (individualKeys.has(key)) continue;
+      const tile = nextState.hexes[key];
+      if (!tile) continue;
+      const pos = axialToWorld(tile.q, tile.r);
+      this.spawnConquestWave(pos.x, pos.z);
+      this.spawnParticleBurst(pos.x, TILE_SURFACE_Y + 0.08, pos.z, 0xfbbf24, 12);
+    }
+
+    // Add missing individual building meshes
+    for (const [key, tile, owner, isUnder] of individualTiles) {
       const liveTile = this.currentWorldState.hexes[key];
       if (!liveTile || liveTile.structureIndex !== tile.structureIndex) continue;
       if (this.placedMeshes.has(key)) continue;
@@ -1748,11 +1985,6 @@ export class HexSceneController {
       const template = this.modelCache.get(asset.name);
       if (!template) continue;
 
-      const owner: HexOwner =
-        typeof liveTile.owner === 'string' && liveTile.owner.trim().length > 0
-          ? liveTile.owner.trim()
-          : 'neutral';
-      const isUnder = underSet.has(key);
       const group = new THREE.Group();
       const clone = template.clone(true);
       this.applyOwnerMaterials(clone, owner, isUnder);
@@ -1761,6 +1993,7 @@ export class HexSceneController {
       const pos = axialToWorld(tile.q, tile.r);
       group.position.set(pos.x, 0, pos.z);
       group.rotation.y = THREE.MathUtils.degToRad(tile.orientation);
+      group.scale.setScalar(HEX_WORLD_SCALE);
       this.hexesGroup.add(group);
 
       this.placedMeshes.set(key, {
@@ -1772,14 +2005,22 @@ export class HexSceneController {
       });
 
       if (conquestSet.has(key)) {
-        group.scale.set(1.12, 0.55, 1.12);
+        group.scale.set(
+          1.12 * HEX_WORLD_SCALE,
+          0.55 * HEX_WORLD_SCALE,
+          1.12 * HEX_WORLD_SCALE
+        );
         this.popAnims.push({ mesh: group, progress: 0 });
         this.spawnConquestWave(pos.x, pos.z);
-        this.spawnParticleBurst(pos.x, 0.24, pos.z, 0xfbbf24, 12);
+        this.spawnParticleBurst(pos.x, TILE_SURFACE_Y + 0.08, pos.z, 0xfbbf24, 12);
       } else if (animSet.has(key)) {
-        group.scale.set(1.12, 0.55, 1.12);
+        group.scale.set(
+          1.12 * HEX_WORLD_SCALE,
+          0.55 * HEX_WORLD_SCALE,
+          1.12 * HEX_WORLD_SCALE
+        );
         this.popAnims.push({ mesh: group, progress: 0 });
-        this.spawnParticleBurst(pos.x, 0.18, pos.z, 0xfef3c7, 10);
+        this.spawnParticleBurst(pos.x, TILE_SURFACE_Y + 0.04, pos.z, 0xfef3c7, 10);
       }
     }
 
@@ -1849,19 +2090,23 @@ export class HexSceneController {
     if (this.gameState === 'title') {
       this.titleOrbitAngle += dt * 0.16;
       const isPortrait = aspect < 0.85;
-      const dist = isPortrait ? 15.2 : 10.6;
+      const dist = isPortrait ? 20.5 : 15.0;
       const pitch = isPortrait ? 0.62 : 0.56;
       const horiz = Math.cos(pitch) * dist;
       const y = Math.sin(pitch) * dist;
-      // On desktop, offset left so the castle sits in right 2/3; on mobile portrait, center castle in upper frame
-      const focusX = isPortrait ? 0 : -0.9;
-      const focusZ = isPortrait ? 0.65 : -0.2;
+      const home = this.getHomeWorldPos();
+      const focusX = home.x + (isPortrait ? 0 : -1.35);
+      const focusZ = home.z + (isPortrait ? 0.95 : -0.3);
       this.camera.position.set(
         focusX + Math.sin(this.titleOrbitAngle) * horiz,
         y,
         focusZ + Math.cos(this.titleOrbitAngle) * horiz
       );
-      this.camera.lookAt(focusX, 0.35, focusZ);
+      this.camera.lookAt(focusX, 0.45, focusZ);
+      if (this.sunLight) {
+        this.sunLight.position.set(focusX + 14, 24, focusZ + 12);
+        this.sunLight.target.position.set(focusX, 0, focusZ);
+      }
       return;
     }
 
@@ -1880,16 +2125,16 @@ export class HexSceneController {
         const sinY = Math.sin(this.camYaw);
         const worldDx = _moveVec.x * cosY + _moveVec.z * sinY;
         const worldDz = -_moveVec.x * sinY + _moveVec.z * cosY;
-        const panSpeed = 6.5 * dt;
+        const panSpeed = Math.max(8, this.camDistance * 0.65) * dt;
         this.camTargetGoal.x = THREE.MathUtils.clamp(
           this.camTargetGoal.x + worldDx * panSpeed,
-          -CAMERA_PAN_BOUND,
-          CAMERA_PAN_BOUND
+          -CAMERA_PAN_BOUND_X,
+          CAMERA_PAN_BOUND_X
         );
         this.camTargetGoal.z = THREE.MathUtils.clamp(
           this.camTargetGoal.z + worldDz * panSpeed,
-          -CAMERA_PAN_BOUND,
-          CAMERA_PAN_BOUND
+          -CAMERA_PAN_BOUND_Z,
+          CAMERA_PAN_BOUND_Z
         );
       }
     }
@@ -1927,7 +2172,11 @@ export class HexSceneController {
       height,
       this.camTarget.z + Math.cos(this.camYaw) * horiz
     );
-    this.camera.lookAt(this.camTarget.x, 0.15, this.camTarget.z);
+    this.camera.lookAt(this.camTarget.x, 0.22, this.camTarget.z);
+    if (this.sunLight) {
+      this.sunLight.position.set(this.camTarget.x + 14, 24, this.camTarget.z + 12);
+      this.sunLight.target.position.set(this.camTarget.x, 0, this.camTarget.z);
+    }
   }
 
   private updateEffects(dt: number) {
@@ -1940,7 +2189,7 @@ export class HexSceneController {
     // Gentle preview float & frontier pulse
     if (this.selectorGroup.visible && this.selectorPreviewGroup.visible) {
       this.selectorPreviewGroup.position.y =
-        0.22 + Math.sin(this.elapsedSec * 4) * 0.03;
+        TILE_SURFACE_Y + 0.04 + Math.sin(this.elapsedSec * 4) * 0.035;
     }
 
     if (this.toolMode === 'expand') {
@@ -1950,17 +2199,19 @@ export class HexSceneController {
     }
 
     for (const child of this.rareMarkersGroup.children) {
-      const baseY = (child.userData.baseY as number | undefined) ?? 0.35;
+      const baseY =
+        (child.userData.baseY as number | undefined) ?? TILE_SURFACE_Y + 0.24;
       const phase = (child.userData.phase as number | undefined) ?? 0;
-      child.position.y = baseY + Math.sin(this.elapsedSec * 2.5 + phase) * 0.03;
+      child.position.y = baseY + Math.sin(this.elapsedSec * 2.5 + phase) * 0.04;
       child.rotation.y = this.elapsedSec * 1.1 + phase;
     }
 
     for (const unitGroup of this.unitsGroup.children) {
       if (unitGroup.userData.readyBob) {
-        const baseY = (unitGroup.userData.baseY as number | undefined) ?? 0.23;
+        const baseY =
+          (unitGroup.userData.baseY as number | undefined) ?? TILE_SURFACE_Y + 0.05;
         const phase = (unitGroup.userData.phase as number | undefined) ?? 0;
-        unitGroup.position.y = baseY + Math.sin(this.elapsedSec * 3.2 + phase) * 0.015;
+        unitGroup.position.y = baseY + Math.sin(this.elapsedSec * 3.2 + phase) * 0.02;
       }
     }
 
@@ -1976,24 +2227,28 @@ export class HexSceneController {
         const t = wave.progress;
         const easeOut = 1 - Math.pow(1 - t, 3);
         wave.mesh.scale.setScalar(0.95 + easeOut * 0.62);
-        wave.mesh.position.y = wave.baseY + easeOut * 0.42;
+        wave.mesh.position.y = wave.baseY + easeOut * 0.55;
         wave.material.opacity = (1 - t) * 0.92;
       }
     }
 
-    // Pop-in spring animations
+    // Pop-in spring animations (preserving HEX_WORLD_SCALE)
     for (let i = this.popAnims.length - 1; i >= 0; i--) {
       const anim = this.popAnims[i];
       anim.progress += dt * 5.8;
       if (anim.progress >= 1) {
-        anim.mesh.scale.set(1, 1, 1);
+        anim.mesh.scale.setScalar(HEX_WORLD_SCALE);
         this.popAnims.splice(i, 1);
       } else {
         const t = anim.progress;
         const overshoot = Math.sin(t * Math.PI) * 0.14 * (1 - t);
         const sy = THREE.MathUtils.lerp(0.6, 1.0, Math.min(1, t * 1.4)) + overshoot;
         const sxz = 1 + (1 - sy) * 0.25;
-        anim.mesh.scale.set(sxz, sy, sxz);
+        anim.mesh.scale.set(
+          sxz * HEX_WORLD_SCALE,
+          sy * HEX_WORLD_SCALE,
+          sxz * HEX_WORLD_SCALE
+        );
       }
     }
 
@@ -2156,8 +2411,15 @@ export class HexSceneController {
     geometries.forEach((g) => g.dispose());
     materials.forEach((m) => m.dispose());
 
+    while (this.terrainInstancesGroup.children.length > 0) {
+      const child = this.terrainInstancesGroup.children[0] as THREE.InstancedMesh;
+      this.terrainInstancesGroup.remove(child);
+      child.dispose();
+    }
+
     this.conquestWaves = [];
     this.ownerMaterialPairs.clear();
+    this.terrainSubMeshes.clear();
     this.modelCache.clear();
     this.placedMeshes.clear();
     this.envRenderTarget?.dispose();

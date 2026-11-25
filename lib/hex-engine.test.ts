@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_ROTATION_DEG,
+  HEX_FLAT_TO_FLAT,
   INITIAL_CASH,
   axialToWorld,
   createEmptyWorldState,
@@ -33,7 +34,7 @@ test('axialToWorld and worldToAxial round-trip accurately across hex grid', () =
   }
 });
 
-test('adjacent hex centers are exactly 1.0 unit apart for zero-gap tessellation', () => {
+test('adjacent hex centers are exactly HEX_FLAT_TO_FLAT units apart for zero-gap tessellation', () => {
   const origin = axialToWorld(0, 0);
   const neighbors = [
     axialToWorld(1, 0),
@@ -45,7 +46,10 @@ test('adjacent hex centers are exactly 1.0 unit apart for zero-gap tessellation'
   ];
   for (const n of neighbors) {
     const dist = Math.hypot(n.x - origin.x, n.z - origin.z);
-    assert.ok(Math.abs(dist - 1.0) < 1e-9, `Expected dist 1.0, got ${dist}`);
+    assert.ok(
+      Math.abs(dist - HEX_FLAT_TO_FLAT) < 1e-9,
+      `Expected dist ${HEX_FLAT_TO_FLAT}, got ${dist}`
+    );
   }
 });
 
@@ -138,22 +142,30 @@ test('placeHexInState enforces ownership, blocks building over existing construc
   assert.equal(rebuilt.nextState.hexes[hexKey(2, -1)].structureIndex, houseIdx);
 });
 
-test('starter world and serialization round-trip preserve all tiles, cash, and faction owners', () => {
+test('starter world and serialization round-trip preserve all tiles, cash, rareFeature, and faction owners', () => {
   const starter = createStarterWorldState(HEX_ASSETS);
   const count = Object.keys(starter.hexes).length;
   assert.ok(count >= 25, `Expected >= 25 starter hexes, got ${count}`);
 
-  // Simulate a future faction owner on one tile to verify round-trip readiness
+  // Simulate a future faction owner & rareFeature on one tile to verify round-trip readiness
+  starter.seed = 777123;
+  starter.worldCols = 32;
+  starter.worldRows = 32;
   starter.hexes[hexKey(3, -1)] = {
     ...starter.hexes[hexKey(3, -1)],
     owner: 'faction_rival',
+    rareFeature: 'gold_vein',
   };
 
   const json = serializeWorldState(starter);
   const loaded = deserializeWorldState(json, HEX_ASSETS.length);
   assert.ok(loaded !== null);
   assert.equal(loaded.cash, starter.cash);
+  assert.equal(loaded.seed, 777123);
+  assert.equal(loaded.worldCols, 32);
+  assert.equal(loaded.worldRows, 32);
   assert.equal(Object.keys(loaded.hexes).length, count);
   assert.equal(loaded.hexes[hexKey(3, -1)].owner, 'faction_rival');
+  assert.equal(loaded.hexes[hexKey(3, -1)].rareFeature, 'gold_vein');
   assert.equal(deserializeWorldState('not-json', HEX_ASSETS.length), null);
 });

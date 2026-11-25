@@ -379,13 +379,15 @@ export function advanceFactionsTurn(params: {
     // 3. Strategic neutral expansion every 2 turns (soft cap 12 tiles)
     if (params.turn % 2 === 0 && ownedTiles.length < 12 && cash >= 450) {
       const candidates: Array<{ coord: AxialCoord; score: number }> = [];
+      const boundedWorld = typeof nextWorld.worldCols === 'number';
       for (const tile of ownedTiles) {
         for (const dir of AXIAL_DIRECTIONS) {
           const nq = tile.q + dir.q;
           const nr = tile.r + dir.r;
           const existing = nextWorld.hexes[hexKey(nq, nr)];
+          if (boundedWorld && !existing) continue;
           if (!existing || !existing.owner || existing.owner === 'neutral') {
-            const strategic = getStrategicRegionInfo(nq, nr);
+            const strategic = getStrategicRegionInfo(nq, nr, existing);
             let score = strategic.rareFeature !== 'none' ? 15 : 4;
             if (faction.personality === 'expansionist' && playerGrowing && playerTiles.length > 0) {
               const nearestPlayer = Math.min(
@@ -597,10 +599,12 @@ export function advanceFactionsTurn(params: {
           const currentDist = Math.min(...playerTiles.map((pt) => hexDistance(readyUnit, pt)));
           let bestStep: AxialCoord | null = null;
           let bestDist = currentDist;
+          const boundedWorld = typeof nextWorld.worldCols === 'number';
           for (const dir of AXIAL_DIRECTIONS) {
             const nq = readyUnit.q + dir.q;
             const nr = readyUnit.r + dir.r;
             const tile = nextWorld.hexes[hexKey(nq, nr)];
+            if (boundedWorld && !tile) continue;
             const terrain = getHexTerrainAndResource(nq, nr, tile).terrainType;
             if (terrain === 'water') continue;
             if (tile && tile.owner && tile.owner !== faction.id && tile.owner !== 'neutral') {

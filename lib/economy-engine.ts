@@ -159,7 +159,7 @@ export function computeTurnEconomyBreakdown(params: {
     }
 
     const terrainInfo = getHexTerrainAndResource(tile.q, tile.r, tile);
-    const strategic = getStrategicRegionInfo(tile.q, tile.r);
+    const strategic = getStrategicRegionInfo(tile.q, tile.r, tile);
 
     // Natural tile baseline yield + strategic rare node bonus
     if (terrainInfo.resourceType === 'wood') woodProd += 1;

@@ -4,6 +4,8 @@ import {
   canBuildStructureOnTerrain,
   getHexTerrainAndResource,
   isNaturalTerrainAssetName,
+  isValidRareFeatureType,
+  type RareFeatureType,
   type ResourceType,
   type TerrainType,
 } from './terrain-engine';
@@ -11,12 +13,13 @@ import type { FutureEconomySnapshot, TileDomainMetadata } from './world-domain';
 
 /**
  * Exact flat-topped hexagonal tessellation matching the Kenney Hexagons .glb
- * geometry (flat-to-flat width = 1.0, point-to-point = 2/sqrt(3) when rotated 90°).
+ * geometry scaled uniformly by HEX_WORLD_SCALE for crisp strategic board readability.
  */
-export const HEX_FLAT_TO_FLAT = 1.0;
-export const HEX_OUTER_RADIUS = 1.0 / Math.sqrt(3); // ~0.57735027
-export const HEX_COL_STEP = Math.sqrt(3) / 2; // ~0.8660254
-export const HEX_ROW_STEP = 1.0;
+export const HEX_WORLD_SCALE = 1.65;
+export const HEX_FLAT_TO_FLAT = 1.0 * HEX_WORLD_SCALE;
+export const HEX_OUTER_RADIUS = HEX_FLAT_TO_FLAT / Math.sqrt(3);
+export const HEX_COL_STEP = (Math.sqrt(3) / 2) * HEX_FLAT_TO_FLAT;
+export const HEX_ROW_STEP = HEX_FLAT_TO_FLAT;
 export const INITIAL_CASH = 10000;
 export const DEFAULT_ROTATION_DEG = 90;
 
@@ -38,6 +41,8 @@ export interface PlacedHex {
   terrainType?: TerrainType;
   resourceType?: ResourceType;
   resourceAmount?: number;
+  /** Persistent rare strategic feature on procedural worlds */
+  rareFeature?: RareFeatureType;
   /** Optional seam for upcoming territory, level, and worker mechanics */
   meta?: TileDomainMetadata;
 }
@@ -45,6 +50,9 @@ export interface PlacedHex {
 export interface HexWorldState {
   cash: number;
   hexes: Record<string, PlacedHex>;
+  seed?: number;
+  worldCols?: number;
+  worldRows?: number;
   /** Reserved seam for future economy/territory state (unused in current build) */
   futureEconomy?: Partial<FutureEconomySnapshot>;
 }
@@ -207,12 +215,14 @@ export function placeHexInState(
       terrainType: terrainInfo.terrainType,
       resourceType: terrainInfo.resourceType,
       resourceAmount: terrainInfo.resourceAmount,
+      ...(previous?.rareFeature ? { rareFeature: previous.rareFeature } : {}),
       ...(previous?.meta ? { meta: previous.meta } : {}),
     },
   };
 
   return {
     nextState: {
+      ...state,
       cash: state.cash - cost,
       hexes: nextHexes,
     },
@@ -281,6 +291,9 @@ export function serializeWorldState(state: HexWorldState): string {
   return JSON.stringify({
     version: 1,
     cash: state.cash,
+    ...(typeof state.seed === 'number' ? { seed: state.seed } : {}),
+    ...(typeof state.worldCols === 'number' ? { worldCols: state.worldCols } : {}),
+    ...(typeof state.worldRows === 'number' ? { worldRows: state.worldRows } : {}),
     structures: Object.values(state.hexes),
   });
 }
@@ -292,6 +305,9 @@ export function deserializeWorldState(
   try {
     const parsed = JSON.parse(raw) as {
       cash?: unknown;
+      seed?: unknown;
+      worldCols?: unknown;
+      worldRows?: unknown;
       structures?: unknown;
     };
     if (typeof parsed.cash !== 'number' || !Array.isArray(parsed.structures)) {
@@ -317,6 +333,7 @@ export function deserializeWorldState(
               ? rawOwner.trim()
               : 'neutral';
           const rawMeta = (item as PlacedHex).meta;
+          const rawRare = (item as PlacedHex).rareFeature;
           const terrainInfo = getHexTerrainAndResource(q, r, item as PlacedHex);
           const tile: PlacedHex = {
             q,
@@ -328,6 +345,9 @@ export function deserializeWorldState(
             resourceType: terrainInfo.resourceType,
             resourceAmount: terrainInfo.resourceAmount,
           };
+          if (isValidRareFeatureType(rawRare)) {
+            tile.rareFeature = rawRare;
+          }
           if (rawMeta && typeof rawMeta === 'object') {
             tile.meta = rawMeta;
           }
@@ -338,6 +358,15 @@ export function deserializeWorldState(
     return {
       cash: Math.round(parsed.cash),
       hexes,
+      ...(typeof parsed.seed === 'number' && Number.isFinite(parsed.seed)
+        ? { seed: Math.round(parsed.seed) }
+        : {}),
+      ...(typeof parsed.worldCols === 'number' && Number.isFinite(parsed.worldCols)
+        ? { worldCols: Math.round(parsed.worldCols) }
+        : {}),
+      ...(typeof parsed.worldRows === 'number' && Number.isFinite(parsed.worldRows)
+        ? { worldRows: Math.round(parsed.worldRows) }
+        : {}),
     };
   } catch {
     return null;

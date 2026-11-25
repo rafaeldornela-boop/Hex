@@ -1,9 +1,8 @@
 'use client';
 
-import { memo, useMemo, useState } from 'react';
+import { memo, useMemo } from 'react';
 import {
   AlertTriangle,
-  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -26,6 +25,7 @@ import {
   RotateCcw,
   RotateCw,
   Save,
+  Sparkles,
   Swords,
   Trash2,
   Trees,
@@ -47,10 +47,10 @@ import {
   type TerrainDescriptor,
 } from '@/lib/terrain-engine';
 import {
-  STRATEGY_PALETTE_ORDER,
   getBuildingDefinition,
   type ResourceCost,
 } from '@/lib/buildings-catalog';
+import type { HexBuildEvaluation } from '@/lib/build-rules';
 import type {
   KingdomResources,
   KingdomStageInfo,
@@ -68,6 +68,7 @@ import type { KingdomModalTab } from './KingdomModal';
 export interface GameHudProps {
   gameState: GameModeState;
   turn: number;
+  worldSeed?: number;
   cash: number;
   territoryCount: number;
   resources: KingdomResources;
@@ -90,6 +91,7 @@ export interface GameHudProps {
   selectedStrategicInfo: StrategicRegionInfo | null;
   selectedHexUnit: UnitEntity | null;
   selectedHexFaction: FactionState | null;
+  contextualBuild: HexBuildEvaluation | null;
   canBuildActiveOnSelected: boolean;
   activeBuildEffectiveCost: ResourceCost | null;
   assets: HexAssetEntry[];
@@ -102,11 +104,13 @@ export interface GameHudProps {
   onPause: () => void;
   onBackToTitle: () => void;
   onResetStarter: () => void;
+  onNewProceduralWorld: () => void;
   onClearMap: () => void;
   onAdvanceTurn: () => void;
   onToggleAutoTurn: () => void;
   onOpenKingdomModal: (tab?: KingdomModalTab) => void;
   onSelectPiece: (index: number) => void;
+  onBuildOptionOnSelected: (structureIndex: number) => void;
   onCyclePiece: (delta: number) => void;
   onRotatePiece: () => void;
   onSetToolMode: (mode: BuilderToolMode) => void;
@@ -125,23 +129,6 @@ export interface GameHudProps {
   onRotateCamera: (radians: number) => void;
 }
 
-const PALETTE_GROUPS = [
-  { id: 'building', label: 'Prédios' },
-  { id: 'terrain', label: 'Terrenos' },
-  { id: 'path', label: 'Caminhos' },
-  { id: 'river', label: 'Rios' },
-  { id: 'unit', label: 'Unidades' },
-  { id: 'all', label: 'Todos' },
-] as const;
-
-type PaletteGroupId = (typeof PALETTE_GROUPS)[number]['id'];
-
-const TERRAIN_CATEGORIES = new Set(['grass', 'stone', 'sand', 'water', 'dirt', 'bridge']);
-
-const STRATEGY_ORDER_RANK = new Map<string, number>(
-  STRATEGY_PALETTE_ORDER.map((name, idx) => [name, idx])
-);
-
 function formatCash(value: number): string {
   return `$${Math.round(value).toLocaleString('pt-BR')}`;
 }
@@ -159,6 +146,7 @@ function formatCompactCost(cost: ResourceCost | null, fallbackGold: number): str
 const GameHud = memo(function GameHud({
   gameState,
   turn,
+  worldSeed,
   cash,
   territoryCount,
   resources,
@@ -181,7 +169,8 @@ const GameHud = memo(function GameHud({
   selectedStrategicInfo,
   selectedHexUnit,
   selectedHexFaction,
-  canBuildActiveOnSelected,
+  contextualBuild,
+  canBuildActiveOnSelected: _canBuildActiveOnSelected,
   activeBuildEffectiveCost,
   assets,
   muted,
@@ -193,11 +182,13 @@ const GameHud = memo(function GameHud({
   onPause,
   onBackToTitle,
   onResetStarter,
+  onNewProceduralWorld,
   onClearMap,
   onAdvanceTurn,
   onToggleAutoTurn,
   onOpenKingdomModal,
-  onSelectPiece,
+  onSelectPiece: _onSelectPiece,
+  onBuildOptionOnSelected,
   onCyclePiece,
   onRotatePiece,
   onSetToolMode,
@@ -215,7 +206,8 @@ const GameHud = memo(function GameHud({
   onZoom,
   onRotateCamera,
 }: GameHudProps) {
-  const [paletteGroup, setPaletteGroup] = useState<PaletteGroupId>('building');
+  void _canBuildActiveOnSelected;
+  void _onSelectPiece;
 
   const activeAsset = assets[selectedIndex] ?? assets[0];
   const activePieceDef = getBuildingDefinition(activeAsset.name);
@@ -225,40 +217,9 @@ const GameHud = memo(function GameHud({
   const activeTechLocked =
     activePieceDef.requiredTech !== null &&
     !unlockedTechs.includes(activePieceDef.requiredTech);
-  const activeWorkersShort =
-    activePieceDef.workersRequired > 0 &&
-    economy.population.availableWorkers < activePieceDef.workersRequired;
 
   const hasCancellableState =
     selectedHex !== null || toolMode === 'demolish' || toolMode === 'command' || buildSheetOpen;
-
-  const visiblePieces = useMemo(() => {
-    const filtered = assets
-      .map((asset, index) => ({ asset, index }))
-      .filter(({ asset }) => {
-        if (paletteGroup === 'all') return true;
-        if (paletteGroup === 'terrain') return TERRAIN_CATEGORIES.has(asset.category);
-        if (paletteGroup === 'building') {
-          return (
-            asset.category === 'building' ||
-            asset.name === 'dirt-lumber' ||
-            asset.name === 'unit-mansion' ||
-            asset.name === 'unit-wall-tower' ||
-            asset.name === 'bridge'
-          );
-        }
-        return asset.category === paletteGroup;
-      });
-
-    if (paletteGroup === 'building') {
-      filtered.sort((a, b) => {
-        const ra = STRATEGY_ORDER_RANK.get(a.asset.name) ?? 999;
-        const rb = STRATEGY_ORDER_RANK.get(b.asset.name) ?? 999;
-        return ra - rb;
-      });
-    }
-    return filtered;
-  }, [assets, paletteGroup]);
 
   const selectedBuildingDef = selectedTileAssetName
     ? getBuildingDefinition(selectedTileAssetName)
@@ -654,305 +615,203 @@ const GameHud = memo(function GameHud({
             }}
           >
             {/* Contextual Selected-Hex Card */}
-            {selectedHex && !buildSheetOpen && (
+            {selectedHex && !buildSheetOpen && selectedConquest && toolMode !== 'command' && (
               <div
                 data-testid="mobile-selection-bar"
                 className="pointer-events-auto w-full max-w-md bg-[#fcf9f2]/98 border-2 border-[#3c3426] rounded-2xl p-2.5 shadow-[0_4px_0_#3c3426] space-y-2"
               >
-                {toolMode === 'expand' && selectedConquest ? (
-                  <>
-                    <div className="flex items-start justify-between gap-2 px-1">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span
-                            className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
-                            style={{
-                              backgroundColor: selectedHexFaction
-                                ? selectedHexFaction.colorHex
-                                : selectedConquest.owner === 'player'
-                                  ? '#059669'
-                                  : selectedConquest.isAdjacent
-                                    ? '#f59e0b'
-                                    : '#94a3b8',
-                            }}
-                          />
-                          <p className="text-xs font-bold text-[#1f1a12] truncate">
-                            {selectedBuildingLabel}
-                          </p>
-                        </div>
-
-                        {selectedHexConstruction ? (
-                          <p
-                            data-testid="mobile-construction-status"
-                            className="text-[11px] font-bold text-amber-800 mt-0.5"
-                          >
-                            Em construção (faltam {selectedHexConstruction.turnsRemaining}/
-                            {selectedHexConstruction.totalTurns} turnos)
-                          </p>
-                        ) : selectedHexHasConstruction && selectedBuildingDef ? (
-                          <p className="text-[11px] font-medium text-[#3c3426] mt-0.5">
-                            {selectedBuildingDef.summaryPt}
-                          </p>
-                        ) : null}
-
-                        {selectedTerrainInfo && (
-                          <p
-                            data-testid="mobile-terrain-info"
-                            className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
-                          >
-                            Terreno: {selectedTerrainInfo.labelPt} · Recurso:{' '}
-                            {selectedTerrainInfo.resourceLabelPt}
-                          </p>
-                        )}
-
-                        {strategicBonusLine && (
-                          <p className="text-[11px] font-bold text-amber-800 mt-0.5">
-                            Região rara: {strategicBonusLine}
-                          </p>
-                        )}
-
-                        {selectedHexUnit && (
-                          <p className="text-[11px] font-bold text-emerald-900 mt-0.5">
-                            Unidade: {UNIT_CATALOG[selectedHexUnit.type].namePt} · HP{' '}
-                            {selectedHexUnit.hp}/{selectedHexUnit.maxHp}
-                          </p>
-                        )}
-
-                        <p className="text-[11px] font-medium text-[#5c5140] mt-0.5">
-                          {selectedConquest.owner === 'player'
-                            ? selectedHexConstruction
-                              ? 'Obra em andamento · Aguardando conclusão'
-                              : selectedHexHasConstruction
-                                ? 'Seu território · Possui construção'
-                                : 'Seu território · Livre para construir'
-                            : selectedHexFaction
-                              ? `${selectedHexFaction.namePt} (${
-                                  selectedHexFaction.relation === 'hostile'
-                                    ? 'Hostil'
-                                    : selectedHexFaction.relation === 'trade_pact'
-                                      ? 'Comércio'
-                                      : selectedHexFaction.relation === 'truce'
-                                        ? 'Trégua'
-                                        : 'Neutra'
-                                })`
+                <div className="flex items-start justify-between gap-2 px-1">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{
+                          backgroundColor: selectedHexFaction
+                            ? selectedHexFaction.colorHex
+                            : selectedConquest.owner === 'player'
+                              ? '#059669'
                               : selectedConquest.isAdjacent
-                                ? selectedConquest.canConquer
-                                  ? 'Território neutro · Adjacente'
-                                  : `Adjacente · Saldo insuficiente (${formatCash(selectedConquest.cost)})`
-                                : 'Distante · Conquiste um vizinho primeiro'}
-                        </p>
-                      </div>
+                                ? '#f59e0b'
+                                : '#94a3b8',
+                        }}
+                      />
+                      <p className="text-xs font-bold text-[#1f1a12] truncate">
+                        {selectedBuildingLabel}
+                      </p>
+                    </div>
 
-                      <button
-                        type="button"
-                        onClick={onCancelAction}
-                        aria-label="Fechar seleção"
-                        className="w-10 h-10 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer"
+                    {selectedHexConstruction ? (
+                      <p
+                        data-testid="mobile-construction-status"
+                        className="text-[11px] font-bold text-amber-800 mt-0.5"
                       >
-                        <X className="w-4 h-4" aria-hidden="true" />
-                      </button>
-                    </div>
+                        Em construção (faltam {selectedHexConstruction.turnsRemaining}/
+                        {selectedHexConstruction.totalTurns} turnos)
+                      </p>
+                    ) : selectedHexHasConstruction && selectedBuildingDef ? (
+                      <p className="text-[11px] font-medium text-[#3c3426] mt-0.5">
+                        {selectedBuildingDef.summaryPt}
+                      </p>
+                    ) : null}
 
-                    {/* Inline Unit Command & Recruitment Actions */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      {selectedHexUnit &&
-                        selectedHexUnit.owner === 'player' &&
-                        !selectedHexUnit.movedThisTurn && (
-                          <button
-                            type="button"
-                            data-testid="unit-command-button"
-                            onClick={onStartUnitCommand}
-                            className="flex-1 min-h-[44px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
-                          >
-                            <Swords className="w-4 h-4 shrink-0" aria-hidden="true" />
-                            Mover / Atacar
-                          </button>
-                        )}
-
-                      {recruitOptions.map((uType) => {
-                        const uDef = UNIT_CATALOG[uType];
-                        const locked =
-                          uDef.requiredTech !== null &&
-                          !unlockedTechs.includes(uDef.requiredTech);
-                        return (
-                          <button
-                            key={uType}
-                            type="button"
-                            data-testid={`recruit-${uType}`}
-                            onClick={() => onRecruitUnit(uType)}
-                            className={`min-h-[44px] px-2.5 rounded-xl text-[11px] font-bold border whitespace-nowrap cursor-pointer ${
-                              locked
-                                ? 'bg-[#efe8d8] border-[#c8ba9f] text-[#6e604a]'
-                                : 'bg-white border-[#3c3426] text-[#1f1a12] active:bg-[#f2ebdc]'
-                            }`}
-                          >
-                            +{uDef.namePt} ({formatCash(uDef.cost.gold)})
-                          </button>
-                        );
-                      })}
-
-                      {selectedConquest.owner === 'player' ? (
-                        selectedHexHasConstruction ? (
-                          <button
-                            type="button"
-                            data-testid="mobile-demolish-selected"
-                            onClick={onDemolishSelectedHex}
-                            className="flex-1 min-h-[46px] px-3 rounded-xl bg-rose-700 text-white font-display text-xs font-bold border-2 border-rose-950 shadow-[0_2px_0_#4c0519] flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5"
-                          >
-                            <Trash2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-                            Demolir
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            data-testid="mobile-build-here-button"
-                            onClick={() => onSetToolMode('build')}
-                            className="flex-1 min-h-[46px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <Hammer className="w-4 h-4 shrink-0" aria-hidden="true" />
-                            Construir aqui
-                          </button>
-                        )
-                      ) : selectedConquest.owner !== 'neutral' ? (
-                        <button
-                          type="button"
-                          onClick={() => onOpenKingdomModal('diplomacy')}
-                          className="flex-1 min-h-[46px] px-3 rounded-xl bg-[#efe8d8] text-[#2a2319] font-display text-xs font-semibold border-2 border-[#c8ba9f] flex items-center justify-center gap-1.5 cursor-pointer"
-                        >
-                          <Swords className="w-4 h-4 shrink-0" aria-hidden="true" />
-                          Diplomacia / Guerra
-                        </button>
-                      ) : selectedConquest.isAdjacent ? (
-                        <button
-                          type="button"
-                          data-testid="mobile-conquer-button"
-                          onClick={onConfirmSelectedHex}
-                          className={`flex-1 min-h-[46px] px-3 rounded-xl font-display text-xs font-bold border-2 flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5 ${
-                            selectedConquest.canConquer
-                              ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426]'
-                              : 'bg-[#efe8d8] text-[#6e604a] border-[#bcae96]'
-                          }`}
-                        >
-                          <Flag className="w-4 h-4 shrink-0" aria-hidden="true" />
-                          Conquistar ({formatCash(selectedConquest.cost)})
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          data-testid="mobile-conquer-blocked"
-                          onClick={onConfirmSelectedHex}
-                          className="flex-1 min-h-[46px] px-3 rounded-xl bg-[#efe8d8] text-[#5c5140] font-display text-xs font-semibold border-2 border-[#c8ba9f] flex items-center justify-center gap-1.5 cursor-pointer"
-                        >
-                          <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
-                          Território muito distante
-                        </button>
-                      )}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="flex items-center justify-between gap-2 px-1">
-                      <div className="min-w-0">
-                        <p className="text-[11px] font-bold text-[#1f1a12] truncate">
-                          {selectedBuildingLabel}
-                        </p>
-                        {selectedTerrainInfo && (
-                          <p
-                            data-testid="mobile-terrain-info"
-                            className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
-                          >
-                            Terreno: {selectedTerrainInfo.labelPt} · Recurso:{' '}
-                            {selectedTerrainInfo.resourceLabelPt}
-                          </p>
-                        )}
-                        {!selectedHexOwned ? (
-                          <p className="text-[11px] font-semibold text-rose-700 mt-0.5">
-                            Conquiste este território antes de construir.
-                          </p>
-                        ) : selectedHexHasConstruction ? (
-                          <p className="text-[11px] font-semibold text-rose-700 mt-0.5">
-                            Este território já possui uma construção.
-                          </p>
-                        ) : activeTechLocked && activePieceDef.requiredTech ? (
-                          <p className="text-[11px] font-semibold text-rose-700 mt-0.5">
-                            Requer pesquisa: {TECH_BY_ID[activePieceDef.requiredTech].namePt}
-                          </p>
-                        ) : activeWorkersShort ? (
-                          <p className="text-[11px] font-semibold text-rose-700 mt-0.5">
-                            Sem trabalhadores livres (precisa {activePieceDef.workersRequired})
-                          </p>
-                        ) : !canBuildActiveOnSelected && activePieceInfo.requiredTerrain ? (
-                          <p className="text-[11px] font-semibold text-rose-700 mt-0.5">
-                            Requer terreno: {TERRAIN_METADATA[activePieceInfo.requiredTerrain].labelPt}
-                          </p>
-                        ) : (
-                          <p className="text-[11px] font-medium text-[#5c5140] mt-0.5">
-                            <span className="font-semibold text-[#2a2319]">
-                              {activePieceLabel}
-                            </span>
-                            {` · ${formatCompactCost(activeBuildEffectiveCost, activeAsset.price)}`}
-                          </p>
-                        )}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={onCancelAction}
-                        aria-label="Cancelar seleção"
-                        className="w-10 h-10 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer"
+                    {selectedTerrainInfo && (
+                      <p
+                        data-testid="mobile-terrain-info"
+                        className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
                       >
-                        <X className="w-4 h-4" aria-hidden="true" />
-                      </button>
-                    </div>
+                        Terreno: {selectedTerrainInfo.labelPt} · Recurso:{' '}
+                        {selectedTerrainInfo.resourceLabelPt}
+                      </p>
+                    )}
 
-                    <div className="flex items-center gap-2">
+                    {strategicBonusLine && (
+                      <p className="text-[11px] font-bold text-amber-800 mt-0.5">
+                        Região rara: {strategicBonusLine}
+                      </p>
+                    )}
+
+                    {selectedHexUnit && (
+                      <p className="text-[11px] font-bold text-emerald-900 mt-0.5">
+                        Unidade: {UNIT_CATALOG[selectedHexUnit.type].namePt} · HP{' '}
+                        {selectedHexUnit.hp}/{selectedHexUnit.maxHp}
+                      </p>
+                    )}
+
+                    <p className="text-[11px] font-medium text-[#5c5140] mt-0.5">
+                      {selectedConquest.owner === 'player'
+                        ? selectedHexConstruction
+                          ? 'Obra em andamento · Aguardando conclusão'
+                          : selectedHexHasConstruction
+                            ? 'Seu território · Possui construção'
+                            : contextualBuild && contextualBuild.options.length > 0
+                              ? `Seu território · ${contextualBuild.options.length} obra(s) compatível(is)`
+                              : 'Seu território · Livre para construir'
+                        : selectedHexFaction
+                          ? `${selectedHexFaction.namePt} (${
+                              selectedHexFaction.relation === 'hostile'
+                                ? 'Hostil'
+                                : selectedHexFaction.relation === 'trade_pact'
+                                  ? 'Comércio'
+                                  : selectedHexFaction.relation === 'truce'
+                                    ? 'Trégua'
+                                    : 'Neutra'
+                            })`
+                          : selectedConquest.isAdjacent
+                            ? selectedConquest.canConquer
+                              ? 'Território neutro · Adjacente'
+                              : `Adjacente · Saldo insuficiente (${formatCash(selectedConquest.cost)})`
+                            : 'Distante · Conquiste um vizinho primeiro'}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={onCancelAction}
+                    aria-label="Fechar seleção"
+                    className="w-10 h-10 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" aria-hidden="true" />
+                  </button>
+                </div>
+
+                {/* Inline Unit Command, Recruitment & Contextual Hex Actions */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {selectedHexUnit &&
+                    selectedHexUnit.owner === 'player' &&
+                    !selectedHexUnit.movedThisTurn && (
                       <button
                         type="button"
-                        data-testid="mobile-confirm-build"
-                        onClick={onConfirmSelectedHex}
-                        className={`flex-1 min-h-[44px] px-3 rounded-xl font-display text-xs font-bold border-2 active:translate-y-0.5 flex items-center justify-center gap-1.5 cursor-pointer ${
-                          selectedHexOwned && !selectedHexHasConstruction && canBuildActiveOnSelected
-                            ? 'bg-emerald-700 text-white border-[#1e2d24] shadow-[0_2px_0_#1e2d24]'
-                            : 'bg-rose-100 text-rose-900 border-rose-400'
+                        data-testid="unit-command-button"
+                        onClick={onStartUnitCommand}
+                        className="flex-1 min-h-[44px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                      >
+                        <Swords className="w-4 h-4 shrink-0" aria-hidden="true" />
+                        Mover / Atacar
+                      </button>
+                    )}
+
+                  {recruitOptions.map((uType) => {
+                    const uDef = UNIT_CATALOG[uType];
+                    const locked =
+                      uDef.requiredTech !== null &&
+                      !unlockedTechs.includes(uDef.requiredTech);
+                    return (
+                      <button
+                        key={uType}
+                        type="button"
+                        data-testid={`recruit-${uType}`}
+                        onClick={() => onRecruitUnit(uType)}
+                        className={`min-h-[44px] px-2.5 rounded-xl text-[11px] font-bold border whitespace-nowrap cursor-pointer ${
+                          locked
+                            ? 'bg-[#efe8d8] border-[#c8ba9f] text-[#6e604a]'
+                            : 'bg-white border-[#3c3426] text-[#1f1a12] active:bg-[#f2ebdc]'
                         }`}
                       >
-                        {!selectedHexOwned || selectedHexHasConstruction || activeTechLocked ? (
-                          <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
-                        ) : (
-                          <Check className="w-4 h-4 shrink-0" aria-hidden="true" />
-                        )}
-                        {!selectedHexOwned
-                          ? 'Conquiste antes'
-                          : selectedHexHasConstruction
-                            ? 'Já construído'
-                            : 'Construir'}
+                        +{uDef.namePt} ({formatCash(uDef.cost.gold)})
                       </button>
+                    );
+                  })}
 
+                  {selectedConquest.owner === 'player' ? (
+                    selectedHexHasConstruction ? (
                       <button
                         type="button"
-                        onClick={onRotatePiece}
-                        aria-label="Girar peça selecionada"
-                        className="min-w-[44px] min-h-[44px] px-3 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] text-xs font-bold flex items-center justify-center gap-1 cursor-pointer"
+                        data-testid="mobile-demolish-selected"
+                        onClick={onDemolishSelectedHex}
+                        className="flex-1 min-h-[46px] px-3 rounded-xl bg-rose-700 text-white font-display text-xs font-bold border-2 border-rose-950 shadow-[0_2px_0_#4c0519] flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5"
                       >
-                        <RotateCw className="w-4 h-4" aria-hidden="true" />
-                        <span>Girar</span>
+                        <Trash2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+                        Demolir
                       </button>
-
-                      {selectedHexOwned && selectedHexHasConstruction && (
-                        <button
-                          type="button"
-                          data-testid="mobile-demolish-selected"
-                          onClick={onDemolishSelectedHex}
-                          aria-label="Demolir construção"
-                          className="min-w-[44px] min-h-[44px] px-3 rounded-xl bg-rose-700 text-white border-2 border-rose-950 text-xs font-bold flex items-center justify-center gap-1 cursor-pointer"
-                        >
-                          <Trash2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-                          <span>Demolir</span>
-                        </button>
-                      )}
-                    </div>
-                  </>
-                )}
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid="mobile-build-here-button"
+                        onClick={() => {
+                          onSetToolMode('build');
+                          onSetBuildSheetOpen(true);
+                        }}
+                        className="flex-1 min-h-[46px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Hammer className="w-4 h-4 shrink-0" aria-hidden="true" />
+                        Construir aqui
+                      </button>
+                    )
+                  ) : selectedConquest.owner !== 'neutral' ? (
+                    <button
+                      type="button"
+                      onClick={() => onOpenKingdomModal('diplomacy')}
+                      className="flex-1 min-h-[46px] px-3 rounded-xl bg-[#efe8d8] text-[#2a2319] font-display text-xs font-semibold border-2 border-[#c8ba9f] flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Swords className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      Diplomacia / Guerra
+                    </button>
+                  ) : selectedConquest.isAdjacent ? (
+                    <button
+                      type="button"
+                      data-testid="mobile-conquer-button"
+                      onClick={onConfirmSelectedHex}
+                      className={`flex-1 min-h-[46px] px-3 rounded-xl font-display text-xs font-bold border-2 flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5 ${
+                        selectedConquest.canConquer
+                          ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426]'
+                          : 'bg-[#efe8d8] text-[#6e604a] border-[#bcae96]'
+                      }`}
+                    >
+                      <Flag className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      Conquistar ({formatCash(selectedConquest.cost)})
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      data-testid="mobile-conquer-blocked"
+                      onClick={onConfirmSelectedHex}
+                      className="flex-1 min-h-[46px] px-3 rounded-xl bg-[#efe8d8] text-[#5c5140] font-display text-xs font-semibold border-2 border-[#c8ba9f] flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      Território muito distante
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1063,19 +922,19 @@ const GameHud = memo(function GameHud({
             )}
           </div>
 
-          {/* Mobile Build Bottom Sheet */}
+          {/* Mobile Contextual Build Bottom Sheet ("O que posso construir neste hex?") */}
           {buildSheetOpen && (
             <div className="md:hidden fixed inset-0 z-30 flex flex-col justify-end pointer-events-auto">
               <button
                 type="button"
-                aria-label="Fechar catálogo de peças"
+                aria-label="Fechar painel de construção"
                 onClick={() => onSetBuildSheetOpen(false)}
                 className="flex-1 w-full bg-[#1a221d]/25 cursor-default"
               />
 
               <div
                 data-testid="mobile-build-sheet"
-                className="w-full max-h-[52dvh] flex flex-col bg-[#fcf9f2] border-t-2 border-x-2 border-[#3c3426] rounded-t-3xl shadow-[0_-8px_24px_rgba(31,26,18,0.2)]"
+                className="w-full max-h-[56dvh] flex flex-col bg-[#fcf9f2] border-t-2 border-x-2 border-[#3c3426] rounded-t-3xl shadow-[0_-8px_24px_rgba(31,26,18,0.2)]"
                 style={{
                   paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
                   paddingLeft: 'max(0.75rem, env(safe-area-inset-left))',
@@ -1085,88 +944,121 @@ const GameHud = memo(function GameHud({
                 <div className="pt-2.5 pb-2 px-1 flex items-center justify-between gap-2 border-b border-[#e0d6c3]">
                   <div className="min-w-0">
                     <p className="font-display text-sm font-bold text-[#1f1a12]">
-                      Escolher Construção
+                      {selectedHex && contextualBuild
+                        ? 'O que posso construir neste hex?'
+                        : 'Construção Contextual'}
                     </p>
                     <p className="text-[11px] text-[#5c5140] truncate">
-                      <span className="font-semibold">{activePieceLabel}</span>
-                      {` · ${activePieceDef.summaryPt}`}
+                      {selectedHex && contextualBuild
+                        ? `Terreno: ${contextualBuild.terrain.labelPt} · Recurso: ${contextualBuild.terrain.resourceLabelPt}`
+                        : 'Toque em um hexágono livre do seu território no mapa'}
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => onSetBuildSheetOpen(false)}
-                    aria-label="Fechar painel de construção"
-                    className="w-11 h-11 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer"
-                  >
-                    <X className="w-5 h-5" aria-hidden="true" />
-                  </button>
-                </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={onRotatePiece}
+                      aria-label="Girar orientação da obra"
+                      className="min-h-[44px] px-3 rounded-xl bg-white border border-[#c8ba9f] text-[#2a2319] text-xs font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <RotateCw className="w-4 h-4" aria-hidden="true" />
+                      <span>Girar</span>
+                    </button>
 
-                <div className="py-2 flex items-center gap-1.5 overflow-x-auto hex-touch-scroll-x shrink-0">
-                  {PALETTE_GROUPS.map((grp) => {
-                    const active = paletteGroup === grp.id;
-                    return (
-                      <button
-                        key={grp.id}
-                        type="button"
-                        onClick={() => setPaletteGroup(grp.id)}
-                        className={`min-h-[40px] px-3.5 rounded-xl text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                          active
-                            ? 'bg-[#2a2319] text-[#fcf9f2]'
-                            : 'bg-[#efe8d8] text-[#4c4232] active:bg-[#e5dcc7]'
-                        }`}
-                      >
-                        {grp.label}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div className="flex-1 min-h-0 overflow-y-auto hex-touch-scroll pb-1">
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    {visiblePieces.map(({ asset, index }) => {
-                      const isSelected = index === selectedIndex && toolMode === 'build';
-                      const bDef = getBuildingDefinition(asset.name);
-                      const info = getStructureDisplayInfo(asset.name);
-                      const label = bDef.labelPt || info.labelPt || formatHexDisplayName(asset.name);
-                      const techLocked =
-                        bDef.requiredTech !== null &&
-                        !unlockedTechs.includes(bDef.requiredTech);
-                      return (
-                        <button
-                          key={asset.file}
-                          type="button"
-                          data-testid={`mobile-piece-${asset.name}`}
-                          onClick={() => {
-                            onSetToolMode('build');
-                            onSelectPiece(index);
-                            onSetBuildSheetOpen(false);
-                          }}
-                          className={`min-h-[58px] px-3 py-2 rounded-xl border-2 text-left transition-colors cursor-pointer ${
-                            isSelected
-                              ? 'bg-emerald-700 border-[#1e2d24] text-white'
-                              : techLocked
-                                ? 'bg-[#f4efe4] border-[#d9ceb8] text-[#6e604a]'
-                                : 'bg-white border-[#d9ceb8] text-[#2a2319] active:bg-[#f5efe1]'
-                          }`}
-                        >
-                          <span className="block text-xs font-bold leading-tight truncate">
-                            {label}
-                          </span>
-                          <span
-                            className={`mt-1 block text-[10px] font-medium tabular-nums truncate ${
-                              isSelected ? 'text-emerald-100' : 'text-[#6e604a]'
-                            }`}
-                          >
-                            {techLocked && bDef.requiredTech
-                              ? `Req. ${TECH_BY_ID[bDef.requiredTech].namePt}`
-                              : `${formatCompactCost(bDef.buildCost, asset.price)} · ${bDef.buildTimeTurns}t`}
-                          </span>
-                        </button>
-                      );
-                    })}
+                    <button
+                      type="button"
+                      onClick={() => onSetBuildSheetOpen(false)}
+                      aria-label="Fechar painel de construção"
+                      className="w-11 h-11 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer"
+                    >
+                      <X className="w-5 h-5" aria-hidden="true" />
+                    </button>
                   </div>
+                </div>
+
+                <div className="flex-1 min-h-0 overflow-y-auto hex-touch-scroll pt-2.5 pb-1 space-y-2">
+                  {!selectedHex || !contextualBuild ? (
+                    <div className="bg-white border-2 border-[#d9ceb8] rounded-2xl p-4 text-center space-y-2">
+                      <p className="text-xs font-semibold text-[#2a2319]">
+                        Toque em um hexágono livre pertencente ao seu território para ver exatamente quais obras podem ser erguidas ali.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => onSetBuildSheetOpen(false)}
+                        className="min-h-[44px] px-4 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] cursor-pointer"
+                      >
+                        Escolher hex no mapa
+                      </button>
+                    </div>
+                  ) : contextualBuild.options.length === 0 ? (
+                    <div
+                      data-testid="mobile-build-empty"
+                      className="bg-[#f4efe4] border-2 border-[#d9ceb8] rounded-2xl p-4 space-y-1"
+                    >
+                      <p className="text-xs font-bold text-[#1f1a12]">
+                        Nenhuma obra disponível neste hex
+                      </p>
+                      <p className="text-xs font-medium text-[#5c5140]">
+                        {contextualBuild.blockedReasonPt ??
+                          contextualBuild.hintPt ??
+                          'Não há construções compatíveis desbloqueadas para este terreno.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {contextualBuild.options.map((opt) => {
+                          const isSelected = opt.assetIndex === selectedIndex;
+                          const asset = assets[opt.assetIndex];
+                          return (
+                            <button
+                              key={opt.assetName}
+                              type="button"
+                              data-testid={`mobile-piece-${opt.assetName}`}
+                              onClick={() => onBuildOptionOnSelected(opt.assetIndex)}
+                              className={`min-h-[68px] px-3 py-2 rounded-xl border-2 text-left transition-colors cursor-pointer ${
+                                !opt.affordable
+                                  ? 'bg-[#f4efe4] border-[#d9ceb8] text-[#5c5140]'
+                                  : isSelected
+                                    ? 'bg-emerald-700 border-[#1e2d24] text-white'
+                                    : 'bg-white border-[#3c3426] text-[#1f1a12] active:bg-[#f5efe1]'
+                              }`}
+                            >
+                              <span className="block text-xs font-bold leading-tight truncate">
+                                {opt.definition.labelPt}
+                              </span>
+                              <span
+                                className={`mt-0.5 block text-[10px] font-medium truncate ${
+                                  isSelected && opt.affordable
+                                    ? 'text-emerald-100'
+                                    : 'text-[#5c5140]'
+                                }`}
+                              >
+                                {opt.definition.summaryPt}
+                              </span>
+                              <span
+                                className={`mt-1 block text-[10px] font-bold tabular-nums truncate ${
+                                  !opt.affordable
+                                    ? 'text-rose-700'
+                                    : isSelected
+                                      ? 'text-white'
+                                      : 'text-emerald-800'
+                                }`}
+                              >
+                                {`${formatCompactCost(opt.effectiveCost, asset?.price ?? 0)} · ${opt.definition.buildTimeTurns}t`}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {contextualBuild.hintPt && (
+                        <p className="px-1 text-[11px] font-medium text-[#5c5140]">
+                          {contextualBuild.hintPt}
+                        </p>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -1177,7 +1069,7 @@ const GameHud = memo(function GameHud({
           {/* ========================================================= */}
           <div className="hidden md:flex absolute bottom-3 left-1/2 -translate-x-1/2 w-[min(960px,95vw)] flex-col items-center pointer-events-none">
             {/* Desktop Contextual Selection Card */}
-            {toolMode === 'expand' && selectedHex && selectedConquest && (
+            {toolMode !== 'command' && selectedHex && selectedConquest && (
               <div
                 data-testid="desktop-selection-bar"
                 className="pointer-events-auto mb-2 flex flex-wrap items-center gap-3 bg-[#fcf9f2]/98 border-2 border-[#3c3426] rounded-2xl px-4 py-2.5 shadow-[0_4px_0_#3c3426] max-w-full"
@@ -1311,7 +1203,10 @@ const GameHud = memo(function GameHud({
                   <button
                     type="button"
                     data-testid="desktop-build-here-button"
-                    onClick={() => onSetToolMode('build')}
+                    onClick={() => {
+                      if (!dockOpen) onToggleDock();
+                      onSetToolMode('build');
+                    }}
                     className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-[#1e2d24] bg-emerald-700 text-white shadow-[0_2px_0_#1e2d24] hover:bg-emerald-800 whitespace-nowrap cursor-pointer"
                   >
                     <Hammer className="w-3.5 h-3.5" aria-hidden="true" />
@@ -1580,76 +1475,79 @@ const GameHud = memo(function GameHud({
               </div>
 
               {dockOpen && (
-                <div className="pt-2 border-t border-[#e0d6c3] space-y-2">
-                  <div className="flex items-center gap-1 overflow-x-auto pb-0.5">
-                    {PALETTE_GROUPS.map((grp) => {
-                      const active = paletteGroup === grp.id;
-                      return (
-                        <button
-                          key={grp.id}
-                          type="button"
-                          tabIndex={-1}
-                          onClick={(e) => {
-                            e.currentTarget.blur();
-                            setPaletteGroup(grp.id);
-                          }}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                            active
-                              ? 'bg-[#2a2319] text-[#fcf9f2]'
-                              : 'bg-[#efe8d8] text-[#4c4232] hover:bg-[#e5dcc7]'
-                          }`}
-                        >
-                          {grp.label}
-                        </button>
-                      );
-                    })}
+                <div
+                  data-testid="desktop-contextual-build"
+                  className="pt-2 border-t border-[#e0d6c3] space-y-2"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-bold text-[#1f1a12]">
+                      {selectedHex && contextualBuild
+                        ? `O que posso construir neste hex? · ${contextualBuild.terrain.labelPt} (${contextualBuild.terrain.resourceLabelPt})`
+                        : 'O que posso construir neste hex?'}
+                    </p>
+                    {contextualBuild?.hintPt && (
+                      <p className="text-[11px] font-medium text-[#6e604a] truncate">
+                        {contextualBuild.hintPt}
+                      </p>
+                    )}
                   </div>
 
-                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-                    {visiblePieces.map(({ asset, index }) => {
-                      const isSelected = index === selectedIndex && toolMode === 'build';
-                      const bDef = getBuildingDefinition(asset.name);
-                      const info = getStructureDisplayInfo(asset.name);
-                      const label = bDef.labelPt || info.labelPt || formatHexDisplayName(asset.name);
-                      const techLocked =
-                        bDef.requiredTech !== null &&
-                        !unlockedTechs.includes(bDef.requiredTech);
-                      return (
-                        <button
-                          key={asset.file}
-                          type="button"
-                          tabIndex={-1}
-                          data-testid={`desktop-piece-${asset.name}`}
-                          title={bDef.summaryPt}
-                          onClick={(e) => {
-                            e.currentTarget.blur();
-                            onSetToolMode('build');
-                            onSelectPiece(index);
-                          }}
-                          className={`px-2.5 py-1.5 rounded-lg border text-left transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                            isSelected
-                              ? 'bg-emerald-700 border-emerald-900 text-white'
-                              : techLocked
-                                ? 'bg-[#f4efe4] border-[#d9ceb8] text-[#6e604a]'
-                                : 'bg-white border-[#d9ceb8] text-[#2a2319] hover:bg-[#f5efe1]'
-                          }`}
-                        >
-                          <span className="block text-[11px] font-semibold leading-tight">
-                            {label}
-                          </span>
-                          <span
-                            className={`block text-[10px] font-medium tabular-nums ${
-                              isSelected ? 'text-emerald-100' : 'text-[#6e604a]'
+                  {!selectedHex || !contextualBuild ? (
+                    <p className="text-xs font-medium text-[#5c5140] py-1">
+                      Selecione um hexágono livre do seu território no mapa para ver exatamente quais construções são compatíveis com aquele terreno.
+                    </p>
+                  ) : contextualBuild.options.length === 0 ? (
+                    <p
+                      data-testid="desktop-build-empty"
+                      className="text-xs font-semibold text-[#5c5140] py-1"
+                    >
+                      {contextualBuild.blockedReasonPt ??
+                        contextualBuild.hintPt ??
+                        'Nenhuma construção compatível disponível neste hexágono.'}
+                    </p>
+                  ) : (
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                      {contextualBuild.options.map((opt) => {
+                        const isSelected = opt.assetIndex === selectedIndex;
+                        const asset = assets[opt.assetIndex];
+                        return (
+                          <button
+                            key={opt.assetName}
+                            type="button"
+                            tabIndex={-1}
+                            data-testid={`desktop-piece-${opt.assetName}`}
+                            title={opt.definition.summaryPt}
+                            onClick={(e) => {
+                              e.currentTarget.blur();
+                              onBuildOptionOnSelected(opt.assetIndex);
+                            }}
+                            className={`px-3 py-1.5 rounded-lg border-2 text-left transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              !opt.affordable
+                                ? 'bg-[#f4efe4] border-[#d9ceb8] text-[#5c5140]'
+                                : isSelected
+                                  ? 'bg-emerald-700 border-emerald-950 text-white'
+                                  : 'bg-white border-[#3c3426] text-[#1f1a12] hover:bg-[#f5efe1]'
                             }`}
                           >
-                            {techLocked && bDef.requiredTech
-                              ? `Req. ${TECH_BY_ID[bDef.requiredTech].namePt}`
-                              : `${formatCompactCost(bDef.buildCost, asset.price)} · ${bDef.buildTimeTurns}t`}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
+                            <span className="block text-[11px] font-bold leading-tight">
+                              {opt.definition.labelPt}
+                            </span>
+                            <span
+                              className={`block text-[10px] font-medium tabular-nums ${
+                                !opt.affordable
+                                  ? 'text-rose-700'
+                                  : isSelected
+                                    ? 'text-emerald-100'
+                                    : 'text-[#5c5140]'
+                              }`}
+                            >
+                              {`${formatCompactCost(opt.effectiveCost, asset?.price ?? 0)} · ${opt.definition.buildTimeTurns}t`}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1678,6 +1576,7 @@ const GameHud = memo(function GameHud({
                 </h2>
                 <p className="mt-1 text-xs text-[#5c5140]">
                   Turno {turn} · {stage.labelPt}
+                  {worldSeed !== undefined ? ` · Mundo #${worldSeed}` : ''}
                 </p>
               </div>
 
@@ -1792,6 +1691,19 @@ const GameHud = memo(function GameHud({
                   Auto-turno: {autoTurnEnabled ? 'On' : 'Off'}
                 </button>
               </div>
+
+              <button
+                type="button"
+                data-testid="new-world-button"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onNewProceduralWorld();
+                }}
+                className="w-full min-h-[46px] py-2 px-3 rounded-xl bg-[#efe8d8] border-2 border-[#3c3426] text-xs font-bold text-[#1f1a12] hover:bg-[#e5dcc7] inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4 text-emerald-700" aria-hidden="true" />
+                Gerar Novo Mapa Procedural
+              </button>
 
               <div className="grid grid-cols-2 gap-2">
                 <button
