@@ -106,6 +106,7 @@ import {
   type BuildingModulesEvaluation,
 } from '@/lib/building-modules-engine';
 import { formatHexDisplayName } from '@/lib/world-domain';
+import type { GameAudioPreferences } from '@/lib/game-audio';
 import type { BuilderToolMode, GameModeState } from './HexSceneController';
 import type { KingdomModalTab } from './KingdomModal';
 
@@ -160,6 +161,8 @@ export interface GameHudProps {
   activeBuildEffectiveCost: ResourceCost | null;
   assets: HexAssetEntry[];
   muted: boolean;
+  audioPrefs?: GameAudioPreferences;
+  onUpdateAudioPrefs?: (partial: Partial<GameAudioPreferences>) => void;
   dockOpen: boolean;
   buildSheetOpen: boolean;
   toastMessage: string | null;
@@ -360,6 +363,8 @@ const GameHud = memo(function GameHud({
   activeBuildEffectiveCost,
   assets,
   muted,
+  audioPrefs,
+  onUpdateAudioPrefs,
   dockOpen,
   buildSheetOpen,
   toastMessage,
@@ -2659,7 +2664,7 @@ const GameHud = memo(function GameHud({
           className="fixed inset-0 z-40 bg-[#1a221d]/55 flex items-end sm:items-center justify-center sm:p-4 pointer-events-auto"
         >
           <div
-            className="w-full max-w-md max-h-[88dvh] overflow-y-auto hex-touch-scroll bg-[#fcf9f2] border-t-2 sm:border-2 border-[#3c3426] rounded-t-3xl sm:rounded-2xl p-5 sm:p-6 shadow-[0_8px_0_#3c3426] space-y-4"
+            className="w-full max-w-md max-h-[88dvh] overflow-y-auto hex-touch-scroll hex-panel-enter bg-[#fcf9f2] border-t-2 sm:border-2 border-[#3c3426] rounded-t-3xl sm:rounded-2xl p-5 sm:p-6 shadow-[0_8px_0_#3c3426] space-y-4"
             style={{
               paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))',
             }}
@@ -2786,6 +2791,151 @@ const GameHud = memo(function GameHud({
                   Auto-turno: {autoTurnEnabled ? 'On' : 'Off'}
                 </button>
               </div>
+
+              {audioPrefs && onUpdateAudioPrefs && (
+                <section
+                  data-testid="audio-accessibility-panel"
+                  className="bg-white border border-[#d9ceb8] rounded-xl p-3 space-y-2.5"
+                >
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-[#5c5140]">
+                    Áudio &amp; Acessibilidade
+                  </p>
+
+                  <div className="grid grid-cols-2 gap-2.5 text-xs">
+                    <label className="space-y-1">
+                      <span className="flex justify-between font-semibold text-[#2a2319]">
+                        <span>Geral</span>
+                        <span className="tabular-nums">{Math.round(audioPrefs.masterVolume * 100)}%</span>
+                      </span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={Math.round(audioPrefs.masterVolume * 100)}
+                        onChange={(e) =>
+                          onUpdateAudioPrefs({ masterVolume: Number(e.target.value) / 100 })
+                        }
+                        aria-label="Volume geral"
+                        className="w-full accent-emerald-700 cursor-pointer"
+                      />
+                    </label>
+
+                    <label className="space-y-1">
+                      <span className="flex justify-between font-semibold text-[#2a2319]">
+                        <span>Música</span>
+                        <span className="tabular-nums">{Math.round(audioPrefs.musicVolume * 100)}%</span>
+                      </span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={Math.round(audioPrefs.musicVolume * 100)}
+                        onChange={(e) =>
+                          onUpdateAudioPrefs({ musicVolume: Number(e.target.value) / 100 })
+                        }
+                        aria-label="Volume da música"
+                        className="w-full accent-emerald-700 cursor-pointer"
+                      />
+                    </label>
+
+                    <label className="space-y-1">
+                      <span className="flex justify-between font-semibold text-[#2a2319]">
+                        <span>Efeitos</span>
+                        <span className="tabular-nums">{Math.round(audioPrefs.sfxVolume * 100)}%</span>
+                      </span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={Math.round(audioPrefs.sfxVolume * 100)}
+                        onChange={(e) =>
+                          onUpdateAudioPrefs({ sfxVolume: Number(e.target.value) / 100 })
+                        }
+                        aria-label="Volume dos efeitos"
+                        className="w-full accent-emerald-700 cursor-pointer"
+                      />
+                    </label>
+
+                    <label className="space-y-1">
+                      <span className="flex justify-between font-semibold text-[#2a2319]">
+                        <span>Ambiente</span>
+                        <span className="tabular-nums">{Math.round(audioPrefs.ambientVolume * 100)}%</span>
+                      </span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={Math.round(audioPrefs.ambientVolume * 100)}
+                        onChange={(e) =>
+                          onUpdateAudioPrefs({ ambientVolume: Number(e.target.value) / 100 })
+                        }
+                        aria-label="Volume do ambiente"
+                        className="w-full accent-emerald-700 cursor-pointer"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateAudioPrefs({ ambientEnabled: !audioPrefs.ambientEnabled })
+                      }
+                      className={`min-h-[44px] px-2.5 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer ${
+                        audioPrefs.ambientEnabled
+                          ? 'bg-emerald-50 border-emerald-400 text-emerald-900'
+                          : 'bg-[#f5efe1] border-[#c8ba9f] text-[#5c5140]'
+                      }`}
+                    >
+                      Ambiente: {audioPrefs.ambientEnabled ? 'On' : 'Off'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateAudioPrefs({
+                          textSize: audioPrefs.textSize === 'large' ? 'normal' : 'large',
+                        })
+                      }
+                      className={`min-h-[44px] px-2.5 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer ${
+                        audioPrefs.textSize === 'large'
+                          ? 'bg-amber-50 border-amber-500 text-amber-950'
+                          : 'bg-[#f5efe1] border-[#c8ba9f] text-[#2a2319]'
+                      }`}
+                    >
+                      Texto: {audioPrefs.textSize === 'large' ? 'Grande' : 'Normal'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateAudioPrefs({ reduceAnimations: !audioPrefs.reduceAnimations })
+                      }
+                      className={`min-h-[44px] px-2.5 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer ${
+                        audioPrefs.reduceAnimations
+                          ? 'bg-amber-50 border-amber-500 text-amber-950'
+                          : 'bg-[#f5efe1] border-[#c8ba9f] text-[#2a2319]'
+                      }`}
+                    >
+                      Reduzir Animações: {audioPrefs.reduceAnimations ? 'Sim' : 'Não'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateAudioPrefs({ reduceEffects: !audioPrefs.reduceEffects })
+                      }
+                      className={`min-h-[44px] px-2.5 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer ${
+                        audioPrefs.reduceEffects
+                          ? 'bg-amber-50 border-amber-500 text-amber-950'
+                          : 'bg-[#f5efe1] border-[#c8ba9f] text-[#2a2319]'
+                      }`}
+                    >
+                      Reduzir Efeitos: {audioPrefs.reduceEffects ? 'Sim' : 'Não'}
+                    </button>
+                  </div>
+                </section>
+              )}
 
               <button
                 type="button"

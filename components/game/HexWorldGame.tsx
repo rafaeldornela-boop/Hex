@@ -74,6 +74,7 @@ import {
   getKingdomProgression,
   getKingdomRoadSummary,
   getKingdomTerritoryCapacity,
+  getKingdomVictoryProgress,
   getModuleConstructionsByKey,
   getUnderConstructionKeys,
   getUpgradingConstructionsByKey,
@@ -88,7 +89,12 @@ import {
   upgradeBuildingInKingdom,
   type KingdomState,
 } from '@/lib/kingdom-engine';
-import { gameAudio } from '@/lib/game-audio';
+import {
+  gameAudio,
+  resolveAdaptiveMusicState,
+  type AmbientBiome,
+  type GameAudioPreferences,
+} from '@/lib/game-audio';
 import {
   HexSceneController,
   type BuilderToolMode,
@@ -172,7 +178,10 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   const [toolMode, setToolMode] = useState<BuilderToolMode>('expand');
   const [selectedHex, setSelectedHex] = useState<AxialCoord | null>(null);
   const [commandSource, setCommandSource] = useState<AxialCoord | null>(null);
-  const [muted, setMuted] = useState<boolean>(false);
+  const [muted, setMuted] = useState<boolean>(() => gameAudio.isMuted());
+  const [audioPrefs, setAudioPrefs] = useState<GameAudioPreferences>(() =>
+    gameAudio.getPreferences()
+  );
   const [autoTurnEnabled, setAutoTurnEnabled] = useState<boolean>(false);
   const [dockOpen, setDockOpen] = useState<boolean>(true);
   const [buildSheetOpen, setBuildSheetOpen] = useState<boolean>(false);
@@ -180,6 +189,19 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   const [kingdomModalTab, setKingdomModalTab] = useState<KingdomModalTab>('economy');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const syncPrefs = (prefs: GameAudioPreferences) => {
+      setAudioPrefs(prefs);
+      setMuted(prefs.muted);
+      controllerRef.current?.setAccessibilityOptions({
+        reduceAnimations: prefs.reduceAnimations,
+        reduceEffects: prefs.reduceEffects,
+      });
+    };
+    syncPrefs(gameAudio.getPreferences());
+    return gameAudio.subscribePreferences(syncPrefs);
+  }, []);
 
   // Refs synced for stable controller callbacks
   const gameStateRef = useRef(gameState);
@@ -730,6 +752,8 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   );
 
   const handleAdvanceTurn = useCallback(() => {
+    const prevSeason = kingdomStateRef.current.calendar?.season;
+    const prevWorld = kingdomStateRef.current.worldState;
     const res = advanceKingdomTurn(kingdomStateRef.current, HEX_ASSETS);
     kingdomStateRef.current = res.nextState;
     setKingdomState(res.nextState);
@@ -751,19 +775,53 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       upgrading
     );
     syncSceneRoadsAndCities(res.nextState, under);
-    if (
+
+    // Trigger restrained 3D visual feedback for key turn completions
+    const parseKeyCoord = (k: string): AxialCoord | null => {
+      const tile = res.nextState.worldState.hexes[k] ?? prevWorld.hexes[k];
+      return tile ? { q: tile.q, r: tile.r } : null;
+    };
+    res.completedBuildings.slice(0, 3).forEach((k) => {
+      const c = parseKeyCoord(k);
+      if (c) controllerRef.current?.triggerEventEffect('build_complete', c);
+    });
+    res.completedUpgrades.slice(0, 2).forEach((k) => {
+      const c = parseKeyCoord(k);
+      if (c) controllerRef.current?.triggerEventEffect('upgrade', c);
+    });
+    res.completedModules.slice(0, 2).forEach((k) => {
+      const c = parseKeyCoord(k);
+      if (c) controllerRef.current?.triggerEventEffect('module', c);
+    });
+    res.foundedCities.slice(0, 2).forEach((cityName) => {
+      const city = res.nextState.cities.find((c) => c.name === cityName);
+      if (city) controllerRef.current?.triggerEventEffect('city', city.center);
+    });
+
+    const victory = getKingdomVictoryProgress(res.nextState, HEX_ASSETS);
+    if (victory.status === 'victory') {
+      gameAudio.playVictory();
+    } else if (victory.status === 'defeat') {
+      gameAudio.playDefeat();
+    } else if (res.newEvent) {
+      gameAudio.playDecision();
+    } else if (res.nextState.calendar?.season && res.nextState.calendar.season !== prevSeason) {
+      gameAudio.playSeasonChange();
+    } else if (
       res.completedTech ||
-      res.newEvent ||
-      res.completedBuildings.length > 0 ||
-      res.completedUpgrades.length > 0 ||
-      res.completedModules.length > 0 ||
       res.incorporatedKeys.length > 0 ||
       res.foundedCities.length > 0 ||
       res.leveledUpCities.length > 0
     ) {
       gameAudio.playConquest();
+    } else if (
+      res.completedBuildings.length > 0 ||
+      res.completedUpgrades.length > 0 ||
+      res.completedModules.length > 0
+    ) {
+      gameAudio.playBuildComplete();
     } else {
-      gameAudio.playSaveChime();
+      gameAudio.playTurnAdvance();
     }
     showToast(res.headlinePt);
   }, [
@@ -854,7 +912,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       }
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
-      gameAudio.playSaveChime();
+      gameAudio.playDiplomacy();
       showToast(res.messagePt);
     },
     [showToast]
@@ -865,7 +923,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       const res = resolveKingdomEvent(kingdomStateRef.current, choiceId, HEX_ASSETS);
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
-      gameAudio.playConquest();
+      gameAudio.playSpecialEvent();
       showToast(res.outcomePt);
     },
     [showToast]
@@ -887,7 +945,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       }
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
-      gameAudio.playSaveChime();
+      gameAudio.playTrade();
       showToast(res.messagePt);
     },
     [showToast]
@@ -913,6 +971,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   );
 
   const handleOpenKingdomModal = useCallback((tab: KingdomModalTab = 'economy') => {
+    gameAudio.playUiClick();
     setKingdomModalTab(tab);
     setKingdomModalOpen(true);
   }, []);
@@ -974,6 +1033,8 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   ]);
 
   const handleStartGame = useCallback(() => {
+    gameAudio.unlockAndStartAtmosphere();
+    gameAudio.playUiClick();
     document.body.dataset.state = 'playing';
     setGameState('playing');
   }, []);
@@ -1566,6 +1627,66 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   const climateWeather =
     kingdomState.climateWeather ?? createInitialClimateWeather();
 
+  useEffect(() => {
+    if (gameState !== 'playing') return;
+    const atWar = kingdomState.factions.some(
+      (f) => f.relation === 'hostile' || kingdomState.diplomacyByFactionId?.[f.id]?.atWar
+    );
+    const hasCrisis =
+      kingdomState.activeEffects.some((e) => (e.efficiencyPenalty ?? 0) > 0) ||
+      kingdomState.activeEvent?.kind === 'economic_crisis' ||
+      kingdomState.activeEvent?.kind === 'revolt' ||
+      kingdomState.activeEvent?.kind === 'epidemic';
+    const recentDiscovery =
+      kingdomState.activeEvent?.kind === 'discovery' ||
+      kingdomState.activeEvent?.kind === 'tech_breakthrough';
+
+    const musicState = resolveAdaptiveMusicState({
+      atWar,
+      hasCrisis,
+      hasFoodDeficit: economy.population.hasFoodDeficit,
+      lowGold: worldState.cash < 80 && economy.goldNet < 0,
+      recentDiscovery,
+      goldNet: economy.goldNet,
+      populationGrowth: economy.population.projectedGrowth,
+      cityCount: kingdomState.cities.filter((c) => c.owner === 'player').length,
+    });
+    gameAudio.setMusicState(musicState);
+
+    let biome: AmbientBiome = 'forest';
+    if (climateWeather.id === 'storm') biome = 'storm';
+    else if (climateWeather.id === 'rain') biome = 'rain';
+    else if (dayPhase === 'night') biome = 'night';
+    else if (selectedTileAssetName === 'building-port' || selectedTileAssetName === 'building-dock') biome = 'port';
+    else if (selectedTileAssetName === 'building-mine' || selectedTileAssetName === 'building-smelter') biome = 'mining';
+    else if (selectedCity) biome = 'city';
+    else if (selectedTerrainInfo?.type === 'water') biome = 'water';
+    gameAudio.setAmbientBiome(biome);
+  }, [
+    climateWeather.id,
+    dayPhase,
+    economy.goldNet,
+    economy.population.hasFoodDeficit,
+    economy.population.projectedGrowth,
+    gameState,
+    kingdomState.activeEffects,
+    kingdomState.activeEvent?.kind,
+    kingdomState.cities,
+    kingdomState.diplomacyByFactionId,
+    kingdomState.factions,
+    selectedCity,
+    selectedTerrainInfo?.type,
+    selectedTileAssetName,
+    worldState.cash,
+  ]);
+
+  const handleUpdateAudioPrefs = useCallback(
+    (partial: Partial<GameAudioPreferences>) => {
+      gameAudio.updatePreferences(partial);
+    },
+    []
+  );
+
   const selectedBuildingLevel = useMemo(() => {
     if (!selectedHex) return 1;
     const tile = worldState.hexes[hexKey(selectedHex.q, selectedHex.r)];
@@ -1593,7 +1714,11 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   }, [kingdomState, selectedHex, selectedHexHasConstruction]);
 
   return (
-    <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-[#9bd2ee] hex-game-viewport">
+    <div
+      data-reduce-animations={audioPrefs.reduceAnimations ? 'true' : 'false'}
+      data-text-size={audioPrefs.textSize}
+      className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-[#9bd2ee] hex-game-viewport"
+    >
       {/* Isolated WebGL canvas mount container */}
       <div
         ref={canvasMountRef}
@@ -1646,6 +1771,8 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         activeBuildEffectiveCost={activeBuildEffectiveCost}
         assets={HEX_ASSETS}
         muted={muted}
+        audioPrefs={audioPrefs}
+        onUpdateAudioPrefs={handleUpdateAudioPrefs}
         dockOpen={dockOpen}
         buildSheetOpen={buildSheetOpen}
         toastMessage={toastMessage}
