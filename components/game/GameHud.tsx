@@ -2,6 +2,7 @@
 
 import { memo, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -55,8 +56,9 @@ import type {
   KingdomStageInfo,
   TurnProductionBreakdown,
 } from '@/lib/economy-engine';
-import type { ActiveKingdomEvent } from '@/lib/events-engine';
+import type { ActiveKingdomEvent, ActiveWorldEffect } from '@/lib/events-engine';
 import type { FactionState } from '@/lib/faction-engine';
+import type { ActiveConstruction } from '@/lib/kingdom-engine';
 import { UNIT_CATALOG, type UnitEntity, type UnitType } from '@/lib/military-engine';
 import { TECH_BY_ID, type TechId } from '@/lib/tech-engine';
 import { formatHexDisplayName } from '@/lib/world-domain';
@@ -73,6 +75,7 @@ export interface GameHudProps {
   stage: KingdomStageInfo;
   unlockedTechs: TechId[];
   activeEvent: ActiveKingdomEvent | null;
+  activeEffects: ActiveWorldEffect[];
   autoTurnEnabled: boolean;
   commandModeActive: boolean;
   selectedIndex: number;
@@ -80,6 +83,7 @@ export interface GameHudProps {
   selectedHex: AxialCoord | null;
   selectedHexOwned: boolean;
   selectedHexHasConstruction: boolean;
+  selectedHexConstruction: ActiveConstruction | null;
   selectedTileAssetName: string | null;
   selectedConquest: ConquestCheckResult | null;
   selectedTerrainInfo: TerrainDescriptor | null;
@@ -162,6 +166,7 @@ const GameHud = memo(function GameHud({
   stage,
   unlockedTechs,
   activeEvent,
+  activeEffects,
   autoTurnEnabled,
   commandModeActive,
   selectedIndex,
@@ -169,6 +174,7 @@ const GameHud = memo(function GameHud({
   selectedHex,
   selectedHexOwned,
   selectedHexHasConstruction,
+  selectedHexConstruction,
   selectedTileAssetName,
   selectedConquest,
   selectedTerrainInfo,
@@ -237,6 +243,7 @@ const GameHud = memo(function GameHud({
             asset.category === 'building' ||
             asset.name === 'dirt-lumber' ||
             asset.name === 'unit-mansion' ||
+            asset.name === 'unit-wall-tower' ||
             asset.name === 'bridge'
           );
         }
@@ -259,12 +266,14 @@ const GameHud = memo(function GameHud({
   const canRecruitHere = Boolean(
     selectedHexOwned &&
       selectedHexHasConstruction &&
+      !selectedHexConstruction &&
       selectedBuildingDef?.canRecruitUnits &&
       !selectedHexUnit
   );
   const recruitOptions: UnitType[] = useMemo(() => {
     if (!canRecruitHere || !selectedTileAssetName) return [];
     if (selectedTileAssetName === 'building-port') return ['warship'];
+    if (selectedTileAssetName === 'unit-wall-tower') return ['knight', 'infantry'];
     return ['infantry', 'archer', 'knight'];
   }, [canRecruitHere, selectedTileAssetName]);
 
@@ -463,6 +472,20 @@ const GameHud = memo(function GameHud({
                   <span data-testid="res-science">+{economy.scienceNet}</span>
                 </span>
               </button>
+
+              {activeEffects.length > 0 && (
+                <button
+                  type="button"
+                  data-testid="hud-active-effect-badge"
+                  onClick={() => onOpenKingdomModal('economy')}
+                  className="inline-flex items-center gap-1.5 bg-amber-100 border-2 border-amber-600 rounded-lg px-2 py-1 text-[11px] font-bold text-amber-950 shadow-[0_2px_0_#92400e] cursor-pointer"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" aria-hidden="true" />
+                  <span>
+                    {activeEffects[0].titlePt} ({activeEffects[0].turnsRemaining}t)
+                  </span>
+                </button>
+              )}
             </div>
 
             {/* Top-Right: Turn Advance + Kingdom Drawer + Utility */}
@@ -658,11 +681,19 @@ const GameHud = memo(function GameHud({
                           </p>
                         </div>
 
-                        {selectedHexHasConstruction && selectedBuildingDef && (
+                        {selectedHexConstruction ? (
+                          <p
+                            data-testid="mobile-construction-status"
+                            className="text-[11px] font-bold text-amber-800 mt-0.5"
+                          >
+                            Em construção (faltam {selectedHexConstruction.turnsRemaining}/
+                            {selectedHexConstruction.totalTurns} turnos)
+                          </p>
+                        ) : selectedHexHasConstruction && selectedBuildingDef ? (
                           <p className="text-[11px] font-medium text-[#3c3426] mt-0.5">
                             {selectedBuildingDef.summaryPt}
                           </p>
-                        )}
+                        ) : null}
 
                         {selectedTerrainInfo && (
                           <p
@@ -689,9 +720,11 @@ const GameHud = memo(function GameHud({
 
                         <p className="text-[11px] font-medium text-[#5c5140] mt-0.5">
                           {selectedConquest.owner === 'player'
-                            ? selectedHexHasConstruction
-                              ? 'Seu território · Possui construção'
-                              : 'Seu território · Livre para construir'
+                            ? selectedHexConstruction
+                              ? 'Obra em andamento · Aguardando conclusão'
+                              : selectedHexHasConstruction
+                                ? 'Seu território · Possui construção'
+                                : 'Seu território · Livre para construir'
                             : selectedHexFaction
                               ? `${selectedHexFaction.namePt} (${
                                   selectedHexFaction.relation === 'hostile'
@@ -1128,7 +1161,7 @@ const GameHud = memo(function GameHud({
                           >
                             {techLocked && bDef.requiredTech
                               ? `Req. ${TECH_BY_ID[bDef.requiredTech].namePt}`
-                              : formatCompactCost(bDef.buildCost, asset.price)}
+                              : `${formatCompactCost(bDef.buildCost, asset.price)} · ${bDef.buildTimeTurns}t`}
                           </span>
                         </button>
                       );
@@ -1166,11 +1199,19 @@ const GameHud = memo(function GameHud({
                     <p className="text-xs font-bold text-[#1f1a12]">
                       {selectedBuildingLabel}
                     </p>
-                    {selectedHexHasConstruction && selectedBuildingDef && (
+                    {selectedHexConstruction ? (
+                      <span
+                        data-testid="desktop-construction-status"
+                        className="text-[11px] font-bold text-amber-800"
+                      >
+                        · Em construção (faltam {selectedHexConstruction.turnsRemaining}/
+                        {selectedHexConstruction.totalTurns} turnos)
+                      </span>
+                    ) : selectedHexHasConstruction && selectedBuildingDef ? (
                       <span className="text-[11px] font-medium text-[#5c5140]">
                         · {selectedBuildingDef.summaryPt}
                       </span>
-                    )}
+                    ) : null}
                   </div>
 
                   {selectedTerrainInfo && (
@@ -1193,9 +1234,11 @@ const GameHud = memo(function GameHud({
 
                   <p className="text-[11px] text-[#5c5140] mt-0.5">
                     {selectedConquest.owner === 'player'
-                      ? selectedHexHasConstruction
-                        ? 'Seu território · Já possui uma construção.'
-                        : 'Seu território · Livre para construir.'
+                      ? selectedHexConstruction
+                        ? 'Obra em andamento · Produzirá após a conclusão.'
+                        : selectedHexHasConstruction
+                          ? 'Seu território · Já possui uma construção.'
+                          : 'Seu território · Livre para construir.'
                       : selectedHexFaction
                         ? `${selectedHexFaction.namePt} · Relação: ${
                             selectedHexFaction.relation === 'hostile'
@@ -1369,7 +1412,7 @@ const GameHud = memo(function GameHud({
                     >
                       {activeTechLocked && activePieceDef.requiredTech
                         ? `Requer ${TECH_BY_ID[activePieceDef.requiredTech].namePt}`
-                        : formatCompactCost(activeBuildEffectiveCost, activeAsset.price)}
+                        : `${formatCompactCost(activeBuildEffectiveCost, activeAsset.price)} · ${activePieceDef.buildTimeTurns}t`}
                       {activePieceInfo.requiredTerrain
                         ? ` · Só ${TERRAIN_METADATA[activePieceInfo.requiredTerrain].labelPt}`
                         : ''}
@@ -1601,7 +1644,7 @@ const GameHud = memo(function GameHud({
                           >
                             {techLocked && bDef.requiredTech
                               ? `Req. ${TECH_BY_ID[bDef.requiredTech].namePt}`
-                              : formatCompactCost(bDef.buildCost, asset.price)}
+                              : `${formatCompactCost(bDef.buildCost, asset.price)} · ${bDef.buildTimeTurns}t`}
                           </span>
                         </button>
                       );

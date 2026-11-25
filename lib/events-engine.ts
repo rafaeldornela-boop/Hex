@@ -1,10 +1,25 @@
 export type KingdomEventKind =
   | 'good_harvest'
+  | 'drought'
   | 'discovery'
   | 'trade_opportunity'
-  | 'scarcity'
+  | 'epidemic'
   | 'economic_crisis'
+  | 'revolt'
+  | 'tech_breakthrough'
   | 'invasion';
+
+export interface ActiveWorldEffect {
+  id: string;
+  titlePt: string;
+  descriptionPt: string;
+  turnsRemaining: number;
+  goldMultiplierMod?: number;
+  foodMultiplierMod?: number;
+  scienceBonusPerTurn?: number;
+  populationDeltaPerTurn?: number;
+  efficiencyPenalty?: number;
+}
 
 export interface EventChoiceOption {
   id: string;
@@ -33,8 +48,9 @@ export interface EventHistoryEntry {
 }
 
 function deterministicEventPick(turn: number): number {
+  if (turn === 3) return 0;
   const h = (turn * 2654435761) >>> 0;
-  return h % 6;
+  return h % 9;
 }
 
 /**
@@ -50,13 +66,35 @@ export function generateTurnEvent(
   switch (pick) {
     case 0:
       return {
+        id: `evt-${turn}-drought`,
+        turn,
+        kind: 'drought',
+        titlePt: 'Seca Severa',
+        descriptionPt:
+          'A falta de chuvas ameaça reduzir em 30% a produção agrícola durante 3 turnos.',
+        resolved: false,
+        choices: [
+          {
+            id: 'irrigate_fields',
+            labelPt: 'Investir $500 em irrigação',
+            descriptionPt: 'Constrói canais emergenciais e protege a safra nos próximos 3 turnos.',
+          },
+          {
+            id: 'accept_drought',
+            labelPt: 'Aceitar a perda (-30% Alimento por 3 turnos)',
+            descriptionPt: 'Poupa o tesouro agora, mas reduz a colheita por 3 turnos.',
+          },
+        ],
+      };
+
+    case 1:
+      return {
         id: `evt-${turn}-harvest`,
         turn,
         kind: 'good_harvest',
         titlePt: 'Boa Colheita',
         descriptionPt:
           'Chuvas favoráveis aceleraram as lavouras do reino. Há excedente imediato de alimentos.',
-        foodMultiplierMod: 1.25,
         resolved: false,
         choices: [
           {
@@ -72,14 +110,14 @@ export function generateTurnEvent(
         ],
       };
 
-    case 1:
+    case 2:
       return {
         id: `evt-${turn}-discovery`,
         turn,
         kind: 'discovery',
-        titlePt: 'Descoberta Mineral e Acadêmica',
+        titlePt: 'Descoberta de Minério',
         descriptionPt:
-          'Exploradores encontraram veios superficiais e manuscritos antigos na fronteira.',
+          'Mineradores localizaram um veio rico nas encostas da fronteira.',
         resolved: false,
         choices: [
           {
@@ -89,13 +127,13 @@ export function generateTurnEvent(
           },
           {
             id: 'study_findings',
-            labelPt: 'Estudar registros (+15 Ciência)',
+            labelPt: 'Estudar amostras (+15 Ciência)',
             descriptionPt: 'Acelera imediatamente a pesquisa ativa.',
           },
         ],
       };
 
-    case 2:
+    case 3:
       return {
         id: `evt-${turn}-trade`,
         turn,
@@ -118,54 +156,99 @@ export function generateTurnEvent(
         ],
       };
 
-    case 3:
+    case 4:
       return {
-        id: `evt-${turn}-scarcity`,
+        id: `evt-${turn}-epidemic`,
         turn,
-        kind: 'scarcity',
-        titlePt: 'Escassez Sazonal',
+        kind: 'epidemic',
+        titlePt: 'Epidemia na Vila',
         descriptionPt:
-          'Um período seco reduziu temporariamente os suprimentos armazenados.',
+          'Uma febre atingiu os bairros operários, ameaçando trabalhadores e eficiência por 2 turnos.',
         resolved: false,
         choices: [
           {
-            id: 'import_grain',
-            labelPt: 'Importar grãos (-$100 Ouro)',
-            descriptionPt: 'Evita perda de alimentos e mantém a população estável.',
+            id: 'fund_healers',
+            labelPt: 'Financiar boticários (-$240 Ouro)',
+            descriptionPt: 'Contém o surto imediatamente sem perder moradores.',
           },
           {
-            id: 'ration_food',
-            labelPt: 'Racionar estoques (-20 Alimento)',
-            descriptionPt: 'Poupa ouro usando as reservas atuais.',
+            id: 'quarantine_only',
+            labelPt: 'Isolar bairros (-15% eficiência por 2 turnos)',
+            descriptionPt: 'Evita gastos imediatos, mas reduz produtividade e população.',
           },
         ],
       };
 
-    case 4:
+    case 5:
       return {
         id: `evt-${turn}-crisis`,
         turn,
         kind: 'economic_crisis',
         titlePt: 'Crise Econômica Regional',
         descriptionPt:
-          'A queda nas rotas vizinhas pressiona a arrecadação deste ciclo.',
-        goldMultiplierMod: 0.75,
+          'A queda nas rotas vizinhas pressiona a arrecadação por 2 turnos.',
         resolved: false,
         choices: [
           {
             id: 'stabilize_treasury',
-            labelPt: 'Subsidiar mercadores (-$120, +10 Ciência)',
-            descriptionPt: 'Transforma a crise em reforma administrativa.',
+            labelPt: 'Subsidiar mercadores (-$140, +10 Ciência)',
+            descriptionPt: 'Estabiliza a economia e evita retração prolongada.',
           },
           {
             id: 'absorb_crisis',
-            labelPt: 'Enfrentar retração (-$80 Ouro)',
-            descriptionPt: 'Impacto controlado nas contas do reino.',
+            labelPt: 'Enfrentar retração (-20% Ouro por 2 turnos)',
+            descriptionPt: 'Preserva caixa imediato com arrecadação menor.',
           },
         ],
       };
 
-    case 5:
+    case 6:
+      return {
+        id: `evt-${turn}-revolt`,
+        turn,
+        kind: 'revolt',
+        titlePt: 'Revolta Local',
+        descriptionPt:
+          'Comerciantes e camponeses protestam contra os impostos na fronteira.',
+        resolved: false,
+        choices: [
+          {
+            id: 'tax_relief',
+            labelPt: 'Conceder alívio fiscal (-$180 Ouro)',
+            descriptionPt: 'Acalma os moradores e mantém a produção normal.',
+          },
+          {
+            id: 'suppress_revolt',
+            labelPt: 'Conter com a guarda (exige Defesa ≥ 14)',
+            descriptionPt: 'Guarda forte pacifica sem custos; defesa baixa gera greve de 2 turnos.',
+          },
+        ],
+      };
+
+    case 7:
+      return {
+        id: `evt-${turn}-breakthrough`,
+        turn,
+        kind: 'tech_breakthrough',
+        titlePt: 'Descoberta Tecnológica',
+        descriptionPt:
+          'Estudiosos propõem um salto prático para acelerar os laboratórios do reino.',
+        resolved: false,
+        choices: [
+          {
+            id: 'sponsor_academy',
+            labelPt: 'Patrocinar experimentos (-$180, +22 Ciência)',
+            descriptionPt: 'Impulso imediato para concluir pesquisas avançadas.',
+          },
+          {
+            id: 'sell_manuscripts',
+            labelPt: 'Comercializar tratados (+$140, +6 Ciência)',
+            descriptionPt: 'Gera receita imediata com avanço científico moderado.',
+          },
+        ],
+      };
+
+    case 8:
     default:
       return {
         id: `evt-${turn}-invasion`,

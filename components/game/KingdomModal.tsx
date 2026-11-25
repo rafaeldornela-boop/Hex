@@ -2,30 +2,36 @@
 
 import { useState } from 'react';
 import {
+  AlertTriangle,
   Check,
   Coins,
   FlaskConical,
+  Hammer,
   Handshake,
   Lock,
+  Scale,
   Shield,
   Sparkles,
   Swords,
   Users,
   X,
 } from 'lucide-react';
+import { getBuildingDefinition } from '@/lib/buildings-catalog';
 import type { TurnProductionBreakdown, KingdomStageInfo } from '@/lib/economy-engine';
 import { countFactionTerritory } from '@/lib/faction-engine';
 import type { KingdomState } from '@/lib/kingdom-engine';
 import { UNIT_CATALOG, type UnitEntity } from '@/lib/military-engine';
 import { TECH_BY_ID, TECH_TREE, canStartResearch, type TechId } from '@/lib/tech-engine';
+import type { MarketSummary, TradableResource } from '@/lib/trade-engine';
 
-export type KingdomModalTab = 'economy' | 'research' | 'military' | 'diplomacy';
+export type KingdomModalTab = 'economy' | 'trade' | 'research' | 'military' | 'diplomacy';
 
 export interface KingdomModalProps {
   open: boolean;
   initialTab?: KingdomModalTab;
   kingdomState: KingdomState;
   economy: TurnProductionBreakdown;
+  market: MarketSummary;
   stage: KingdomStageInfo;
   militaryPower: {
     attackPower: number;
@@ -37,6 +43,7 @@ export interface KingdomModalProps {
   onSelectTech: (techId: TechId) => void;
   onResolveEvent: (choiceId: string) => void;
   onDiplomacy: (factionId: string, action: 'truce' | 'trade_pact' | 'war') => void;
+  onTrade: (resource: TradableResource, action: 'buy' | 'sell', quantity: number) => void;
   onFocusUnit: (unit: UnitEntity) => void;
 }
 
@@ -53,12 +60,14 @@ export default function KingdomModal({
   initialTab = 'economy',
   kingdomState,
   economy,
+  market,
   stage,
   militaryPower,
   onClose,
   onSelectTech,
   onResolveEvent,
   onDiplomacy,
+  onTrade,
   onFocusUnit,
 }: KingdomModalProps) {
   const [activeTab, setActiveTab] = useState<KingdomModalTab>(initialTab);
@@ -84,6 +93,7 @@ export default function KingdomModal({
 
   const tabs: Array<{ id: KingdomModalTab; label: string; alert?: boolean }> = [
     { id: 'economy', label: 'Economia' },
+    { id: 'trade', label: 'Comércio' },
     { id: 'research', label: 'Pesquisa' },
     { id: 'military', label: 'Exército' },
     {
@@ -211,7 +221,73 @@ export default function KingdomModal({
                     </p>
                   </div>
                 </div>
+
+                <p
+                  className={`text-xs font-medium ${
+                    economy.population.efficiency < 0.99 ? 'text-amber-800' : 'text-[#5c5140]'
+                  }`}
+                >
+                  {economy.population.efficiencyReasonPt}
+                </p>
               </section>
+
+              {/* Active Multi-Turn Effects */}
+              {kingdomState.activeEffects.length > 0 && (
+                <section
+                  data-testid="active-effects-card"
+                  className="bg-amber-50 border border-amber-400 rounded-xl p-3.5 space-y-2"
+                >
+                  <h3 className="font-display text-sm font-bold text-amber-950 flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-700" aria-hidden="true" />
+                    Efeitos Mundiais Ativos
+                  </h3>
+                  <div className="space-y-1.5 text-xs">
+                    {kingdomState.activeEffects.map((eff) => (
+                      <div
+                        key={eff.id}
+                        className="flex items-center justify-between gap-2 bg-white/80 border border-amber-200 rounded-lg px-3 py-2"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-bold text-[#1f1a12]">{eff.titlePt}</p>
+                          <p className="text-[11px] text-[#5c5140]">{eff.descriptionPt}</p>
+                        </div>
+                        <span className="px-2 py-1 rounded-md bg-amber-200/80 text-amber-950 text-[11px] font-bold whitespace-nowrap tabular-nums">
+                          {eff.turnsRemaining} {eff.turnsRemaining === 1 ? 'turno' : 'turnos'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {/* Active Multi-Turn Constructions Queue */}
+              {kingdomState.constructions.length > 0 && (
+                <section
+                  data-testid="active-constructions-card"
+                  className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 space-y-2"
+                >
+                  <h3 className="font-display text-sm font-bold text-[#1f1a12] flex items-center gap-1.5">
+                    <Hammer className="w-4 h-4 text-amber-700" aria-hidden="true" />
+                    Obras em Andamento ({kingdomState.constructions.length})
+                  </h3>
+                  <div className="space-y-1.5 text-xs">
+                    {kingdomState.constructions.map((c) => {
+                      const def = getBuildingDefinition(c.assetName);
+                      return (
+                        <div
+                          key={`${c.q},${c.r}`}
+                          className="flex items-center justify-between gap-2 bg-[#f7f2e6] rounded-lg px-3 py-2"
+                        >
+                          <span className="font-bold text-[#1f1a12]">{def.labelPt}</span>
+                          <span className="text-[11px] font-bold text-amber-800 tabular-nums">
+                            Faltam {c.turnsRemaining}/{c.totalTurns} turnos
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
 
               {/* Treasury & Resources Table */}
               <section className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 space-y-2.5">
@@ -309,6 +385,107 @@ export default function KingdomModal({
                   </div>
                 </div>
               </section>
+            </div>
+          )}
+
+          {activeTab === 'trade' && (
+            <div className="space-y-4">
+              <section className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="font-display text-sm font-bold text-[#1f1a12] flex items-center gap-1.5">
+                    <Scale className="w-4 h-4 text-amber-700" aria-hidden="true" />
+                    Mercado Real de Recursos
+                  </h3>
+                  <p className="text-xs text-[#5c5140] mt-0.5">
+                    Preços variam conforme excedente, escassez, mercados, portos e acordos.
+                  </p>
+                </div>
+                <div className="text-right tabular-nums">
+                  <p className="text-[11px] font-bold text-emerald-800">
+                    Bônus Comercial: +{market.tradeBonusPercent}%
+                  </p>
+                  <p className="text-[11px] text-[#5c5140]">
+                    Mercados/Portos ativos: {market.marketCount}
+                  </p>
+                </div>
+              </section>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {market.quotes.map((quote) => {
+                  const statusClass =
+                    quote.condition === 'excedente'
+                      ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                      : quote.condition === 'escassez'
+                        ? 'bg-rose-100 text-rose-900 border-rose-300'
+                        : 'bg-[#f4efe4] text-[#3c3426] border-[#d9ceb8]';
+                  const buyLot = Math.max(1, Math.min(10, quote.cap - quote.stock));
+                  const sellLot = Math.max(1, Math.min(10, quote.stock));
+                  const canBuy =
+                    quote.stock < quote.cap &&
+                    kingdomState.worldState.cash >= buyLot * quote.buyPricePerUnit;
+                  const canSell = quote.stock > 0;
+
+                  return (
+                    <div
+                      key={quote.resource}
+                      data-testid={`trade-card-${quote.resource}`}
+                      className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 space-y-2.5 tabular-nums"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="font-display text-sm font-bold text-[#1f1a12]">
+                            {quote.labelPt}
+                          </p>
+                          <p className="text-[11px] text-[#5c5140]">
+                            Estoque: {quote.stock}/{quote.cap} ({formatSigned(quote.netPerTurn)}/t)
+                          </p>
+                        </div>
+                        <span
+                          className={`px-2 py-0.5 rounded-md border text-[10px] font-bold uppercase ${statusClass}`}
+                        >
+                          {quote.conditionLabelPt}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs bg-[#f7f2e6] rounded-lg px-2.5 py-1.5">
+                        <span className="text-[#5c5140]">
+                          Compra: <strong className="text-[#1f1a12]">${quote.buyPricePerUnit}/un</strong>
+                        </span>
+                        <span className="text-[#5c5140]">
+                          Venda: <strong className="text-emerald-800">${quote.sellPricePerUnit}/un</strong>
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          data-testid={`trade-buy-${quote.resource}`}
+                          onClick={() => onTrade(quote.resource, 'buy', 10)}
+                          className={`min-h-[42px] px-2.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                            canBuy
+                              ? 'bg-emerald-700 text-white hover:bg-emerald-800'
+                              : 'bg-[#efe8d8] text-[#6e604a] border border-[#c8ba9f]'
+                          }`}
+                        >
+                          +{buyLot} (${buyLot * quote.buyPricePerUnit})
+                        </button>
+                        <button
+                          type="button"
+                          data-testid={`trade-sell-${quote.resource}`}
+                          onClick={() => onTrade(quote.resource, 'sell', 10)}
+                          className={`min-h-[42px] px-2.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                            canSell
+                              ? 'bg-[#2a2319] text-[#fcf9f2] hover:bg-[#1f1a12]'
+                              : 'bg-[#efe8d8] text-[#6e604a] border border-[#c8ba9f]'
+                          }`}
+                        >
+                          -{sellLot} (+${sellLot * quote.sellPricePerUnit})
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -600,6 +777,9 @@ export default function KingdomModal({
                     kingdomState.worldState,
                     faction.id
                   );
+                  const factionUnits = kingdomState.units.filter(
+                    (u) => u.owner === faction.id && u.hp > 0
+                  ).length;
                   const relationLabel =
                     faction.relation === 'hostile'
                       ? 'Hostil'
@@ -626,7 +806,11 @@ export default function KingdomModal({
                               {faction.namePt}
                             </p>
                             <p className="text-[11px] text-[#5c5140] tabular-nums">
-                              {tiles} territórios · Relação: {relationLabel}
+                              {tiles} territórios · {faction.population} hab · {factionUnits}{' '}
+                              {factionUnits === 1 ? 'tropa' : 'tropas'} · {faction.unlockedTechs.length} techs
+                            </p>
+                            <p className="text-[11px] font-semibold text-[#3c3426] tabular-nums">
+                              Tesouro {formatCash(faction.cash)} · Relação: {relationLabel}
                             </p>
                           </div>
                         </div>

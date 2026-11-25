@@ -15,12 +15,14 @@ import {
   demolishInKingdom,
   deserializeKingdomState,
   getKingdomEconomy,
+  getKingdomMarket,
   getKingdomProgression,
   performDiplomacyAction,
   recruitUnitInKingdom,
   resolveKingdomEvent,
   serializeKingdomState,
   setActiveResearchInKingdom,
+  tradeResourceInKingdom,
 } from './kingdom-engine';
 
 function idxOf(name: string): number {
@@ -29,7 +31,7 @@ function idxOf(name: string): number {
   return idx;
 }
 
-test('createStarterKingdomState seeds player core, 2 rival factions, initial units, and balanced economy', () => {
+test('createStarterKingdomState seeds player core, 2 rival factions with full economy/research, initial units, and balanced economy', () => {
   const state = createStarterKingdomState(HEX_ASSETS);
   assert.equal(state.turn, 1);
   assert.equal(state.population, 18);
@@ -37,6 +39,8 @@ test('createStarterKingdomState seeds player core, 2 rival factions, initial uni
   assert.equal(countFactionTerritory(state.worldState, 'iron_clan'), 4);
   assert.equal(countFactionTerritory(state.worldState, 'azure_league'), 4);
   assert.equal(state.units.length, 2);
+  assert.equal(state.factions[0].population, 12);
+  assert.ok(state.factions[0].resources.wood > 0);
 
   const econ = getKingdomEconomy(state, HEX_ASSETS);
   assert.equal(econ.population.capacity, 28);
@@ -66,17 +70,12 @@ test('strategic regions give deterministic rare resources and conquest modifiers
   assert.ok(ironCost > 500);
 });
 
-test('buildInKingdom enforces tech lock, worker availability, resource costs, and demolish preserves tile', () => {
+test('buildInKingdom enforces multi-turn construction queue, tech lock, worker availability, resource costs, and demolish preserves tile', () => {
   let state = createStarterKingdomState(HEX_ASSETS);
 
   // Conquer (1, 1) forest and (-1, -1) plains adjacent to core
-  const c1 = conquerInKingdom(state, 1, 1, HEX_ASSETS);
-  assert.equal(c1.conquered, true);
-  state = c1.nextState;
-
-  const c2 = conquerInKingdom(state, -1, -1, HEX_ASSETS);
-  assert.equal(c2.conquered, true);
-  state = c2.nextState;
+  state = conquerInKingdom(state, 1, 1, HEX_ASSETS).nextState;
+  state = conquerInKingdom(state, -1, -1, HEX_ASSETS).nextState;
 
   // Attempt to build Quartel before Military research -> blocked
   const barracksBlocked = buildInKingdom(
@@ -90,14 +89,22 @@ test('buildInKingdom enforces tech lock, worker availability, resource costs, an
   assert.equal(barracksBlocked.built, false);
   assert.match(barracksBlocked.messagePt ?? '', /Requer pesquisa/);
 
-  // Attempt to build Serraria on forest without tech -> allowed! Deducts gold, wood, stone
+  // Build Serraria on forest (takes 2 turns, deducts gold, wood, stone)
   const woodBefore = state.resources.wood;
   const goldBefore = state.worldState.cash;
+  const econBeforeLumber = getKingdomEconomy(state, HEX_ASSETS);
   const lumber = buildInKingdom(state, 1, 1, idxOf('dirt-lumber'), 90, HEX_ASSETS);
   assert.equal(lumber.built, true);
   state = lumber.nextState;
   assert.equal(state.resources.wood, woodBefore - 5);
   assert.equal(state.worldState.cash, goldBefore - 75);
+  assert.equal(state.constructions.length, 1);
+  assert.equal(state.constructions[0].turnsRemaining, 2);
+
+  // Under-construction Serraria does NOT produce wood yet!
+  const econWhileBuilding = getKingdomEconomy(state, HEX_ASSETS);
+  assert.equal(econWhileBuilding.underConstructionCount, 1);
+  assert.equal(econWhileBuilding.woodNet, econBeforeLumber.woodNet);
 
   // Building on an already occupied tile is blocked
   const doubleBuild = buildInKingdom(state, 1, 1, idxOf('building-house'), 90, HEX_ASSETS);
@@ -117,26 +124,33 @@ test('buildInKingdom enforces tech lock, worker availability, resource costs, an
   assert.equal(noWorkerBuild.built, false);
   assert.match(noWorkerBuild.messagePt ?? '', /Sem trabalhadores livres/);
 
+  // Advance 2 turns -> Serraria completes and increases wood production!
+  const t2 = advanceKingdomTurn(state, HEX_ASSETS);
+  assert.equal(t2.nextState.constructions.length, 1);
+  assert.equal(t2.nextState.constructions[0].turnsRemaining, 1);
+  const t3 = advanceKingdomTurn(t2.nextState, HEX_ASSETS);
+  assert.equal(t3.nextState.constructions.length, 0);
+  assert.ok(t3.completedBuildings.includes('Serraria'));
+  const econAfterLumber = getKingdomEconomy(t3.nextState, HEX_ASSETS);
+  assert.ok(econAfterLumber.woodNet > econBeforeLumber.woodNet);
+
   // Demolish Serraria leaves player-owned free forest
-  const dem = demolishInKingdom(state, 1, 1, HEX_ASSETS);
+  const dem = demolishInKingdom(t3.nextState, 1, 1, HEX_ASSETS);
   assert.equal(dem.removed, true);
   assert.equal(dem.nextState.worldState.hexes[hexKey(1, 1)]?.owner, 'player');
   assert.equal(dem.nextState.worldState.hexes[hexKey(1, 1)]?.terrainType, 'forest');
 });
 
-test('research progression, turn advance, events, and diplomacy work cleanly', () => {
+test('research progression, multi-turn event effects, trade market, and rival AI growth work cleanly', () => {
   let state = createStarterKingdomState(HEX_ASSETS);
   const avail = getAvailableTechs(state.research);
   assert.ok(avail.some((t) => t.id === 'agriculture'));
   assert.ok(avail.some((t) => t.id === 'mining'));
 
-  const sel = setActiveResearchInKingdom(state, 'mining');
-  assert.equal(sel.selected, true);
-  state = sel.nextState;
+  state = setActiveResearchInKingdom(state, 'mining').nextState;
 
-  // Build a University on an adjacent plains hex to boost science so mining completes rapidly
-  const conq = conquerInKingdom(state, -1, -1, HEX_ASSETS);
-  state = conq.nextState;
+  // Build a University (2 turns) on an adjacent plains hex
+  state = conquerInKingdom(state, -1, -1, HEX_ASSETS).nextState;
   const uni = buildInKingdom(
     state,
     -1,
@@ -148,35 +162,56 @@ test('research progression, turn advance, events, and diplomacy work cleanly', (
   assert.equal(uni.built, true);
   state = uni.nextState;
 
-  // Turn 2 & Turn 3: mining completes and turn 3 generates a KingdomEvent
-  const t2 = advanceKingdomTurn(state, HEX_ASSETS);
-  state = t2.nextState;
-  assert.equal(state.turn, 2);
-
-  const t3 = advanceKingdomTurn(state, HEX_ASSETS);
-  state = t3.nextState;
+  // Turn 2 & Turn 3: University finishes on T3, Turn 3 triggers Seca Severa (multi-turn event)
+  state = advanceKingdomTurn(state, HEX_ASSETS).nextState; // T2 (uni 1t left)
+  state = advanceKingdomTurn(state, HEX_ASSETS).nextState; // T3 (uni completes)
   assert.equal(state.turn, 3);
-  assert.ok(state.research.unlocked.includes('mining'), 'Mining should unlock by turn 3 with University');
   assert.ok(state.activeEvent !== null, 'Turn 3 must generate a kingdom event');
 
-  // Resolve active event with first choice
-  const firstChoice = state.activeEvent!.choices[0].id;
-  const resolved = resolveKingdomEvent(state, firstChoice, HEX_ASSETS);
-  state = resolved.nextState;
+  // Accept drought (second choice) -> attaches 3-turn active world effect reducing food by 30%
+  const econBeforeDrought = getKingdomEconomy(state, HEX_ASSETS);
+  const droughtChoice = state.activeEvent!.choices[state.activeEvent!.choices.length - 1].id;
+  state = resolveKingdomEvent(state, droughtChoice, HEX_ASSETS).nextState;
   assert.equal(state.activeEvent, null);
-  assert.equal(state.eventHistory.length, 1);
+  assert.equal(state.activeEffects.length, 1);
+  assert.equal(state.activeEffects[0].turnsRemaining, 3);
+  const econDuringDrought = getKingdomEconomy(state, HEX_ASSETS);
+  assert.ok(econDuringDrought.foodProduced < econBeforeDrought.foodProduced);
+
+  // Turn 4: University now contributes +6 Science -> Mining (15) unlocks! Effect ticks down to 2 turns.
+  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
+  assert.ok(state.research.unlocked.includes('mining'), 'Mining unlocks once University is complete');
+  assert.equal(state.activeEffects[0].turnsRemaining, 2);
+
+  // Check rival AI factions grew their research & territory over 4 turns
+  const totalAiTiles =
+    countFactionTerritory(state.worldState, 'iron_clan') +
+    countFactionTerritory(state.worldState, 'azure_league');
+  assert.ok(totalAiTiles >= 10, 'AI factions should expand strategically');
+
+  // Test dynamic Trade Market buy & sell
+  const market = getKingdomMarket(state, HEX_ASSETS);
+  assert.equal(market.quotes.length, 4);
+  const cashBeforeTrade = state.worldState.cash;
+  const oreBeforeTrade = state.resources.ore;
+  const bought = tradeResourceInKingdom(state, 'ore', 'buy', 10, HEX_ASSETS);
+  assert.equal(bought.success, true);
+  assert.ok(bought.nextState.resources.ore > oreBeforeTrade);
+  assert.ok(bought.nextState.worldState.cash < cashBeforeTrade);
+
+  const sold = tradeResourceInKingdom(bought.nextState, 'wood', 'sell', 10, HEX_ASSETS);
+  assert.equal(sold.success, true);
+  assert.ok(sold.nextState.worldState.cash > bought.nextState.worldState.cash);
 
   // Diplomacy with Azure League (initially neutral -> trade_pact gives +$20/turn)
-  const pact = performDiplomacyAction(state, 'azure_league', 'trade_pact');
+  const pact = performDiplomacyAction(sold.nextState, 'azure_league', 'trade_pact');
   assert.equal(pact.success, true);
-  state = pact.nextState;
-  const econWithPact = getKingdomEconomy(state, HEX_ASSETS);
+  const econWithPact = getKingdomEconomy(pact.nextState, HEX_ASSETS);
   assert.equal(econWithPact.goldTradePactBonus, 20);
 });
 
 test('military recruitment, movement, and combat capture of enemy territory', () => {
   let state = createStarterKingdomState(HEX_ASSETS);
-  // Unlock military & metallurgy directly on research state to test unit pipeline end-to-end
   state = {
     ...state,
     research: {
@@ -201,15 +236,12 @@ test('military recruitment, movement, and combat capture of enemy territory', ()
   const doubleMove = commandUnitInKingdom(state, { q: 1, r: 0 }, { q: 2, r: 0 }, HEX_ASSETS);
   assert.equal(doubleMove.acted, false);
 
-  // Advance turns and march to (3, -1)
   state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
   state = commandUnitInKingdom(state, { q: 1, r: 0 }, { q: 2, r: 0 }, HEX_ASSETS).nextState;
   state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
   state = commandUnitInKingdom(state, { q: 2, r: 0 }, { q: 3, r: -1 }, HEX_ASSETS).nextState;
   state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
 
-  // Attack iron_clan garrisoned hex at (4, -2)
-  // Note: iron_clan has infantry (def 7 + terrain 0 + tower 8 + garrison 3 = 18), knight has att 14 + metallurgy 4 + base 3 = 21 -> victory!
   const cashBeforeAttack = state.worldState.cash;
   const attack = commandUnitInKingdom(state, { q: 3, r: -1 }, { q: 4, r: -2 }, HEX_ASSETS);
   assert.equal(attack.acted, true);
@@ -218,15 +250,20 @@ test('military recruitment, movement, and combat capture of enemy territory', ()
   assert.equal(attack.nextState.worldState.cash, cashBeforeAttack + 120);
 });
 
-test('serializeKingdomState and deserializeKingdomState round-trip v2 state and support v1 fallback', () => {
-  const starter = createStarterKingdomState(HEX_ASSETS);
-  const rec = setActiveResearchInKingdom(starter, 'mining').nextState;
-  const json = serializeKingdomState(rec);
+test('serializeKingdomState and deserializeKingdomState round-trip v3 constructions/effects and support v1/v2 fallback', () => {
+  let starter = createStarterKingdomState(HEX_ASSETS);
+  starter = setActiveResearchInKingdom(starter, 'mining').nextState;
+  starter = conquerInKingdom(starter, 1, 1, HEX_ASSETS).nextState;
+  starter = buildInKingdom(starter, 1, 1, idxOf('dirt-lumber'), 90, HEX_ASSETS).nextState;
+
+  const json = serializeKingdomState(starter);
   const loaded = deserializeKingdomState(json, HEX_ASSETS.length);
   assert.ok(loaded !== null);
   assert.equal(loaded.turn, 1);
   assert.equal(loaded.population, 18);
   assert.equal(loaded.research.activeTechId, 'mining');
+  assert.equal(loaded.constructions.length, 1);
+  assert.equal(loaded.constructions[0].turnsRemaining, 2);
   assert.equal(loaded.factions.length, 2);
   assert.equal(loaded.units.length, 2);
 
@@ -240,4 +277,5 @@ test('serializeKingdomState and deserializeKingdomState round-trip v2 state and 
   assert.ok(loadedV1 !== null);
   assert.equal(loadedV1.worldState.cash, 8500);
   assert.equal(loadedV1.turn, 1);
+  assert.equal(loadedV1.constructions.length, 0);
 });

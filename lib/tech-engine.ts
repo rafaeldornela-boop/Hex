@@ -87,9 +87,9 @@ export const TECH_TREE: readonly TechDefinition[] = [
     descriptionPt: 'Forjas avançadas para armaduras e armamentos pesados.',
     costScience: 28,
     prerequisites: ['mining', 'military'],
-    unlocksBuildings: [],
+    unlocksBuildings: ['unit-wall-tower'],
     unlocksUnits: ['knight'],
-    effectsSummaryPt: '+4 Ataque/Defesa militar · +30% Minério · Libera Cavaleiro',
+    effectsSummaryPt: '+4 Ataque/Defesa militar · +30% Minério · Libera Bastião e Cavaleiro',
     tier: 3,
   },
   {
@@ -134,6 +134,22 @@ export function canStartResearch(research: ResearchState, techId: TechId): boole
 
 export function getAvailableTechs(research: ResearchState): TechDefinition[] {
   return TECH_TREE.filter((t) => canStartResearch(research, t.id));
+}
+
+export function nextRecommendedTech(
+  research: ResearchState,
+  personality: 'expansionist' | 'mercantile'
+): TechId | null {
+  const priorityOrder: TechId[] =
+    personality === 'expansionist'
+      ? ['mining', 'military', 'metallurgy', 'agriculture', 'construction', 'engineering', 'trade']
+      : ['agriculture', 'trade', 'construction', 'mining', 'engineering', 'military', 'metallurgy'];
+
+  const available = new Set(getAvailableTechs(research).map((t) => t.id));
+  for (const id of priorityOrder) {
+    if (available.has(id)) return id;
+  }
+  return null;
 }
 
 export function selectActiveTech(

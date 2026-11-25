@@ -1,12 +1,13 @@
 import type { HexAssetEntry } from './godot-docs';
 import { getBuildingDefinition, type ResourceCost } from './buildings-catalog';
-import type { HexOwner, HexWorldState } from './hex-engine';
+import { hexKey, type HexOwner, type HexWorldState } from './hex-engine';
 import {
   getHexTerrainAndResource,
   getStrategicRegionInfo,
 } from './terrain-engine';
 import { getTechModifiers, type TechId } from './tech-engine';
 import { computeFactionMilitaryPower, type UnitEntity } from './military-engine';
+import type { ActiveWorldEffect } from './events-engine';
 
 export interface KingdomResources {
   wood: number;
@@ -30,7 +31,8 @@ export interface PopulationSummary {
   availableWorkers: number;
   foodConsumption: number;
   projectedGrowth: number;
-  efficiency: number; // 0.75..1.0
+  efficiency: number; // 0.25..1.0
+  efficiencyReasonPt: string | null;
 }
 
 export interface TurnProductionBreakdown {
@@ -47,6 +49,7 @@ export interface TurnProductionBreakdown {
   scienceNet: number;
   storageCaps: ResourceStorageCaps;
   population: PopulationSummary;
+  underConstructionCount: number;
 }
 
 export interface KingdomStageInfo {
@@ -112,6 +115,8 @@ export function computeTurnEconomyBreakdown(params: {
   units: UnitEntity[];
   assets: HexAssetEntry[];
   owner?: HexOwner;
+  underConstructionKeys?: Set<string>;
+  activeEffects?: ActiveWorldEffect[];
   tradePactGoldBonus?: number;
   eventGoldMultiplier?: number;
   eventFoodMultiplier?: number;
@@ -124,6 +129,8 @@ export function computeTurnEconomyBreakdown(params: {
     units,
     assets,
     owner = 'player',
+    underConstructionKeys,
+    activeEffects = [],
     tradePactGoldBonus = 0,
     eventGoldMultiplier = 1,
     eventFoodMultiplier = 1,
@@ -141,31 +148,47 @@ export function computeTurnEconomyBreakdown(params: {
   let foodProd = 4;
   let oreProd = 0;
   let scienceProd = 1;
+  let underConstructionCount = 0;
 
   for (const tile of Object.values(worldState.hexes)) {
     if (tile.owner !== owner) continue;
-    const assetName = assets[tile.structureIndex]?.name ?? '';
-    const bDef = getBuildingDefinition(assetName);
+    const key = hexKey(tile.q, tile.r);
+    const isUnderConstruction = Boolean(underConstructionKeys?.has(key));
+    if (isUnderConstruction) {
+      underConstructionCount += 1;
+    }
+
     const terrainInfo = getHexTerrainAndResource(tile.q, tile.r, tile);
     const strategic = getStrategicRegionInfo(tile.q, tile.r);
+
+    // Natural tile baseline yield + strategic rare node bonus
+    if (terrainInfo.resourceType === 'wood') woodProd += 1;
+    if (terrainInfo.resourceType === 'food') foodProd += 1;
+    if (terrainInfo.resourceType === 'water') foodProd += 1;
+    if (terrainInfo.resourceType === 'ore') stoneProd += 1;
+
+    goldGross += strategic.bonusGoldPerTurn;
+    foodProd += strategic.bonusFoodPerTurn;
+    oreProd += strategic.bonusOrePerTurn;
+    scienceProd += strategic.bonusSciencePerTurn;
+
+    // Buildings under construction do NOT contribute capacity, storage, workers, or production until completed
+    if (isUnderConstruction) continue;
+
+    const assetName = assets[tile.structureIndex]?.name ?? '';
+    const bDef = getBuildingDefinition(assetName);
 
     capacity += bDef.housingCapacity;
     usedWorkers += bDef.workersRequired;
     storageBonus += bDef.storageBonus;
     buildingMaint += bDef.maintenanceGold;
 
-    // Natural tile baseline yield + building production
-    if (terrainInfo.resourceType === 'wood') woodProd += 1;
-    if (terrainInfo.resourceType === 'food') foodProd += 1;
-    if (terrainInfo.resourceType === 'water') foodProd += 1;
-    if (terrainInfo.resourceType === 'ore') stoneProd += 1;
-
-    goldGross += bDef.production.gold + strategic.bonusGoldPerTurn;
+    goldGross += bDef.production.gold;
     woodProd += bDef.production.wood;
     stoneProd += bDef.production.stone;
-    foodProd += bDef.production.food + strategic.bonusFoodPerTurn;
-    oreProd += bDef.production.ore + strategic.bonusOrePerTurn;
-    scienceProd += bDef.production.science + strategic.bonusSciencePerTurn;
+    foodProd += bDef.production.food;
+    oreProd += bDef.production.ore;
+    scienceProd += bDef.production.science;
   }
 
   // Military unit maintenance & population slot usage
@@ -174,7 +197,8 @@ export function computeTurnEconomyBreakdown(params: {
     units,
     assets,
     owner,
-    unlockedTechs
+    unlockedTechs,
+    underConstructionKeys
   );
   const unitPopUsed = units
     .filter((u) => u.owner === owner && u.hp > 0)
@@ -186,26 +210,65 @@ export function computeTurnEconomyBreakdown(params: {
   const foodConsumption = Math.max(2, Math.ceil(population * 0.35));
   const starving = resources.food <= 0 && foodProd < foodConsumption;
   const workerShortage = population < totalWorkersNeeded;
-  const efficiency = starving ? 0.75 : workerShortage ? 0.85 : 1.0;
+
+  let effectGoldMult = eventGoldMultiplier;
+  let effectFoodMult = eventFoodMultiplier;
+  let effectScienceBonus = 0;
+  let effectEffPenalty = 0;
+  for (const eff of activeEffects) {
+    if (typeof eff.goldMultiplierMod === 'number') {
+      effectGoldMult *= eff.goldMultiplierMod;
+    }
+    if (typeof eff.foodMultiplierMod === 'number') {
+      effectFoodMult *= eff.foodMultiplierMod;
+    }
+    if (typeof eff.scienceBonusPerTurn === 'number') {
+      effectScienceBonus += eff.scienceBonusPerTurn;
+    }
+    if (typeof eff.efficiencyPenalty === 'number') {
+      effectEffPenalty += eff.efficiencyPenalty;
+    }
+  }
+
+  // Worker shortages scale production proportionally down (or critically stall)
+  let workerFactor = 1;
+  if (workerShortage && totalWorkersNeeded > 0) {
+    workerFactor = Math.max(0.25, population / totalWorkersNeeded);
+  }
+  const starveFactor = starving ? 0.75 : 1;
+  const effectFactor = Math.max(0.5, 1 - effectEffPenalty);
+  const efficiency = Math.max(0.25, Math.min(1, workerFactor * starveFactor * effectFactor));
+
+  let efficiencyReasonPt: string | null = null;
+  if (starving) {
+    efficiencyReasonPt = 'Escassez de alimento reduz produtividade';
+  } else if (workerShortage) {
+    efficiencyReasonPt = 'Faltam trabalhadores: construa Casas para retomar 100%';
+  } else if (effectEffPenalty > 0) {
+    efficiencyReasonPt = 'Evento ativo reduz produtividade temporariamente';
+  }
 
   const finalGoldGross = Math.round(
     (goldGross * mods.goldMultiplier * efficiency + tradePactGoldBonus) *
-      eventGoldMultiplier
+      effectGoldMult
   );
   const totalMaint = buildingMaint + milPower.unitMaintenanceGold;
   const finalFoodProd = Math.round(
-    foodProd * mods.foodMultiplier * efficiency * eventFoodMultiplier
+    foodProd * mods.foodMultiplier * efficiency * effectFoodMult
   );
   const finalWood = Math.round(woodProd * efficiency);
   const finalStone = Math.round(stoneProd * mods.stoneOreMultiplier * efficiency);
   const finalOre = Math.round(
     oreProd * mods.stoneOreMultiplier * mods.oreBonusMultiplier * efficiency
   );
-  const finalScience = Math.max(1, Math.round(scienceProd * efficiency));
+  const finalScience = Math.max(
+    1,
+    Math.round(scienceProd * efficiency) + effectScienceBonus
+  );
 
   const foodNet = finalFoodProd - foodConsumption;
   let projectedGrowth = 0;
-  if (population < capacity && resources.food + foodNet >= 4) {
+  if (population < capacity && resources.food + foodNet >= 4 && !starving) {
     projectedGrowth = foodNet >= 8 ? 2 : 1;
   }
 
@@ -235,7 +298,9 @@ export function computeTurnEconomyBreakdown(params: {
       foodConsumption,
       projectedGrowth,
       efficiency,
+      efficiencyReasonPt,
     },
+    underConstructionCount,
   };
 }
 

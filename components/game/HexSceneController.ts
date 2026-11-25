@@ -352,7 +352,8 @@ function buildFertileFurrowsGeometry(state: HexWorldState): THREE.BufferGeometry
 function createTintedMaterialVariant(
   mat: THREE.Material | THREE.Material[],
   tintHex: number,
-  extraRoughness = 0.04
+  extraRoughness = 0.04,
+  opacity?: number
 ): THREE.Material | THREE.Material[] {
   const tint = new THREE.Color(tintHex);
   const cloneOne = (m: THREE.Material): THREE.Material => {
@@ -369,6 +370,10 @@ function createTintedMaterialVariant(
         1,
         (cloned as THREE.MeshStandardMaterial).roughness + extraRoughness
       );
+    }
+    if (typeof opacity === 'number' && opacity < 1) {
+      cloned.transparent = true;
+      cloned.opacity = opacity;
     }
     return cloned;
   };
@@ -396,13 +401,20 @@ export class HexSceneController {
       neutral: THREE.Material | THREE.Material[];
       ironClan: THREE.Material | THREE.Material[];
       azureLeague: THREE.Material | THREE.Material[];
+      underConstruction: THREE.Material | THREE.Material[];
     }
   >();
   private loadingPromises = new Map<string, Promise<THREE.Group>>();
   private hexesGroup = new THREE.Group();
   private placedMeshes = new Map<
     string,
-    { group: THREE.Group; structureIndex: number; orientation: number; owner: HexOwner }
+    {
+      group: THREE.Group;
+      structureIndex: number;
+      orientation: number;
+      owner: HexOwner;
+      underConstruction: boolean;
+    }
   >();
 
   // Territorial borders & conquerable frontier overlays
@@ -413,6 +425,7 @@ export class HexSceneController {
   private frontierOverlayMesh: THREE.Mesh;
   private frontierOverlayMat: THREE.MeshBasicMaterial;
   private fertileOverlayMesh: THREE.Mesh;
+  private underConstructionOverlayMesh: THREE.Mesh;
   private rareMarkersGroup = new THREE.Group();
   private unitsGroup = new THREE.Group();
   private unitTargetOverlayMesh: THREE.Mesh;
@@ -660,6 +673,23 @@ export class HexSceneController {
     );
     this.fertileOverlayMesh.frustumCulled = false;
     this.scene.add(this.fertileOverlayMesh);
+
+    const underConstructionMat = new THREE.MeshBasicMaterial({
+      color: 0xd97706,
+      transparent: true,
+      opacity: 0.78,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    this.underConstructionOverlayMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      underConstructionMat
+    );
+    this.underConstructionOverlayMesh.frustumCulled = false;
+    this.scene.add(this.underConstructionOverlayMesh);
 
     const unitTargetMat = new THREE.MeshBasicMaterial({
       color: 0x10b981,
@@ -1295,6 +1325,7 @@ export class HexSceneController {
                 neutral: createTintedMaterialVariant(mat, 0x8fa7be, 0.1),
                 ironClan: createTintedMaterialVariant(mat, 0xf2b5b5, 0.02),
                 azureLeague: createTintedMaterialVariant(mat, 0xb5d0f2, 0.02),
+                underConstruction: createTintedMaterialVariant(mat, 0xfcd34d, 0.2, 0.58),
               });
             }
           });
@@ -1314,7 +1345,11 @@ export class HexSceneController {
     return promise;
   }
 
-  private applyOwnerMaterials(group: THREE.Object3D, owner: HexOwner) {
+  private applyOwnerMaterials(
+    group: THREE.Object3D,
+    owner: HexOwner,
+    underConstruction = false
+  ) {
     group.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh) {
         const mesh = obj as THREE.Mesh;
@@ -1322,12 +1357,37 @@ export class HexSceneController {
         if (!matKey) return;
         const pair = this.ownerMaterialPairs.get(matKey);
         if (!pair) return;
-        if (owner === 'player') mesh.material = pair.owned;
+        if (underConstruction) mesh.material = pair.underConstruction;
+        else if (owner === 'player') mesh.material = pair.owned;
         else if (owner === 'iron_clan') mesh.material = pair.ironClan;
         else if (owner === 'azure_league') mesh.material = pair.azureLeague;
         else mesh.material = pair.neutral;
       }
     });
+  }
+
+  private rebuildUnderConstructionOverlay(
+    state: HexWorldState,
+    underConstructionKeys: Set<string>
+  ) {
+    const oldGeo = this.underConstructionOverlayMesh.geometry;
+    const positions: number[] = [];
+    const outerR = HEX_OUTER_RADIUS * 0.78;
+    const innerR = HEX_OUTER_RADIUS * 0.67;
+
+    for (const key of underConstructionKeys) {
+      const tile = state.hexes[key];
+      if (!tile) continue;
+      const center = axialToWorld(tile.q, tile.r);
+      for (let edge = 0; edge < 6; edge++) {
+        appendHexEdgeQuad(positions, center.x, center.z, 0.221, edge, outerR, innerR);
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    this.underConstructionOverlayMesh.geometry = geo;
+    oldGeo.dispose();
   }
 
   private rebuildTerritoryOverlays(state: HexWorldState) {
@@ -1581,14 +1641,17 @@ export class HexSceneController {
   public async syncWorldState(
     nextState: HexWorldState,
     animateNewKeys?: string[],
-    conqueredKeys?: string[]
+    conqueredKeys?: string[],
+    underConstructionKeys?: Set<string>
   ) {
     this.currentWorldState = nextState;
     const animSet = new Set(animateNewKeys ?? []);
     const conquestSet = new Set(conqueredKeys ?? []);
+    const underSet = underConstructionKeys ?? new Set<string>();
 
-    // Update territory border ribbon and conquerable frontier immediately
+    // Update territory border ribbon, construction overlay, and conquerable frontier immediately
     this.rebuildTerritoryOverlays(nextState);
+    this.rebuildUnderConstructionOverlay(nextState, underSet);
     this.refreshSelectorAnchor();
 
     // Update or remove existing meshes
@@ -1618,15 +1681,23 @@ export class HexSceneController {
           typeof target.owner === 'string' && target.owner.trim().length > 0
             ? target.owner.trim()
             : 'neutral';
-        if (nextOwner !== entry.owner) {
+        const nextUnder = underSet.has(key);
+        if (nextOwner !== entry.owner || nextUnder !== entry.underConstruction) {
+          const justCompleted = entry.underConstruction && !nextUnder;
           entry.owner = nextOwner;
-          this.applyOwnerMaterials(entry.group, nextOwner);
+          entry.underConstruction = nextUnder;
+          this.applyOwnerMaterials(entry.group, nextOwner, nextUnder);
           if (conquestSet.has(key)) {
             const pos = entry.group.position;
             entry.group.scale.set(1.12, 0.65, 1.12);
             this.popAnims.push({ mesh: entry.group, progress: 0 });
             this.spawnConquestWave(pos.x, pos.z);
             this.spawnParticleBurst(pos.x, 0.26, pos.z, 0xfbbf24, 12);
+          } else if (justCompleted) {
+            const pos = entry.group.position;
+            entry.group.scale.set(1.1, 0.72, 1.1);
+            this.popAnims.push({ mesh: entry.group, progress: 0 });
+            this.spawnParticleBurst(pos.x, 0.28, pos.z, 0x34d399, 10);
           }
         }
       }
@@ -1643,7 +1714,12 @@ export class HexSceneController {
       }
     }
 
-    if (missingEntries.length === 0) return;
+    if (missingEntries.length === 0) {
+      if (!this.disposed) {
+        this.renderer.render(this.scene, this.camera);
+      }
+      return;
+    }
 
     const namesList = Array.from(uniqueNames);
     let loadedCount = 0;
@@ -1676,9 +1752,10 @@ export class HexSceneController {
         typeof liveTile.owner === 'string' && liveTile.owner.trim().length > 0
           ? liveTile.owner.trim()
           : 'neutral';
+      const isUnder = underSet.has(key);
       const group = new THREE.Group();
       const clone = template.clone(true);
-      this.applyOwnerMaterials(clone, owner);
+      this.applyOwnerMaterials(clone, owner, isUnder);
       group.add(clone);
 
       const pos = axialToWorld(tile.q, tile.r);
@@ -1691,6 +1768,7 @@ export class HexSceneController {
         structureIndex: tile.structureIndex,
         orientation: tile.orientation,
         owner,
+        underConstruction: isUnder,
       });
 
       if (conquestSet.has(key)) {
@@ -2071,6 +2149,7 @@ export class HexSceneController {
       addMat(pair.neutral);
       addMat(pair.ironClan);
       addMat(pair.azureLeague);
+      addMat(pair.underConstruction);
     }
 
     geometries.add(this.conquestRingGeo);

@@ -1,15 +1,40 @@
 import type { HexAssetEntry } from './godot-docs';
+import { getBuildingDefinition } from './buildings-catalog';
+import {
+  canAffordCost,
+  computeEffectiveBuildCost,
+  computeTurnEconomyBreakdown,
+  createInitialResources,
+  type KingdomResources,
+} from './economy-engine';
 import {
   DEFAULT_ROTATION_DEG,
+  hasHexConstruction,
   hexKey,
   type AxialCoord,
   type HexOwner,
   type HexWorldState,
 } from './hex-engine';
-import { getHexTerrainAndResource } from './terrain-engine';
+import {
+  getHexTerrainAndResource,
+  getStrategicRegionInfo,
+  TERRAIN_METADATA,
+} from './terrain-engine';
 import { AXIAL_DIRECTIONS, calculateConquestCost } from './territory-engine';
-import type { TechId } from './tech-engine';
-import { UNIT_CATALOG, getUnitAt, type UnitEntity } from './military-engine';
+import {
+  advanceResearchProgress,
+  nextRecommendedTech,
+  type ResearchState,
+  type TechId,
+} from './tech-engine';
+import {
+  UNIT_CATALOG,
+  getUnitAt,
+  isAdjacentCoord,
+  resolveHexCombat,
+  type UnitEntity,
+  type UnitType,
+} from './military-engine';
 
 export type FactionRelation = 'neutral' | 'truce' | 'trade_pact' | 'hostile';
 
@@ -19,6 +44,9 @@ export interface FactionState {
   colorHex: string;
   borderHexNum: number;
   cash: number;
+  resources: KingdomResources;
+  population: number;
+  research: ResearchState;
   relation: FactionRelation;
   truceTurnsRemaining: number;
   unlockedTechs: TechId[];
@@ -34,6 +62,13 @@ export function createInitialFactions(): FactionState[] {
       colorHex: '#dc2626',
       borderHexNum: 0xdc2626,
       cash: 750,
+      resources: { wood: 55, stone: 60, food: 50, ore: 40, science: 0 },
+      population: 12,
+      research: {
+        unlocked: ['mining', 'military'],
+        activeTechId: 'metallurgy',
+        progressScience: 0,
+      },
       relation: 'hostile',
       truceTurnsRemaining: 0,
       unlockedTechs: ['mining', 'military'],
@@ -46,6 +81,13 @@ export function createInitialFactions(): FactionState[] {
       colorHex: '#2563eb',
       borderHexNum: 0x2563eb,
       cash: 850,
+      resources: { wood: 60, stone: 45, food: 65, ore: 20, science: 0 },
+      population: 14,
+      research: {
+        unlocked: ['agriculture', 'trade'],
+        activeTechId: 'construction',
+        progressScience: 0,
+      },
       relation: 'neutral',
       truceTurnsRemaining: 0,
       unlockedTechs: ['agriculture', 'trade'],
@@ -53,6 +95,55 @@ export function createInitialFactions(): FactionState[] {
       personality: 'mercantile',
     },
   ];
+}
+
+export function normalizeFactionState(raw: Partial<FactionState>, idx: number): FactionState {
+  const defaults = createInitialFactions();
+  const fallback = defaults.find((f) => f.id === raw.id) ?? defaults[idx % defaults.length];
+  const unlockedTechs: TechId[] = Array.isArray(raw.unlockedTechs)
+    ? raw.unlockedTechs
+    : fallback.unlockedTechs;
+
+  const research: ResearchState =
+    raw.research && Array.isArray(raw.research.unlocked)
+      ? raw.research
+      : {
+          unlocked: unlockedTechs,
+          activeTechId: nextRecommendedTech(
+            { unlocked: unlockedTechs, activeTechId: null, progressScience: 0 },
+            raw.personality ?? fallback.personality
+          ),
+          progressScience: 0,
+        };
+
+  return {
+    id: raw.id ?? fallback.id,
+    namePt: raw.namePt ?? fallback.namePt,
+    colorHex: raw.colorHex ?? fallback.colorHex,
+    borderHexNum: raw.borderHexNum ?? fallback.borderHexNum,
+    cash: typeof raw.cash === 'number' ? raw.cash : fallback.cash,
+    resources:
+      raw.resources && typeof raw.resources === 'object'
+        ? {
+            wood: Number(raw.resources.wood ?? fallback.resources.wood),
+            stone: Number(raw.resources.stone ?? fallback.resources.stone),
+            food: Number(raw.resources.food ?? fallback.resources.food),
+            ore: Number(raw.resources.ore ?? fallback.resources.ore),
+            science: Number(raw.resources.science ?? 0),
+          }
+        : createInitialResources(),
+    population:
+      typeof raw.population === 'number' && raw.population >= 4
+        ? Math.round(raw.population)
+        : fallback.population,
+    research,
+    relation: raw.relation ?? fallback.relation,
+    truceTurnsRemaining:
+      typeof raw.truceTurnsRemaining === 'number' ? raw.truceTurnsRemaining : 0,
+    unlockedTechs: research.unlocked,
+    capitalCoord: raw.capitalCoord ?? fallback.capitalCoord,
+    personality: raw.personality ?? fallback.personality,
+  };
 }
 
 export function seedRivalFactionTilesAndUnits(
@@ -150,11 +241,57 @@ export function getTradePactBonusGold(factions: FactionState[]): number {
   );
 }
 
+function hexDistance(a: AxialCoord, b: AxialCoord): number {
+  return (
+    (Math.abs(a.q - b.q) +
+      Math.abs(a.q + a.r - b.q - b.r) +
+      Math.abs(a.r - b.r)) /
+    2
+  );
+}
+
+function chooseAiBuildingForTile(
+  terrainType: string,
+  faction: FactionState,
+  popCurrent: number,
+  popCapacity: number,
+  availableWorkers: number
+): string | null {
+  const hasTech = (t: TechId) => faction.research.unlocked.includes(t);
+
+  if (popCurrent >= popCapacity - 2) {
+    if (hasTech('construction') && terrainType !== 'water') return 'building-village';
+    if (terrainType !== 'water') return 'building-house';
+  }
+
+  if (availableWorkers < 2) {
+    return terrainType !== 'water' ? 'building-house' : null;
+  }
+
+  if (terrainType === 'forest') return 'dirt-lumber';
+  if (terrainType === 'mountain') return hasTech('mining') ? 'building-mine' : 'building-smelter';
+  if (terrainType === 'fertile') {
+    return faction.personality === 'mercantile' ? 'building-farm' : 'building-farm';
+  }
+  if (terrainType === 'water') {
+    return hasTech('trade') ? 'building-port' : 'building-dock';
+  }
+
+  // Plains strategic choice by personality
+  if (faction.personality === 'expansionist') {
+    if (hasTech('military')) return 'building-tower';
+    return 'building-wizard-tower';
+  }
+  return 'building-market';
+}
+
 /**
  * Advances AI factions cleanly each turn:
- * - Income generation
- * - Controlled neutral frontier expansion (capped so AI does not overwhelm early)
- * - Occasional garrison recruitment up to territory cap
+ * - Real production & population growth from faction territory and buildings
+ * - Research progression using faction science output
+ * - Strategic neutral frontier expansion (reacting to rare regions & player growth)
+ * - Construction of real 3D buildings on empty owned hexes
+ * - Garrison recruitment and tactical movement / sensible border attacks when hostile
  */
 export function advanceFactionsTurn(params: {
   worldState: HexWorldState;
@@ -162,6 +299,7 @@ export function advanceFactionsTurn(params: {
   units: UnitEntity[];
   assets: HexAssetEntry[];
   turn: number;
+  underConstructionKeys?: Set<string>;
 }): {
   worldState: HexWorldState;
   factions: FactionState[];
@@ -175,7 +313,11 @@ export function advanceFactionsTurn(params: {
   const conqueredKeys: string[] = [];
   let newsPt: string | null = null;
 
-  for (const faction of params.factions) {
+  const playerTiles = Object.values(nextWorld.hexes).filter((t) => t.owner === 'player');
+  const playerGrowing = playerTiles.length >= 9;
+
+  for (const rawFaction of params.factions) {
+    const faction = normalizeFactionState(rawFaction, 0);
     const ownedTiles = Object.values(nextWorld.hexes).filter(
       (t) => t.owner === faction.id
     );
@@ -192,45 +334,83 @@ export function advanceFactionsTurn(params: {
           : 'neutral'
         : faction.relation;
 
-    let cash = faction.cash + ownedTiles.length * 45 + 60;
+    // 1. Real economy production + population growth
+    const econ = computeTurnEconomyBreakdown({
+      worldState: nextWorld,
+      resources: faction.resources,
+      population: faction.population,
+      unlockedTechs: faction.research.unlocked,
+      units: nextUnits,
+      assets: params.assets,
+      owner: faction.id,
+      tradePactGoldBonus: updatedRelation === 'trade_pact' ? 20 : 0,
+    });
 
-    // Expand once every 2 turns if affordable and under soft cap (12 tiles)
+    let cash = Math.max(0, faction.cash + Math.max(25, econ.goldNet + 25));
+    const resources: KingdomResources = {
+      wood: Math.min(econ.storageCaps.wood, Math.max(0, faction.resources.wood + econ.woodNet)),
+      stone: Math.min(econ.storageCaps.stone, Math.max(0, faction.resources.stone + econ.stoneNet)),
+      food: Math.min(econ.storageCaps.food, Math.max(0, faction.resources.food + econ.foodNet)),
+      ore: Math.min(econ.storageCaps.ore, Math.max(0, faction.resources.ore + econ.oreNet)),
+      science: faction.resources.science + econ.scienceNet,
+    };
+    const nextPop = Math.min(
+      econ.population.capacity,
+      faction.population + econ.population.projectedGrowth
+    );
+
+    // 2. Research progression
+    let nextResearch = faction.research;
+    if (!nextResearch.activeTechId) {
+      nextResearch = {
+        ...nextResearch,
+        activeTechId: nextRecommendedTech(nextResearch, faction.personality),
+      };
+    }
+    const resStep = advanceResearchProgress(nextResearch, Math.max(2, econ.scienceNet));
+    nextResearch = resStep.nextResearch;
+    if (!nextResearch.activeTechId) {
+      nextResearch = {
+        ...nextResearch,
+        activeTechId: nextRecommendedTech(nextResearch, faction.personality),
+      };
+    }
+
+    // 3. Strategic neutral expansion every 2 turns (soft cap 12 tiles)
     if (params.turn % 2 === 0 && ownedTiles.length < 12 && cash >= 450) {
-      const candidates: AxialCoord[] = [];
+      const candidates: Array<{ coord: AxialCoord; score: number }> = [];
       for (const tile of ownedTiles) {
         for (const dir of AXIAL_DIRECTIONS) {
           const nq = tile.q + dir.q;
           const nr = tile.r + dir.r;
           const existing = nextWorld.hexes[hexKey(nq, nr)];
           if (!existing || !existing.owner || existing.owner === 'neutral') {
-            candidates.push({ q: nq, r: nr });
+            const strategic = getStrategicRegionInfo(nq, nr);
+            let score = strategic.rareFeature !== 'none' ? 15 : 4;
+            if (faction.personality === 'expansionist' && playerGrowing && playerTiles.length > 0) {
+              const nearestPlayer = Math.min(
+                ...playerTiles.map((pt) => hexDistance({ q: nq, r: nr }, pt))
+              );
+              score += Math.max(0, 12 - nearestPlayer * 2);
+            }
+            candidates.push({ coord: { q: nq, r: nr }, score });
           }
         }
       }
 
       if (candidates.length > 0) {
-        const pick = candidates[(params.turn + ownedTiles.length) % candidates.length];
+        candidates.sort((a, b) => b.score - a.score);
+        const pick = candidates[0].coord;
         const key = hexKey(pick.q, pick.r);
         const existing = nextWorld.hexes[key];
         const cost = calculateConquestCost(pick, existing, params.assets);
         if (cash >= cost) {
           cash -= cost;
           const terrainInfo = getHexTerrainAndResource(pick.q, pick.r, existing);
+          const defaultName = TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
           const defaultIdx = Math.max(
             0,
-            params.assets.findIndex(
-              (a) =>
-                a.name ===
-                (terrainInfo.terrainType === 'mountain'
-                  ? 'stone-mountain'
-                  : terrainInfo.terrainType === 'forest'
-                    ? 'grass-forest'
-                    : terrainInfo.terrainType === 'fertile'
-                      ? 'dirt'
-                      : terrainInfo.terrainType === 'water'
-                        ? 'water'
-                        : 'grass')
-            )
+            params.assets.findIndex((a) => a.name === defaultName)
           );
           nextWorld = {
             ...nextWorld,
@@ -257,41 +437,200 @@ export function advanceFactionsTurn(params: {
             },
           };
           conqueredKeys.push(key);
-          newsPt = `${faction.namePt} expandiu seu território.`;
+          newsPt =
+            faction.personality === 'expansionist' && playerGrowing
+              ? `${faction.namePt} expandiu na direção das suas fronteiras.`
+              : `${faction.namePt} expandiu seu território.`;
         }
       }
     }
 
-    // Recruit garrison unit if faction has fewer than 3 units and >= 250 cash
+    // 4. AI constructs buildings on empty owned hexes when affordable
+    if (params.turn % 2 === 1) {
+      const freeOwned = Object.values(nextWorld.hexes).find(
+        (t) => t.owner === faction.id && !hasHexConstruction(t, params.assets)
+      );
+      if (freeOwned) {
+        const terrainInfo = getHexTerrainAndResource(freeOwned.q, freeOwned.r, freeOwned);
+        const bAssetName = chooseAiBuildingForTile(
+          terrainInfo.terrainType,
+          { ...faction, research: nextResearch },
+          nextPop,
+          econ.population.capacity,
+          econ.population.availableWorkers
+        );
+        if (bAssetName) {
+          const idx = params.assets.findIndex((a) => a.name === bAssetName);
+          const bDef = getBuildingDefinition(bAssetName);
+          const cost = computeEffectiveBuildCost(bAssetName, nextResearch.unlocked);
+          const afford = canAffordCost(cash, resources, cost);
+          const techOk = !bDef.requiredTech || nextResearch.unlocked.includes(bDef.requiredTech);
+          if (idx >= 0 && afford.affordable && techOk) {
+            cash -= cost.gold;
+            resources.wood -= cost.wood;
+            resources.stone -= cost.stone;
+            resources.food -= cost.food;
+            resources.ore -= cost.ore;
+            nextWorld = {
+              ...nextWorld,
+              hexes: {
+                ...nextWorld.hexes,
+                [hexKey(freeOwned.q, freeOwned.r)]: {
+                  ...freeOwned,
+                  structureIndex: idx,
+                },
+              },
+            };
+          }
+        }
+      }
+    }
+
+    // 5. Recruit garrison unit if faction has fewer than 3 units and resources allow
     const factionUnits = nextUnits.filter(
       (u) => u.owner === faction.id && u.hp > 0
     );
-    if (params.turn % 3 === 0 && factionUnits.length < 3 && cash >= 250) {
-      const freeOwned = ownedTiles.find(
-        (t) => !getUnitAt(nextUnits, t.q, t.r)
+    if (params.turn % 3 === 0 && factionUnits.length < 3) {
+      const unitType: UnitType =
+        faction.personality === 'expansionist'
+          ? nextResearch.unlocked.includes('metallurgy')
+            ? 'knight'
+            : 'infantry'
+          : 'archer';
+      const uDef = UNIT_CATALOG[unitType];
+      const spawnTile = Object.values(nextWorld.hexes).find(
+        (t) =>
+          t.owner === faction.id &&
+          !getUnitAt(nextUnits, t.q, t.r) &&
+          (assetsNameAt(t.structureIndex, params.assets) === 'building-castle' ||
+            assetsNameAt(t.structureIndex, params.assets) === 'building-archery')
+      ) ?? Object.values(nextWorld.hexes).find(
+        (t) => t.owner === faction.id && !getUnitAt(nextUnits, t.q, t.r)
       );
-      if (freeOwned) {
-        cash -= 160;
-        const unitType = faction.personality === 'expansionist' ? 'infantry' : 'archer';
+
+      if (spawnTile && cash >= uDef.cost.gold && nextPop - econ.population.usedWorkers >= uDef.populationCost) {
+        cash -= uDef.cost.gold;
+        resources.wood = Math.max(0, resources.wood - uDef.cost.wood);
+        resources.food = Math.max(0, resources.food - uDef.cost.food);
+        resources.ore = Math.max(0, resources.ore - uDef.cost.ore);
         nextUnits = [
           ...nextUnits,
           {
-            id: `unit-${faction.id}-${params.turn}`,
+            id: `unit-${faction.id}-${params.turn}-${nextUnits.length}`,
             type: unitType,
             owner: faction.id,
-            q: freeOwned.q,
-            r: freeOwned.r,
-            hp: UNIT_CATALOG[unitType].maxHp,
-            maxHp: UNIT_CATALOG[unitType].maxHp,
+            q: spawnTile.q,
+            r: spawnTile.r,
+            hp: uDef.maxHp,
+            maxHp: uDef.maxHp,
             movedThisTurn: false,
           },
         ];
       }
     }
 
+    // 6. Tactical movement & sensible attack for hostile factions (starting turn >= 4)
+    if (updatedRelation === 'hostile' && params.turn >= 4 && playerTiles.length > 0) {
+      const readyUnit = nextUnits.find(
+        (u) => u.owner === faction.id && u.hp > 0 && !u.movedThisTurn
+      );
+      if (readyUnit) {
+        // Check adjacent player tile first for an intelligent attack (only if odds are reasonable)
+        const adjPlayerTile = playerTiles.find((pt) =>
+          isAdjacentCoord(readyUnit, pt)
+        );
+        if (adjPlayerTile) {
+          const combat = resolveHexCombat(
+            readyUnit,
+            nextResearch.unlocked,
+            nextWorld,
+            adjPlayerTile.q,
+            adjPlayerTile.r,
+            nextUnits,
+            params.assets,
+            [],
+            params.underConstructionKeys
+          );
+          const attDef = UNIT_CATALOG[readyUnit.type];
+          const estAtt = Math.round(
+            (attDef.attack + (nextResearch.unlocked.includes('metallurgy') ? 4 : 0)) *
+              (readyUnit.hp / readyUnit.maxHp)
+          ) + 3;
+          // Only engage if attacker won't throw away the unit blindly
+          if (combat.attackerWon || estAtt >= 10) {
+            const defOccupant = getUnitAt(nextUnits, adjPlayerTile.q, adjPlayerTile.r);
+            nextUnits = nextUnits
+              .map((u) => {
+                if (u.id === readyUnit.id) {
+                  return {
+                    ...u,
+                    hp: Math.max(0, u.hp - combat.attackerDamage),
+                    q: combat.capturedHex ? adjPlayerTile.q : u.q,
+                    r: combat.capturedHex ? adjPlayerTile.r : u.r,
+                    movedThisTurn: true,
+                  };
+                }
+                if (defOccupant && u.id === defOccupant.id) {
+                  return { ...u, hp: Math.max(0, u.hp - combat.defenderDamage) };
+                }
+                return u;
+              })
+              .filter((u) => u.hp > 0);
+
+            if (combat.capturedHex) {
+              const tKey = hexKey(adjPlayerTile.q, adjPlayerTile.r);
+              nextWorld = {
+                ...nextWorld,
+                hexes: {
+                  ...nextWorld.hexes,
+                  [tKey]: { ...adjPlayerTile, owner: faction.id },
+                },
+              };
+              conqueredKeys.push(tKey);
+              newsPt = `${faction.namePt} atacou e tomou um território na fronteira!`;
+            } else {
+              newsPt = `${faction.namePt} testou suas defesas na fronteira.`;
+            }
+          }
+        } else if (factionUnits.length >= 2) {
+          // Advance 1 unit smoothly toward nearest player territory across safe non-water owned/neutral tiles
+          const currentDist = Math.min(...playerTiles.map((pt) => hexDistance(readyUnit, pt)));
+          let bestStep: AxialCoord | null = null;
+          let bestDist = currentDist;
+          for (const dir of AXIAL_DIRECTIONS) {
+            const nq = readyUnit.q + dir.q;
+            const nr = readyUnit.r + dir.r;
+            const tile = nextWorld.hexes[hexKey(nq, nr)];
+            const terrain = getHexTerrainAndResource(nq, nr, tile).terrainType;
+            if (terrain === 'water') continue;
+            if (tile && tile.owner && tile.owner !== faction.id && tile.owner !== 'neutral') {
+              continue;
+            }
+            if (getUnitAt(nextUnits, nq, nr)) continue;
+            const d = Math.min(...playerTiles.map((pt) => hexDistance({ q: nq, r: nr }, pt)));
+            if (d < bestDist) {
+              bestDist = d;
+              bestStep = { q: nq, r: nr };
+            }
+          }
+          if (bestStep) {
+            nextUnits = nextUnits.map((u) =>
+              u.id === readyUnit.id
+                ? { ...u, q: bestStep!.q, r: bestStep!.r, movedThisTurn: true }
+                : u
+            );
+          }
+        }
+      }
+    }
+
     nextFactions.push({
       ...faction,
       cash,
+      resources,
+      population: nextPop,
+      research: nextResearch,
+      unlockedTechs: nextResearch.unlocked,
       relation: updatedRelation,
       truceTurnsRemaining: updatedTruce,
     });
@@ -304,4 +643,8 @@ export function advanceFactionsTurn(params: {
     conqueredKeys,
     newsPt,
   };
+}
+
+function assetsNameAt(idx: number, assets: HexAssetEntry[]): string {
+  return assets[idx]?.name ?? '';
 }

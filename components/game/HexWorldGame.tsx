@@ -31,6 +31,7 @@ import {
   type UnitType,
 } from '@/lib/military-engine';
 import type { TechId } from '@/lib/tech-engine';
+import type { TradableResource } from '@/lib/trade-engine';
 import {
   advanceKingdomTurn,
   buildInKingdom,
@@ -41,13 +42,17 @@ import {
   createStarterKingdomState,
   demolishInKingdom,
   deserializeKingdomState,
+  getConstructionAt,
   getKingdomEconomy,
+  getKingdomMarket,
   getKingdomProgression,
+  getUnderConstructionKeys,
   performDiplomacyAction,
   recruitUnitInKingdom,
   resolveKingdomEvent,
   serializeKingdomState,
   setActiveResearchInKingdom,
+  tradeResourceInKingdom,
   type KingdomState,
 } from '@/lib/kingdom-engine';
 import { gameAudio } from '@/lib/game-audio';
@@ -88,7 +93,10 @@ function computeValidUnitTargets(
 
     if (uDef.navalOnly && terrainInfo.terrainType !== 'water') continue;
     if (!uDef.navalOnly && terrainInfo.terrainType === 'water') {
-      const isBridge = tile && HEX_ASSETS[tile.structureIndex]?.name === 'bridge';
+      const isBridge =
+        tile &&
+        HEX_ASSETS[tile.structureIndex]?.name === 'bridge' &&
+        !getConstructionAt(state, tq, tr);
       if (!isBridge) continue;
     }
 
@@ -233,7 +241,12 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
       gameAudio.playPlace();
-      controllerRef.current?.syncWorldState(res.nextState.worldState, [hexKey(q, r)]);
+      controllerRef.current?.syncWorldState(
+        res.nextState.worldState,
+        [hexKey(q, r)],
+        undefined,
+        getUnderConstructionKeys(res.nextState)
+      );
       if (res.messagePt) showToast(res.messagePt);
     },
     [showToast]
@@ -250,7 +263,12 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
       gameAudio.playDemolish();
-      controllerRef.current?.syncWorldState(res.nextState.worldState, [hexKey(q, r)]);
+      controllerRef.current?.syncWorldState(
+        res.nextState.worldState,
+        [hexKey(q, r)],
+        undefined,
+        getUnderConstructionKeys(res.nextState)
+      );
       if (res.messagePt) showToast(res.messagePt);
     },
     [showToast]
@@ -271,7 +289,8 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       controllerRef.current?.syncWorldState(
         res.nextState.worldState,
         undefined,
-        [hexKey(q, r)]
+        [hexKey(q, r)],
+        getUnderConstructionKeys(res.nextState)
       );
       if (res.messagePt) showToast(res.messagePt);
     },
@@ -307,7 +326,8 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
           controllerRef.current?.syncWorldState(
             cmdRes.nextState.worldState,
             undefined,
-            [cmdRes.capturedKey]
+            [cmdRes.capturedKey],
+            getUnderConstructionKeys(cmdRes.nextState)
           );
         } else {
           gameAudio.playCycle();
@@ -459,9 +479,10 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     controllerRef.current?.syncWorldState(
       res.nextState.worldState,
       undefined,
-      res.conqueredByAiKeys.length > 0 ? res.conqueredByAiKeys : undefined
+      res.conqueredByAiKeys.length > 0 ? res.conqueredByAiKeys : undefined,
+      getUnderConstructionKeys(res.nextState)
     );
-    if (res.completedTech || res.newEvent) {
+    if (res.completedTech || res.newEvent || res.completedBuildings.length > 0) {
       gameAudio.playConquest();
     } else {
       gameAudio.playSaveChime();
@@ -566,6 +587,28 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     [showToast]
   );
 
+  const handleTradeResource = useCallback(
+    (resource: TradableResource, action: 'buy' | 'sell', quantity: number) => {
+      const res = tradeResourceInKingdom(
+        kingdomStateRef.current,
+        resource,
+        action,
+        quantity,
+        HEX_ASSETS
+      );
+      if (!res.success) {
+        gameAudio.playError();
+        showToast(res.messagePt);
+        return;
+      }
+      kingdomStateRef.current = res.nextState;
+      setKingdomState(res.nextState);
+      gameAudio.playSaveChime();
+      showToast(res.messagePt);
+    },
+    [showToast]
+  );
+
   const handleFocusUnit = useCallback(
     (unit: UnitEntity) => {
       setKingdomModalOpen(false);
@@ -617,7 +660,12 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setKingdomState(loaded);
       setSelectedHexSynced(null);
       clearCommandMode(loaded);
-      controllerRef.current?.syncWorldState(loaded.worldState);
+      controllerRef.current?.syncWorldState(
+        loaded.worldState,
+        undefined,
+        undefined,
+        getUnderConstructionKeys(loaded)
+      );
       syncSceneUnits(loaded, null);
       gameAudio.playSaveChime();
       showToast('Reino carregado');
@@ -657,7 +705,12 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     setKingdomState(starter);
     setSelectedHexSynced(null);
     clearCommandMode(starter);
-    controllerRef.current?.syncWorldState(starter.worldState);
+    controllerRef.current?.syncWorldState(
+      starter.worldState,
+      undefined,
+      undefined,
+      getUnderConstructionKeys(starter)
+    );
     syncSceneUnits(starter, null);
     controllerRef.current?.centerCamera();
     setGameState('playing');
@@ -670,7 +723,12 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     setKingdomState(empty);
     setSelectedHexSynced(null);
     clearCommandMode(empty);
-    controllerRef.current?.syncWorldState(empty.worldState);
+    controllerRef.current?.syncWorldState(
+      empty.worldState,
+      undefined,
+      undefined,
+      getUnderConstructionKeys(empty)
+    );
     syncSceneUnits(empty, null);
     controllerRef.current?.centerCamera();
     setGameState('playing');
@@ -730,7 +788,12 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     controller.setGameState(gameStateRef.current);
     controller.setToolMode(toolModeRef.current);
     controller.setSelectedPiece(selectedIndexRef.current, rotationDegRef.current);
-    controller.syncWorldState(kingdomStateRef.current.worldState);
+    controller.syncWorldState(
+      kingdomStateRef.current.worldState,
+      undefined,
+      undefined,
+      getUnderConstructionKeys(kingdomStateRef.current)
+    );
     controller.syncUnits(kingdomStateRef.current.units, null, []);
 
     return () => {
@@ -857,6 +920,11 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     [kingdomState]
   );
 
+  const market = useMemo(
+    () => getKingdomMarket(kingdomState, HEX_ASSETS),
+    [kingdomState]
+  );
+
   const selectedTileAssetName = useMemo(() => {
     if (!selectedHex) return null;
     const existing = worldState.hexes[hexKey(selectedHex.q, selectedHex.r)];
@@ -871,6 +939,11 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       HEX_ASSETS
     );
   }, [selectedHex, worldState.hexes]);
+
+  const selectedHexConstruction = useMemo(() => {
+    if (!selectedHex) return null;
+    return getConstructionAt(kingdomState, selectedHex.q, selectedHex.r);
+  }, [kingdomState, selectedHex]);
 
   const selectedHexOwned = useMemo(() => {
     if (!selectedHex) return true;
@@ -972,6 +1045,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         stage={progression.stage}
         unlockedTechs={kingdomState.research.unlocked}
         activeEvent={kingdomState.activeEvent}
+        activeEffects={kingdomState.activeEffects}
         autoTurnEnabled={autoTurnEnabled}
         commandModeActive={toolMode === 'command' && commandSource !== null}
         selectedIndex={selectedIndex}
@@ -979,6 +1053,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         selectedHex={selectedHex}
         selectedHexOwned={selectedHexOwned}
         selectedHexHasConstruction={selectedHexHasConstruction}
+        selectedHexConstruction={selectedHexConstruction}
         selectedTileAssetName={selectedTileAssetName}
         selectedConquest={selectedConquest}
         selectedTerrainInfo={selectedTerrainInfo}
@@ -1020,18 +1095,20 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         onRotateCamera={handleRotateCamera}
       />
 
-      {/* Strategy Overview / Research / Military / Diplomacy Modal */}
+      {/* Strategy Overview / Trade / Research / Military / Diplomacy Modal */}
       <KingdomModal
         open={kingdomModalOpen}
         initialTab={kingdomModalTab}
         kingdomState={kingdomState}
         economy={economy}
+        market={market}
         stage={progression.stage}
         militaryPower={progression.military}
         onClose={() => setKingdomModalOpen(false)}
         onSelectTech={handleSelectTech}
         onResolveEvent={handleResolveEvent}
         onDiplomacy={handleDiplomacy}
+        onTrade={handleTradeResource}
         onFocusUnit={handleFocusUnit}
       />
     </div>

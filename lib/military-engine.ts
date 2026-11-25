@@ -106,7 +106,8 @@ export function computeFactionMilitaryPower(
   units: UnitEntity[],
   assets: HexAssetEntry[],
   owner: HexOwner,
-  unlockedTechs: TechId[]
+  unlockedTechs: TechId[],
+  underConstructionKeys?: Set<string>
 ): {
   attackPower: number;
   defensePower: number;
@@ -131,6 +132,7 @@ export function computeFactionMilitaryPower(
 
   for (const tile of Object.values(worldState.hexes)) {
     if (tile.owner !== owner) continue;
+    if (underConstructionKeys?.has(hexKey(tile.q, tile.r))) continue;
     const assetName = assets[tile.structureIndex]?.name ?? '';
     const bDef = getBuildingDefinition(assetName);
     defensePower += bDef.defenseBonus;
@@ -145,13 +147,14 @@ export function computeHexDefenseScore(
   r: number,
   units: UnitEntity[],
   assets: HexAssetEntry[],
-  defenderTechs: TechId[] = []
+  defenderTechs: TechId[] = [],
+  underConstructionKeys?: Set<string>
 ): number {
   const tile = worldState.hexes[hexKey(q, r)];
   const terrainInfo = getHexTerrainAndResource(q, r, tile);
   let score = getTerrainDefenseBonus(terrainInfo.terrainType) + 3; // base garrison militia
 
-  if (tile) {
+  if (tile && !underConstructionKeys?.has(hexKey(q, r))) {
     const assetName = assets[tile.structureIndex]?.name ?? '';
     score += getBuildingDefinition(assetName).defenseBonus;
   }
@@ -183,7 +186,8 @@ export function resolveHexCombat(
   targetR: number,
   units: UnitEntity[],
   assets: HexAssetEntry[],
-  defenderTechs: TechId[] = []
+  defenderTechs: TechId[] = [],
+  underConstructionKeys?: Set<string>
 ): CombatResolution {
   const attDef = UNIT_CATALOG[attacker.type];
   const attTechBonus = attackerTechs.includes('metallurgy') ? 4 : 0;
@@ -195,7 +199,8 @@ export function resolveHexCombat(
     targetR,
     units,
     assets,
-    defenderTechs
+    defenderTechs,
+    underConstructionKeys
   );
 
   const defender = getUnitAt(units, targetQ, targetR);

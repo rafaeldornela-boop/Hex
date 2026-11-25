@@ -13,12 +13,14 @@ import {
 import {
   generateTurnEvent,
   type ActiveKingdomEvent,
+  type ActiveWorldEffect,
   type EventHistoryEntry,
 } from './events-engine';
 import {
   advanceFactionsTurn,
   createInitialFactions,
   getTradePactBonusGold,
+  normalizeFactionState,
   seedRivalFactionTilesAndUnits,
   type FactionState,
 } from './faction-engine';
@@ -32,6 +34,7 @@ import {
   hexKey,
   placeHexInState,
   type AxialCoord,
+  type HexOwner,
   type HexWorldState,
 } from './hex-engine';
 import {
@@ -57,6 +60,7 @@ import {
   INCOMPATIBLE_TERRAIN_MESSAGE,
   getHexTerrainAndResource,
   getStrategicRegionInfo,
+  TERRAIN_METADATA,
 } from './terrain-engine';
 import {
   ALREADY_OCCUPIED_BUILD_MESSAGE,
@@ -66,6 +70,22 @@ import {
   getConquestFailureMessage,
   isAdjacentToPlayerTerritory,
 } from './territory-engine';
+import {
+  computeMarketSummary,
+  type MarketSummary,
+  type TradableResource,
+} from './trade-engine';
+
+export interface ActiveConstruction {
+  q: number;
+  r: number;
+  structureIndex: number;
+  orientation: number;
+  assetName: string;
+  turnsRemaining: number;
+  totalTurns: number;
+  owner: HexOwner;
+}
 
 export interface KingdomState {
   turn: number;
@@ -75,9 +95,23 @@ export interface KingdomState {
   research: ResearchState;
   units: UnitEntity[];
   factions: FactionState[];
+  constructions: ActiveConstruction[];
+  activeEffects: ActiveWorldEffect[];
   activeEvent: ActiveKingdomEvent | null;
   eventHistory: EventHistoryEntry[];
   lastTurnSummaryPt: string | null;
+}
+
+export function getUnderConstructionKeys(state: KingdomState): Set<string> {
+  return new Set(state.constructions.map((c) => hexKey(c.q, c.r)));
+}
+
+export function getConstructionAt(
+  state: KingdomState,
+  q: number,
+  r: number
+): ActiveConstruction | null {
+  return state.constructions.find((c) => c.q === q && c.r === r) ?? null;
 }
 
 export function createStarterKingdomState(assets: HexAssetEntry[]): KingdomState {
@@ -92,6 +126,8 @@ export function createStarterKingdomState(assets: HexAssetEntry[]): KingdomState
     research: createInitialResearchState(),
     units,
     factions: createInitialFactions(),
+    constructions: [],
+    activeEffects: [],
     activeEvent: null,
     eventHistory: [],
     lastTurnSummaryPt: null,
@@ -107,6 +143,8 @@ export function createSandboxKingdomState(): KingdomState {
     research: createInitialResearchState(),
     units: [],
     factions: createInitialFactions(),
+    constructions: [],
+    activeEffects: [],
     activeEvent: null,
     eventHistory: [],
     lastTurnSummaryPt: null,
@@ -118,6 +156,7 @@ export function getKingdomEconomy(
   assets: HexAssetEntry[]
 ): TurnProductionBreakdown {
   const tradePactBonus = getTradePactBonusGold(state.factions);
+  const underKeys = getUnderConstructionKeys(state);
   return computeTurnEconomyBreakdown({
     worldState: state.worldState,
     resources: state.resources,
@@ -126,9 +165,28 @@ export function getKingdomEconomy(
     units: state.units,
     assets,
     owner: 'player',
+    underConstructionKeys: underKeys,
+    activeEffects: state.activeEffects,
     tradePactGoldBonus: tradePactBonus,
     eventGoldMultiplier: state.activeEvent?.goldMultiplierMod ?? 1,
     eventFoodMultiplier: state.activeEvent?.foodMultiplierMod ?? 1,
+  });
+}
+
+export function getKingdomMarket(
+  state: KingdomState,
+  assets: HexAssetEntry[]
+): MarketSummary {
+  const economy = getKingdomEconomy(state, assets);
+  return computeMarketSummary({
+    worldState: state.worldState,
+    resources: state.resources,
+    economy,
+    unlockedTechs: state.research.unlocked,
+    factions: state.factions,
+    activeEffects: state.activeEffects,
+    assets,
+    underConstructionKeys: getUnderConstructionKeys(state),
   });
 }
 
@@ -145,7 +203,8 @@ export function getKingdomProgression(
     state.units,
     assets,
     'player',
-    state.research.unlocked
+    state.research.unlocked,
+    getUnderConstructionKeys(state)
   );
   return {
     stage: getKingdomStage({
@@ -171,6 +230,99 @@ export function calculateStrategicConquestCost(
   return Math.round(base * strategic.conquestCostMultiplier * mods.expansionCostMultiplier);
 }
 
+export function tradeResourceInKingdom(
+  state: KingdomState,
+  resource: TradableResource,
+  action: 'buy' | 'sell',
+  quantity: number,
+  assets: HexAssetEntry[]
+): {
+  nextState: KingdomState;
+  success: boolean;
+  totalGold: number;
+  messagePt: string;
+} {
+  const amount = Math.max(1, Math.round(quantity));
+  const market = getKingdomMarket(state, assets);
+  const quote = market.quotes.find((q) => q.resource === resource);
+  if (!quote) {
+    return {
+      nextState: state,
+      success: false,
+      totalGold: 0,
+      messagePt: 'Recurso indisponível no mercado.',
+    };
+  }
+
+  if (action === 'buy') {
+    const spaceLeft = Math.max(0, quote.cap - quote.stock);
+    if (spaceLeft <= 0) {
+      return {
+        nextState: state,
+        success: false,
+        totalGold: 0,
+        messagePt: `Armazém de ${quote.labelPt} já está cheio (${quote.cap}).`,
+      };
+    }
+    const actualAmount = Math.min(amount, spaceLeft);
+    const totalCost = actualAmount * quote.buyPricePerUnit;
+    if (state.worldState.cash < totalCost) {
+      return {
+        nextState: state,
+        success: false,
+        totalGold: totalCost,
+        messagePt: `Ouro insuficiente ($${totalCost} para ${actualAmount} ${quote.labelPt}).`,
+      };
+    }
+
+    return {
+      nextState: {
+        ...state,
+        worldState: {
+          ...state.worldState,
+          cash: state.worldState.cash - totalCost,
+        },
+        resources: {
+          ...state.resources,
+          [resource]: state.resources[resource] + actualAmount,
+        },
+      },
+      success: true,
+      totalGold: totalCost,
+      messagePt: `Comprou +${actualAmount} ${quote.labelPt} por $${totalCost}.`,
+    };
+  }
+
+  // Sell
+  if (quote.stock <= 0) {
+    return {
+      nextState: state,
+      success: false,
+      totalGold: 0,
+      messagePt: `Sem estoque de ${quote.labelPt} para vender.`,
+    };
+  }
+  const actualAmount = Math.min(amount, quote.stock);
+  const totalRevenue = actualAmount * quote.sellPricePerUnit;
+
+  return {
+    nextState: {
+      ...state,
+      worldState: {
+        ...state.worldState,
+        cash: state.worldState.cash + totalRevenue,
+      },
+      resources: {
+        ...state.resources,
+        [resource]: state.resources[resource] - actualAmount,
+      },
+    },
+    success: true,
+    totalGold: totalRevenue,
+    messagePt: `Vendeu ${actualAmount} ${quote.labelPt} por +$${totalRevenue}.`,
+  };
+}
+
 export function buildInKingdom(
   state: KingdomState,
   q: number,
@@ -194,7 +346,7 @@ export function buildInKingdom(
     return { nextState: state, built: false, messagePt: NOT_OWNED_BUILD_MESSAGE };
   }
 
-  if (hasHexConstruction(existing, assets)) {
+  if (hasHexConstruction(existing, assets) || getConstructionAt(state, q, r)) {
     return {
       nextState: state,
       built: false,
@@ -240,7 +392,6 @@ export function buildInKingdom(
     };
   }
 
-  // Place via core hex engine (setting price=0 temporarily so strategy cost handles total gold cleanly)
   const zeroPricedAssets = assets.map((a, idx) =>
     idx === structureIndex ? { ...a, price: 0 } : a
   );
@@ -268,6 +419,18 @@ export function buildInKingdom(
     };
   }
 
+  const totalTurns = Math.max(1, bDef.buildTimeTurns);
+  const newConstruction: ActiveConstruction = {
+    q,
+    r,
+    structureIndex,
+    orientation,
+    assetName: asset.name,
+    turnsRemaining: totalTurns,
+    totalTurns,
+    owner: 'player',
+  };
+
   return {
     nextState: {
       ...state,
@@ -282,9 +445,12 @@ export function buildInKingdom(
         food: state.resources.food - cost.food,
         ore: state.resources.ore - cost.ore,
       },
+      constructions: [...state.constructions, newConstruction],
     },
     built: true,
-    messagePt: `${bDef.labelPt} construída!`,
+    messagePt: `${bDef.labelPt} em construção (${totalTurns} ${
+      totalTurns === 1 ? 'turno' : 'turnos'
+    })!`,
   };
 }
 
@@ -314,6 +480,7 @@ export function demolishInKingdom(
     nextState: {
       ...state,
       worldState: res.nextState,
+      constructions: state.constructions.filter((c) => !(c.q === q && c.r === r)),
     },
     removed: true,
     messagePt: 'Construção demolida — terreno livre preservado.',
@@ -373,16 +540,7 @@ export function conquerInKingdom(
   }
 
   const terrainInfo = getHexTerrainAndResource(q, r, existing);
-  const targetAssetName =
-    terrainInfo.terrainType === 'mountain'
-      ? 'stone-mountain'
-      : terrainInfo.terrainType === 'forest'
-        ? 'grass-forest'
-        : terrainInfo.terrainType === 'fertile'
-          ? 'dirt'
-          : terrainInfo.terrainType === 'water'
-            ? 'water'
-            : 'grass';
+  const targetAssetName = TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
   const terrainAssetIdx = Math.max(
     0,
     assets.findIndex((a) => a.name === targetAssetName)
@@ -471,13 +629,21 @@ export function recruitUnitInKingdom(
     };
   }
 
+  if (getConstructionAt(state, q, r)) {
+    return {
+      nextState: state,
+      recruited: false,
+      messagePt: 'Construção em andamento. Aguarde a conclusão para recrutar.',
+    };
+  }
+
   const assetName = assets[tile.structureIndex]?.name ?? '';
   const bDef = getBuildingDefinition(assetName);
   if (!bDef.canRecruitUnits) {
     return {
       nextState: state,
       recruited: false,
-      messagePt: 'Recrute tropas em um Quartel, Castelo ou Porto.',
+      messagePt: 'Recrute tropas em um Quartel, Bastião, Castelo ou Porto.',
     };
   }
 
@@ -609,12 +775,14 @@ export function commandUnitInKingdom(
   }
   if (!uDef.navalOnly && terrainInfo.terrainType === 'water') {
     const isBridge =
-      targetTile && assets[targetTile.structureIndex]?.name === 'bridge';
+      targetTile &&
+      assets[targetTile.structureIndex]?.name === 'bridge' &&
+      !getConstructionAt(state, to.q, to.r);
     if (!isBridge) {
       return {
         nextState: state,
         acted: false,
-        messagePt: 'Tropas terrestres não atravessam água sem ponte.',
+        messagePt: 'Tropas terrestres não atravessam água sem ponte concluída.',
       };
     }
   }
@@ -651,10 +819,11 @@ export function commandUnitInKingdom(
     to.r,
     state.units,
     assets,
-    enemyFaction?.unlockedTechs ?? []
+    enemyFaction?.unlockedTechs ?? [],
+    getUnderConstructionKeys(state)
   );
 
-  let nextUnits = state.units
+  const nextUnits = state.units
     .map((u) => {
       if (u.id === unit.id) {
         const nextHp = Math.max(0, u.hp - combat.attackerDamage);
@@ -754,7 +923,6 @@ export function performDiplomacyAction(
     };
   }
 
-  // trade_pact
   const pactCost = 300;
   if (target.relation === 'hostile') {
     return {
@@ -798,9 +966,36 @@ export function resolveKingdomEvent(
   let nextCash = state.worldState.cash;
   const nextRes = { ...state.resources };
   let nextResearch = state.research;
+  let nextPop = state.population;
+  const nextEffects = [...state.activeEffects];
   let outcomePt = 'Evento resolvido.';
 
   switch (choiceId) {
+    case 'irrigate_fields':
+      if (nextCash >= 500) {
+        nextCash -= 500;
+        outcomePt = 'Irrigação emergencial concluída (-$500). Colheitas protegidas.';
+      } else {
+        nextEffects.push({
+          id: `eff-drought-${evt.turn}`,
+          titlePt: 'Seca Severa',
+          descriptionPt: '-30% produção agrícola',
+          turnsRemaining: 3,
+          foodMultiplierMod: 0.7,
+        });
+        outcomePt = 'Saldo insuficiente ($500): seca reduzirá alimentos em 30% por 3 turnos.';
+      }
+      break;
+    case 'accept_drought':
+      nextEffects.push({
+        id: `eff-drought-${evt.turn}`,
+        titlePt: 'Seca Severa',
+        descriptionPt: '-30% produção agrícola',
+        turnsRemaining: 3,
+        foodMultiplierMod: 0.7,
+      });
+      outcomePt = 'Seca ativa por 3 turnos (-30% Alimento/turno).';
+      break;
     case 'store_food':
       nextRes.food = Math.min(econ.storageCaps.food, nextRes.food + 35);
       outcomePt = '+35 Alimento estocado.';
@@ -834,34 +1029,110 @@ export function resolveKingdomEvent(
     case 'decline_caravan':
       outcomePt = 'Oferta recusada.';
       break;
-    case 'import_grain':
-      if (nextCash >= 100) {
-        nextCash -= 100;
-        outcomePt = 'Grãos importados (-$100). Estoque protegido.';
+    case 'fund_healers':
+      if (nextCash >= 240) {
+        nextCash -= 240;
+        outcomePt = 'Boticários contiveram a epidemia (-$240). População preservada.';
       } else {
-        nextRes.food = Math.max(0, nextRes.food - 20);
-        outcomePt = 'Sem ouro suficiente: -20 Alimento.';
+        nextPop = Math.max(4, nextPop - 2);
+        nextEffects.push({
+          id: `eff-epidemic-${evt.turn}`,
+          titlePt: 'Epidemia',
+          descriptionPt: '-15% produtividade',
+          turnsRemaining: 2,
+          efficiencyPenalty: 0.15,
+        });
+        outcomePt = 'Sem ouro suficiente: -2 moradores e -15% eficiência por 2 turnos.';
       }
       break;
-    case 'ration_food':
-      nextRes.food = Math.max(0, nextRes.food - 20);
-      outcomePt = 'Racionamento aplicado (-20 Alimento).';
+    case 'quarantine_only':
+      nextPop = Math.max(4, nextPop - 1);
+      nextEffects.push({
+        id: `eff-epidemic-${evt.turn}`,
+        titlePt: 'Epidemia',
+        descriptionPt: '-15% produtividade',
+        turnsRemaining: 2,
+        efficiencyPenalty: 0.15,
+      });
+      outcomePt = 'Quarentena aplicada (-1 morador, -15% eficiência por 2 turnos).';
       break;
     case 'stabilize_treasury':
-      if (nextCash >= 120) {
-        nextCash -= 120;
+      if (nextCash >= 140) {
+        nextCash -= 140;
         const adv = advanceResearchProgress(nextResearch, 10);
         nextResearch = adv.nextResearch;
-        outcomePt = 'Reforma comercial estabilizou o reino (-$120, +10 Ciência).';
+        outcomePt = 'Reforma comercial estabilizou o reino (-$140, +10 Ciência).';
       } else {
-        nextCash = Math.max(0, nextCash - 80);
-        outcomePt = 'Retração econômica (-$80).';
+        nextEffects.push({
+          id: `eff-crisis-${evt.turn}`,
+          titlePt: 'Crise Econômica',
+          descriptionPt: '-20% receita em ouro',
+          turnsRemaining: 2,
+          goldMultiplierMod: 0.8,
+        });
+        outcomePt = 'Crise econômica reduzirá ouro em 20% por 2 turnos.';
       }
       break;
     case 'absorb_crisis':
-      nextCash = Math.max(0, nextCash - 80);
-      outcomePt = 'Crise absorvida (-$80).';
+      nextEffects.push({
+        id: `eff-crisis-${evt.turn}`,
+        titlePt: 'Crise Econômica',
+        descriptionPt: '-20% receita em ouro',
+        turnsRemaining: 2,
+        goldMultiplierMod: 0.8,
+      });
+      outcomePt = 'Retração econômica ativa por 2 turnos (-20% Ouro).';
       break;
+    case 'tax_relief':
+      if (nextCash >= 180) {
+        nextCash -= 180;
+        outcomePt = 'Alívio fiscal concedido (-$180). Ordem restaurada.';
+      } else {
+        nextEffects.push({
+          id: `eff-revolt-${evt.turn}`,
+          titlePt: 'Greve Tributária',
+          descriptionPt: '-15% produtividade',
+          turnsRemaining: 2,
+          efficiencyPenalty: 0.15,
+        });
+        outcomePt = 'Sem ouro para alívio: agitação reduz eficiência por 2 turnos.';
+      }
+      break;
+    case 'suppress_revolt':
+      if (military.defensePower >= 14) {
+        outcomePt = `Guarda real pacificou a região (Defesa ${military.defensePower}).`;
+      } else {
+        nextEffects.push({
+          id: `eff-revolt-${evt.turn}`,
+          titlePt: 'Greve Tributária',
+          descriptionPt: '-15% produtividade',
+          turnsRemaining: 2,
+          efficiencyPenalty: 0.15,
+        });
+        outcomePt = `Defesa insuficiente (${military.defensePower}/14): -15% produtividade por 2 turnos.`;
+      }
+      break;
+    case 'sponsor_academy':
+      if (nextCash >= 180) {
+        nextCash -= 180;
+        const adv = advanceResearchProgress(nextResearch, 22);
+        nextResearch = adv.nextResearch;
+        outcomePt = adv.completedTech
+          ? `Pesquisa ${adv.completedTech.namePt} concluída (-$180)!`
+          : 'Experimentos financiados (-$180, +22 Ciência)!';
+      } else {
+        const adv = advanceResearchProgress(nextResearch, 6);
+        nextResearch = adv.nextResearch;
+        outcomePt = 'Sem ouro para patrocínio integral (+6 Ciência).';
+      }
+      break;
+    case 'sell_manuscripts': {
+      nextCash += 140;
+      const adv = advanceResearchProgress(nextResearch, 6);
+      nextResearch = adv.nextResearch;
+      outcomePt = 'Tratados vendidos (+$140, +6 Ciência).';
+      break;
+    }
     case 'defend_borders':
       if (military.defensePower >= 12) {
         nextCash += 180;
@@ -891,7 +1162,9 @@ export function resolveKingdomEvent(
       ...state,
       worldState: { ...state.worldState, cash: nextCash },
       resources: nextRes,
+      population: nextPop,
       research: nextResearch,
+      activeEffects: nextEffects,
       activeEvent: null,
       eventHistory: [historyEntry, ...state.eventHistory].slice(0, 12),
     },
@@ -905,12 +1178,12 @@ export function advanceKingdomTurn(
 ): {
   nextState: KingdomState;
   completedTech: TechDefinition | null;
+  completedBuildings: string[];
   newEvent: ActiveKingdomEvent | null;
   conqueredByAiKeys: string[];
   headlinePt: string;
 } {
   let working = state;
-  // Auto-resolve any forgotten active event with its second (safe fallback) choice
   if (working.activeEvent && working.activeEvent.choices.length > 0) {
     const fallbackChoice =
       working.activeEvent.choices[working.activeEvent.choices.length - 1];
@@ -937,6 +1210,23 @@ export function advanceKingdomTurn(
     working.population + econ.population.projectedGrowth
   );
 
+  // Progress active multi-turn constructions
+  const completedBuildings: string[] = [];
+  const nextConstructions: ActiveConstruction[] = [];
+  for (const c of working.constructions) {
+    const rem = c.turnsRemaining - 1;
+    if (rem <= 0) {
+      completedBuildings.push(getBuildingDefinition(c.assetName).labelPt);
+    } else {
+      nextConstructions.push({ ...c, turnsRemaining: rem });
+    }
+  }
+
+  // Decrement ongoing multi-turn world effects
+  const nextEffects: ActiveWorldEffect[] = working.activeEffects
+    .map((eff) => ({ ...eff, turnsRemaining: eff.turnsRemaining - 1 }))
+    .filter((eff) => eff.turnsRemaining > 0);
+
   const researchStep = advanceResearchProgress(working.research, econ.scienceNet);
 
   // Refresh player & AI unit movement + small garrison healing on owned tiles
@@ -950,12 +1240,17 @@ export function advanceKingdomTurn(
     };
   });
 
+  const underKeysAfterBuild = new Set(
+    nextConstructions.map((c) => hexKey(c.q, c.r))
+  );
+
   const aiResult = advanceFactionsTurn({
     worldState: { ...working.worldState, cash: nextCash },
     factions: working.factions,
     units: refreshedUnits,
     assets,
     turn: nextTurn,
+    underConstructionKeys: underKeysAfterBuild,
   });
 
   const playerBorderHex = Object.values(aiResult.worldState.hexes).find(
@@ -970,6 +1265,9 @@ export function advanceKingdomTurn(
     `Turno ${nextTurn}`,
     `${econ.goldNet >= 0 ? '+' : ''}$${econ.goldNet}`,
   ];
+  if (completedBuildings.length > 0) {
+    summaryParts.push(`Pronto: ${completedBuildings.join(', ')}`);
+  }
   if (researchStep.completedTech) {
     summaryParts.push(`Pesquisa: ${researchStep.completedTech.namePt}`);
   } else if (newEvent) {
@@ -987,11 +1285,14 @@ export function advanceKingdomTurn(
       research: researchStep.nextResearch,
       units: aiResult.units,
       factions: aiResult.factions,
+      constructions: nextConstructions,
+      activeEffects: nextEffects,
       activeEvent: newEvent,
       eventHistory: working.eventHistory,
       lastTurnSummaryPt: summaryParts.join(' · '),
     },
     completedTech: researchStep.completedTech,
+    completedBuildings,
     newEvent,
     conqueredByAiKeys: aiResult.conqueredKeys,
     headlinePt: summaryParts.join(' · '),
@@ -1000,7 +1301,7 @@ export function advanceKingdomTurn(
 
 export function serializeKingdomState(state: KingdomState): string {
   return JSON.stringify({
-    version: 2,
+    version: 3,
     turn: state.turn,
     cash: state.worldState.cash,
     structures: Object.values(state.worldState.hexes),
@@ -1009,6 +1310,8 @@ export function serializeKingdomState(state: KingdomState): string {
     research: state.research,
     units: state.units,
     factions: state.factions,
+    constructions: state.constructions,
+    activeEffects: state.activeEffects,
     activeEvent: state.activeEvent,
     eventHistory: state.eventHistory,
   });
@@ -1035,6 +1338,29 @@ export function deserializeKingdomState(
           }
         : defaults;
 
+    const factions =
+      Array.isArray(parsed.factions) && parsed.factions.length > 0
+        ? parsed.factions.map((f, idx) => normalizeFactionState(f, idx))
+        : createInitialFactions();
+
+    const constructions: ActiveConstruction[] = Array.isArray(parsed.constructions)
+      ? parsed.constructions.filter(
+          (c): c is ActiveConstruction =>
+            Boolean(c) &&
+            typeof c.q === 'number' &&
+            typeof c.r === 'number' &&
+            typeof c.turnsRemaining === 'number' &&
+            c.turnsRemaining > 0
+        )
+      : [];
+
+    const activeEffects: ActiveWorldEffect[] = Array.isArray(parsed.activeEffects)
+      ? parsed.activeEffects.filter(
+          (e): e is ActiveWorldEffect =>
+            Boolean(e) && typeof e.id === 'string' && typeof e.turnsRemaining === 'number'
+        )
+      : [];
+
     return {
       turn: typeof parsed.turn === 'number' && parsed.turn >= 1 ? parsed.turn : 1,
       worldState,
@@ -1048,10 +1374,9 @@ export function deserializeKingdomState(
           ? parsed.research
           : createInitialResearchState(),
       units: Array.isArray(parsed.units) ? parsed.units : [],
-      factions:
-        Array.isArray(parsed.factions) && parsed.factions.length > 0
-          ? parsed.factions
-          : createInitialFactions(),
+      factions,
+      constructions,
+      activeEffects,
       activeEvent: parsed.activeEvent ?? null,
       eventHistory: Array.isArray(parsed.eventHistory) ? parsed.eventHistory : [],
       lastTurnSummaryPt: null,
