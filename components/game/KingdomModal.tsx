@@ -41,6 +41,7 @@ import { computeCalendarSnapshot } from '@/lib/calendar-engine';
 import { DAY_PHASE_META, getDayPhaseForTurn } from '@/lib/day-night-engine';
 import { SEASON_PROFILES, createInitialClimateWeather } from '@/lib/season-engine';
 import { toRomanLevel } from '@/lib/building-upgrade-engine';
+import { BUILDING_MODULES } from '@/lib/building-modules-engine';
 
 export type KingdomModalTab = 'economy' | 'trade' | 'research' | 'military' | 'diplomacy';
 
@@ -537,7 +538,9 @@ export default function KingdomModal({
                           {city.name} · {city.stageLabelPt} (Estágio {city.level}/5)
                         </span>
                         <span className="text-[11px] font-semibold text-[#5c5140] tabular-nums">
-                          Pop. ~{city.localPopulation}
+                          População: {city.population} / {city.housingCapacity} · Cresc.{' '}
+                          {city.growthPerTurn >= 0 ? '+' : ''}
+                          {city.growthPerTurn}/turno · Trab. livres: {city.availableWorkers}
                           {(city.regionHexKeys?.length ?? 0) > 0
                             ? ` · ${city.regionHexKeys?.length} hexes na região`
                             : ''}{' '}
@@ -630,10 +633,16 @@ export default function KingdomModal({
                   <div className="space-y-1.5 text-xs">
                     {kingdomState.constructions.map((c) => {
                       const def = getBuildingDefinition(c.assetName);
+                      const modLabel =
+                        c.kind === 'module' && c.moduleId && c.moduleId in BUILDING_MODULES
+                          ? BUILDING_MODULES[c.moduleId].labelPt
+                          : null;
                       const title =
                         c.kind === 'upgrade'
                           ? `${def.labelPt} → Nv. ${toRomanLevel(c.targetLevel ?? 2)}`
-                          : def.labelPt;
+                          : modLabel
+                            ? `${def.labelPt} · Módulo: ${modLabel}`
+                            : def.labelPt;
                       return (
                         <div
                           key={`${c.q},${c.r}`}

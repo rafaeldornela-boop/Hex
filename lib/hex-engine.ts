@@ -45,6 +45,8 @@ export interface PlacedHex {
   rareFeature?: RareFeatureType;
   /** Building upgrade tier (1 = base, 2..4 = upgraded) */
   level?: number;
+  /** Installed modular building improvements (separate from structural level) */
+  modules?: string[];
   /** Optional seam for upcoming territory, level, and worker mechanics */
   meta?: TileDomainMetadata;
 }
@@ -283,7 +285,10 @@ export function demolishHexInState(
           resourceType: terrainInfo.resourceType,
           resourceAmount: terrainInfo.resourceAmount,
           level: undefined,
-          ...(existing.meta ? { meta: { ...existing.meta, level: undefined } } : {}),
+          modules: undefined,
+          ...(existing.meta
+            ? { meta: { ...existing.meta, level: undefined, modules: undefined } }
+            : {}),
         },
       },
     },
@@ -352,6 +357,19 @@ export function deserializeWorldState(
           const rawLevel = (item as PlacedHex).level;
           if (typeof rawLevel === 'number' && Number.isFinite(rawLevel) && rawLevel >= 1) {
             tile.level = Math.max(1, Math.min(4, Math.round(rawLevel)));
+          }
+          const rawModules = (item as PlacedHex).modules;
+          if (Array.isArray(rawModules)) {
+            const cleanModules = Array.from(
+              new Set(
+                rawModules
+                  .filter((m): m is string => typeof m === 'string' && m.trim().length > 0)
+                  .map((m) => m.trim())
+              )
+            );
+            if (cleanModules.length > 0) {
+              tile.modules = cleanModules;
+            }
           }
           if (isValidRareFeatureType(rawRare)) {
             tile.rareFeature = rawRare;

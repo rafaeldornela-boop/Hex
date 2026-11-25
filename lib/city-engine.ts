@@ -1,5 +1,7 @@
 import type { HexAssetEntry } from './godot-docs';
 import { getBuildingDefinition } from './buildings-catalog';
+import { getBuildingLevel, getEffectiveBuildingStats } from './building-upgrade-engine';
+import { aggregateTileModuleEffects } from './building-modules-engine';
 import { hexKey, type AxialCoord, type HexOwner, type HexWorldState } from './hex-engine';
 import {
   evaluateRegionalWorld,
@@ -32,6 +34,14 @@ export interface CityEntity {
   developmentScore: number;
   nextLevelScore: number | null;
   localPopulation: number;
+  /** Abstract city population (always synced with localPopulation) */
+  population: number;
+  housingCapacity: number;
+  growthPerTurn: number;
+  availableWorkers: number;
+  workersRequired: number;
+  workersAssigned: number;
+  urbanQualityScore: number;
   primarySpecialization?: RegionalSpecializationBadge | null;
   specializations: RegionalSpecializationBadge[];
   districts: NaturalDistrict[];
@@ -44,13 +54,19 @@ export interface CityEntity {
 
 export const CITY_STAGE_META: Record<
   CityStage,
-  { labelPt: string; minScore: number; nextScore: number | null; capacityBonus: number }
+  {
+    labelPt: string;
+    minScore: number;
+    minPopulation: number;
+    nextScore: number | null;
+    capacityBonus: number;
+  }
 > = {
-  1: { labelPt: 'Acampamento', minScore: 0, nextScore: 18, capacityBonus: 0 },
-  2: { labelPt: 'Aldeia', minScore: 18, nextScore: 42, capacityBonus: 0 },
-  3: { labelPt: 'Vila', minScore: 42, nextScore: 68, capacityBonus: 1 },
-  4: { labelPt: 'Cidade', minScore: 68, nextScore: 96, capacityBonus: 2 },
-  5: { labelPt: 'Grande Cidade', minScore: 96, nextScore: null, capacityBonus: 3 },
+  1: { labelPt: 'Acampamento', minScore: 0, minPopulation: 0, nextScore: 18, capacityBonus: 0 },
+  2: { labelPt: 'Aldeia', minScore: 18, minPopulation: 8, nextScore: 42, capacityBonus: 0 },
+  3: { labelPt: 'Vila', minScore: 42, minPopulation: 18, nextScore: 68, capacityBonus: 1 },
+  4: { labelPt: 'Cidade', minScore: 68, minPopulation: 28, nextScore: 96, capacityBonus: 2 },
+  5: { labelPt: 'Grande Cidade', minScore: 96, minPopulation: 40, nextScore: null, capacityBonus: 3 },
 };
 
 export const CITY_FOUNDING_ASSETS = new Set<string>([
@@ -116,6 +132,20 @@ export function getCityStageForScore(score: number): CityStage {
   return 1;
 }
 
+export function getCityStageForMetrics(params: {
+  developmentScore: number;
+  population: number;
+}): CityStage {
+  const { developmentScore, population } = params;
+  for (const stage of [5, 4, 3, 2, 1] as const) {
+    const meta = CITY_STAGE_META[stage];
+    if (developmentScore >= meta.minScore && population >= meta.minPopulation) {
+      return stage;
+    }
+  }
+  return 1;
+}
+
 export function ensureStarterCapitalCity(params: {
   playerCapital?: AxialCoord;
   worldState: HexWorldState;
@@ -160,6 +190,13 @@ export function ensureStarterCapitalCity(params: {
       developmentScore: 22,
       nextLevelScore: CITY_STAGE_META[2].nextScore,
       localPopulation: 18,
+      population: 18,
+      housingCapacity: 28,
+      growthPerTurn: 1,
+      availableWorkers: 12,
+      workersRequired: 6,
+      workersAssigned: 6,
+      urbanQualityScore: 2,
       specializations: [],
       districts: [],
       connectedCityIds: [],
@@ -243,6 +280,13 @@ export function syncAndEvolveCities(params: {
       developmentScore: 10,
       nextLevelScore: CITY_STAGE_META[1].nextScore,
       localPopulation: 6,
+      population: 6,
+      housingCapacity: 10,
+      growthPerTurn: 1,
+      availableWorkers: 6,
+      workersRequired: 0,
+      workersAssigned: 0,
+      urbanQualityScore: 0,
       specializations: [],
       districts: [],
       connectedCityIds: [],
@@ -292,18 +336,23 @@ export function syncAndEvolveCities(params: {
     owner: 'player',
   });
 
-  // Assign local population share proportionally by nearby housing capacity
-  const housingWeights = workingCities.map((city) => {
-    let hw = 4;
+  // Assign local population share proportionally by nearby effective housing capacity (levels + modules)
+  const housingWeights = workingCities.map((city, cityIdx) => {
+    let hw = cityIdx === 0 ? 4 : 2;
+    const regionKeys = new Set(regional.regionHexKeysByCityId[city.id] ?? []);
     for (const tile of Object.values(worldState.hexes)) {
       if (tile.owner !== 'player') continue;
-      if (axialDistance(city.center, tile) > 2) continue;
       const key = hexKey(tile.q, tile.r);
+      const inRegion = regionKeys.size > 0 ? regionKeys.has(key) : axialDistance(city.center, tile) <= 2;
+      if (!inRegion) continue;
       if (underConstructionKeys?.has(key)) continue;
-      const bDef = getBuildingDefinition(assets[tile.structureIndex]?.name ?? '');
-      hw += bDef.housingCapacity;
+      const assetName = assets[tile.structureIndex]?.name ?? '';
+      const lv = getBuildingLevel(tile);
+      const stats = getEffectiveBuildingStats(assetName, lv);
+      const modEff = aggregateTileModuleEffects(assetName, tile.modules);
+      hw += stats.housingCapacity + modEff.housingBonus;
     }
-    return hw;
+    return Math.max(4, hw);
   });
   const totalWeight = Math.max(1, housingWeights.reduce((a, b) => a + b, 0));
 
@@ -327,37 +376,71 @@ export function syncAndEvolveCities(params: {
     const primarySpecialization =
       regionalProfile?.primarySpecialization ?? specializations[0] ?? null;
     const regionHexKeys = regional.regionHexKeysByCityId[city.id] ?? [];
+    const regionSet = new Set(regionHexKeys);
 
     let completedNear = 0;
     let housingNear = 0;
     let roadsNear = 0;
     let commerceNear = 0;
+    let workersRequiredCity = 0;
+    let urbanQualityScore = (city.level - 1) + districts.length * 2;
+
     for (const tile of Object.values(worldState.hexes)) {
       if (tile.owner !== 'player') continue;
-      const d = axialDistance(city.center, tile);
-      if (d > 2) continue;
       const key = hexKey(tile.q, tile.r);
+      const d = axialDistance(city.center, tile);
+      const inScope = regionSet.size > 0 ? regionSet.has(key) : d <= 2;
+      if (!inScope) continue;
       const road = roads[key];
-      if (road) roadsNear += 1 + (road.level >= 3 ? 0.6 : 0);
+      if (road && d <= 2) roadsNear += 1 + (road.level >= 3 ? 0.6 : 0);
       if (underConstructionKeys?.has(key)) continue;
+
       const assetName = assets[tile.structureIndex]?.name ?? '';
-      const bDef = getBuildingDefinition(assetName);
-      if (bDef.housingCapacity > 0) housingNear += bDef.housingCapacity;
-      if (bDef.role === 'commerce') commerceNear += 1;
-      if (
-        bDef.housingCapacity > 0 ||
-        bDef.workersRequired > 0 ||
-        bDef.defenseBonus > 0 ||
-        bDef.role === 'capital'
-      ) {
-        completedNear += 1;
+      const lv = getBuildingLevel(tile);
+      const stats = getEffectiveBuildingStats(assetName, lv);
+      const modEff = aggregateTileModuleEffects(assetName, tile.modules);
+
+      const tileHousing = stats.housingCapacity + modEff.housingBonus;
+      if (tileHousing > 0) {
+        housingNear += tileHousing;
+        if (lv >= 2) urbanQualityScore += lv - 1;
+      }
+      urbanQualityScore += modEff.urbanQualityBonus;
+      workersRequiredCity += stats.workersRequired;
+
+      if (d <= 2) {
+        if (stats.baseDef.role === 'commerce') commerceNear += 1;
+        if (
+          stats.housingCapacity > 0 ||
+          stats.workersRequired > 0 ||
+          stats.defenseBonus > 0 ||
+          stats.baseDef.role === 'capital'
+        ) {
+          completedNear += 1;
+        }
       }
     }
 
-    const localPopulation = Math.max(
-      1,
-      Math.round((population * housingWeights[idx]) / totalWeight)
-    );
+    const localPopulation =
+      workingCities.length === 1
+        ? Math.max(1, Math.round(population))
+        : Math.max(1, Math.round((population * housingWeights[idx]) / totalWeight));
+
+    const cityHousingCapacity = housingWeights[idx];
+    const workersAssignedCity = Math.min(localPopulation, workersRequiredCity);
+    const availableWorkersCity = Math.max(0, localPopulation - workersAssignedCity);
+
+    let growthPerTurn = 0;
+    if (hasFoodDeficit) {
+      growthPerTurn = -1;
+    } else if (localPopulation < cityHousingCapacity) {
+      const spare = cityHousingCapacity - localPopulation;
+      const rawG =
+        1 +
+        (urbanQualityScore >= 5 && spare >= 2 ? 1 : 0) +
+        (connectedCityIds.length > 0 && spare >= 3 ? 1 : 0);
+      growthPerTurn = Math.min(spare, localPopulation >= 36 && rawG > 1 ? rawG - 1 : rawG);
+    }
 
     const rawScore =
       completedNear * 2.5 +
@@ -367,10 +450,14 @@ export function syncAndEvolveCities(params: {
       districts.length * 5 +
       commerceNear * 3 +
       unlockedTechs.length * 3 +
+      Math.min(10, urbanQualityScore * 0.8) +
       (hasFoodDeficit ? -8 : 4);
 
     const developmentScore = Math.max(0, Math.round(rawScore));
-    const computedStage = getCityStageForScore(developmentScore);
+    const computedStage = getCityStageForMetrics({
+      developmentScore,
+      population: localPopulation,
+    });
     const prevStage = city.level;
     const nextStage = Math.max(prevStage, computedStage) as CityStage;
 
@@ -385,16 +472,19 @@ export function syncAndEvolveCities(params: {
     const stageMeta = CITY_STAGE_META[nextStage];
     const stabilityLabelPt = hasFoodDeficit
       ? 'Escassez de Alimento'
-      : connectedCityIds.length > 0
-        ? 'Rede Próspera'
-        : roadsNear >= 2
-          ? 'Conectada'
-          : 'Estável';
+      : localPopulation >= cityHousingCapacity
+        ? 'Habitação Lotada'
+        : connectedCityIds.length > 0
+          ? 'Rede Próspera'
+          : roadsNear >= 2
+            ? 'Conectada'
+            : 'Estável';
 
     const growthBonusPct =
       (nextStage - 1) * 4 +
       Math.min(10, connectedCityIds.length * 5) +
-      (districts.length > 0 ? 4 : 0);
+      (districts.length > 0 ? 4 : 0) +
+      Math.min(12, urbanQualityScore * 2);
 
     return {
       ...city,
@@ -403,6 +493,13 @@ export function syncAndEvolveCities(params: {
       developmentScore,
       nextLevelScore: stageMeta.nextScore,
       localPopulation,
+      population: localPopulation,
+      housingCapacity: cityHousingCapacity,
+      growthPerTurn,
+      availableWorkers: availableWorkersCity,
+      workersRequired: workersRequiredCity,
+      workersAssigned: workersAssignedCity,
+      urbanQualityScore,
       primarySpecialization,
       specializations,
       districts,
@@ -532,7 +629,29 @@ export function normalizeCities(
         typeof c.developmentScore === 'number' ? Math.round(c.developmentScore) : 20,
       nextLevelScore: CITY_STAGE_META[level].nextScore,
       localPopulation:
-        typeof c.localPopulation === 'number' ? Math.round(c.localPopulation) : 10,
+        typeof c.localPopulation === 'number'
+          ? Math.round(c.localPopulation)
+          : typeof c.population === 'number'
+            ? Math.round(c.population)
+            : 10,
+      population:
+        typeof c.population === 'number'
+          ? Math.round(c.population)
+          : typeof c.localPopulation === 'number'
+            ? Math.round(c.localPopulation)
+            : 10,
+      housingCapacity:
+        typeof c.housingCapacity === 'number' ? Math.round(c.housingCapacity) : 14,
+      growthPerTurn:
+        typeof c.growthPerTurn === 'number' ? Math.round(c.growthPerTurn) : 0,
+      availableWorkers:
+        typeof c.availableWorkers === 'number' ? Math.round(c.availableWorkers) : 4,
+      workersRequired:
+        typeof c.workersRequired === 'number' ? Math.round(c.workersRequired) : 0,
+      workersAssigned:
+        typeof c.workersAssigned === 'number' ? Math.round(c.workersAssigned) : 0,
+      urbanQualityScore:
+        typeof c.urbanQualityScore === 'number' ? Math.round(c.urbanQualityScore) : 0,
       primarySpecialization: normalizeSpecializationBadge(c.primarySpecialization),
       specializations: Array.isArray(c.specializations)
         ? c.specializations

@@ -400,7 +400,7 @@ test('regional economy bonuses stay balanced (winter remains harsher than spring
   // Save/load version 9 round-trip
   const rawV9 = serializeKingdomState(state);
   const parsedV9 = JSON.parse(rawV9);
-  assert.equal(parsedV9.version, 9);
+  assert.equal(parsedV9.version, 10);
 
   const reloaded = deserializeKingdomState(rawV9, HEX_ASSETS.length);
   assert.ok(reloaded !== null);

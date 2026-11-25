@@ -437,7 +437,7 @@ test('serializeKingdomState and deserializeKingdomState round-trip v8 state with
 
   const json = serializeKingdomState(starter);
   const parsed = JSON.parse(savedJsonOrThrow(json));
-  assert.equal(parsed.version, 9);
+  assert.equal(parsed.version, 10);
 
   const loaded = deserializeKingdomState(json, HEX_ASSETS.length);
   assert.ok(loaded !== null);

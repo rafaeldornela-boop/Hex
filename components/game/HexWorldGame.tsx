@@ -51,6 +51,10 @@ import {
   getBuildingLevel,
   type BuildingUpgradeEvaluation,
 } from '@/lib/building-upgrade-engine';
+import type {
+  BuildingModuleId,
+  BuildingModulesEvaluation,
+} from '@/lib/building-modules-engine';
 import {
   advanceKingdomTurn,
   buildInKingdom,
@@ -60,6 +64,7 @@ import {
   createStarterKingdomState,
   demolishInKingdom,
   deserializeKingdomState,
+  evaluateBuildingModulesInKingdom,
   evaluateBuildingUpgradeInKingdom,
   evaluateExpansionInKingdom,
   getConstructionAt,
@@ -69,8 +74,10 @@ import {
   getKingdomProgression,
   getKingdomRoadSummary,
   getKingdomTerritoryCapacity,
+  getModuleConstructionsByKey,
   getUnderConstructionKeys,
   getUpgradingConstructionsByKey,
+  installBuildingModuleInKingdom,
   performDiplomacyAction,
   recruitUnitInKingdom,
   resolveKingdomEvent,
@@ -144,7 +151,10 @@ function computeValidUnitTargets(
 }
 
 function getUpgradingKeysSet(state: KingdomState): Set<string> {
-  return new Set(Object.keys(getUpgradingConstructionsByKey(state)));
+  return new Set([
+    ...Object.keys(getUpgradingConstructionsByKey(state)),
+    ...Object.keys(getModuleConstructionsByKey(state)),
+  ]);
 }
 
 export default function HexWorldGame({ initialAutostart = false }: HexWorldGameProps) {
@@ -548,6 +558,41 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     showToast(res.messagePt);
   }, [showToast, syncSceneRoadsAndCities]);
 
+  const handleInstallBuildingModule = useCallback(
+    (moduleId: BuildingModuleId) => {
+      const coord = selectedHexRef.current;
+      if (!coord) return;
+      const res = installBuildingModuleInKingdom(
+        kingdomStateRef.current,
+        coord.q,
+        coord.r,
+        moduleId,
+        HEX_ASSETS
+      );
+      if (!res.started) {
+        gameAudio.playError();
+        showToast(res.messagePt);
+        return;
+      }
+      kingdomStateRef.current = res.nextState;
+      setKingdomState(res.nextState);
+      gameAudio.playPlace();
+      const under = getUnderConstructionKeys(res.nextState);
+      const upgrading = getUpgradingKeysSet(res.nextState);
+      controllerRef.current?.syncWorldState(
+        res.nextState.worldState,
+        [hexKey(coord.q, coord.r)],
+        undefined,
+        under,
+        undefined,
+        upgrading
+      );
+      syncSceneRoadsAndCities(res.nextState, under);
+      showToast(res.messagePt);
+    },
+    [showToast, syncSceneRoadsAndCities]
+  );
+
   const handleCancelAction = useCallback(() => {
     let didCancel = false;
     if (buildSheetOpenRef.current) {
@@ -711,6 +756,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       res.newEvent ||
       res.completedBuildings.length > 0 ||
       res.completedUpgrades.length > 0 ||
+      res.completedModules.length > 0 ||
       res.incorporatedKeys.length > 0 ||
       res.foundedCities.length > 0 ||
       res.leveledUpCities.length > 0
@@ -1536,6 +1582,16 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     );
   }, [kingdomState, selectedHex, selectedHexHasConstruction]);
 
+  const selectedBuildingModules = useMemo<BuildingModulesEvaluation | null>(() => {
+    if (!selectedHex || !selectedHexHasConstruction) return null;
+    return evaluateBuildingModulesInKingdom(
+      kingdomState,
+      selectedHex.q,
+      selectedHex.r,
+      HEX_ASSETS
+    );
+  }, [kingdomState, selectedHex, selectedHexHasConstruction]);
+
   return (
     <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-[#9bd2ee] hex-game-viewport">
       {/* Isolated WebGL canvas mount container */}
@@ -1575,6 +1631,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         selectedTileAssetName={selectedTileAssetName}
         selectedBuildingLevel={selectedBuildingLevel}
         selectedUpgradeEvaluation={selectedUpgradeEvaluation}
+        selectedBuildingModules={selectedBuildingModules}
         selectedExpansion={selectedExpansion}
         selectedTerrainInfo={selectedTerrainInfo}
         selectedStrategicInfo={selectedStrategicInfo}
@@ -1610,6 +1667,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         onConfirmSelectedHex={handleConfirmSelectedHex}
         onBuildRoadSelected={handleBuildRoadSelected}
         onUpgradeSelectedHex={handleUpgradeSelectedHex}
+        onInstallBuildingModule={handleInstallBuildingModule}
         onDemolishSelectedHex={handleDemolishSelectedHex}
         onRecruitUnit={handleRecruitUnit}
         onStartUnitCommand={handleStartUnitCommand}

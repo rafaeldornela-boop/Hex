@@ -570,6 +570,7 @@ export class HexSceneController {
       owner: HexOwner;
       underConstruction: boolean;
       level: number;
+      modulesSig: string;
     }
   >();
   private seasonalTerrainMats = new Map<string, THREE.Material | THREE.Material[]>();
@@ -2188,14 +2189,27 @@ export class HexSceneController {
     return geo;
   }
 
+  private getTileModulesList(tile: PlacedHex | null | undefined): string[] {
+    if (!tile) return [];
+    if (Array.isArray(tile.modules)) return tile.modules;
+    if (Array.isArray(tile.meta?.modules)) return tile.meta.modules;
+    return [];
+  }
+
+  private getModulesSig(tile: PlacedHex | null | undefined): string {
+    const mods = this.getTileModulesList(tile);
+    return mods.length > 0 ? mods.slice().sort().join(',') : '';
+  }
+
   private buildUpgradeAttachmentGroup(
     assetName: string,
     level: number,
-    isUnderConstruction: boolean
+    isUnderConstruction: boolean,
+    modules: readonly string[] = []
   ): THREE.Group | null {
     if (isUnderConstruction) return null;
     const hasLanternBaseline = NIGHT_LANTERN_BUILDING_ASSETS.has(assetName);
-    if (level <= 1 && !hasLanternBaseline) return null;
+    if (level <= 1 && !hasLanternBaseline && modules.length === 0) return null;
 
     const group = new THREE.Group();
     const yBase = 0.2; // local hex top surface inside GLB template coordinates
@@ -2215,6 +2229,11 @@ export class HexSceneController {
       const orb = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
       orb.position.set(-0.28, yBase + 0.15, 0.22);
       group.add(post, orb);
+    }
+
+    // Modular building attachments (independent of structural Nv. I-IV)
+    if (modules.length > 0) {
+      this.appendModuleAttachments(group, yBase, modules);
     }
 
     if (level < 2) {
@@ -2332,6 +2351,306 @@ export class HexSceneController {
     }
 
     return group;
+  }
+
+  private appendModuleAttachments(
+    group: THREE.Group,
+    yBase: number,
+    modules: readonly string[]
+  ): void {
+    const boxSmallGeo = this.getSharedUpgradeGeo(
+      'mod-box-sm',
+      () => new THREE.BoxGeometry(0.11, 0.085, 0.1)
+    );
+    const roofCapGeo = this.getSharedUpgradeGeo(
+      'mod-roof-cap',
+      () => new THREE.ConeGeometry(0.095, 0.075, 4)
+    );
+    const cylGeo = this.getSharedUpgradeGeo(
+      'mod-cyl',
+      () => new THREE.CylinderGeometry(0.06, 0.065, 0.18, 8)
+    );
+    const coneCapGeo = this.getSharedUpgradeGeo(
+      'mod-cone-cap',
+      () => new THREE.ConeGeometry(0.072, 0.07, 8)
+    );
+    const chimneyGeo = this.getSharedUpgradeGeo(
+      'mod-chimney',
+      () => new THREE.CylinderGeometry(0.032, 0.044, 0.24, 6)
+    );
+    const beamGeo = this.getSharedUpgradeGeo(
+      'mod-beam',
+      () => new THREE.BoxGeometry(0.16, 0.03, 0.04)
+    );
+    const postGeo = this.getSharedUpgradeGeo(
+      'lantern-post',
+      () => new THREE.CylinderGeometry(0.014, 0.02, 0.14, 5)
+    );
+    const orbGeo = this.getSharedUpgradeGeo(
+      'lantern-orb',
+      () => new THREE.SphereGeometry(0.028, 6, 5)
+    );
+
+    for (const modId of modules) {
+      switch (modId) {
+        case 'farm_silo': {
+          const silo = new THREE.Mesh(cylGeo, this.upgradeStoneMat);
+          silo.position.set(-0.28, yBase + 0.09, -0.04);
+          const cap = new THREE.Mesh(coneCapGeo, this.upgradeRoofMat);
+          cap.position.set(-0.28, yBase + 0.21, -0.04);
+          group.add(silo, cap);
+          break;
+        }
+        case 'farm_irrigation': {
+          const trough = new THREE.Mesh(beamGeo, this.upgradeStoneMat);
+          trough.position.set(0.27, yBase + 0.02, 0.08);
+          trough.rotation.y = Math.PI / 3;
+          const waterStrip = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-water', () => new THREE.BoxGeometry(0.13, 0.018, 0.026)),
+            this.waterMat
+          );
+          waterStrip.position.set(0.27, yBase + 0.035, 0.08);
+          waterStrip.rotation.y = Math.PI / 3;
+          group.add(trough, waterStrip);
+          break;
+        }
+        case 'farm_barn':
+        case 'farm_seed_vault': {
+          const posX = modId === 'farm_barn' ? 0.02 : -0.14;
+          const posZ = modId === 'farm_barn' ? -0.28 : 0.26;
+          const shed = new THREE.Mesh(
+            boxSmallGeo,
+            modId === 'farm_seed_vault' ? this.upgradeStoneMat : this.upgradeTimberMat
+          );
+          shed.position.set(posX, yBase + 0.045, posZ);
+          const roof = new THREE.Mesh(roofCapGeo, this.upgradeRoofMat);
+          roof.position.set(posX, yBase + 0.12, posZ);
+          roof.rotation.y = Math.PI / 4;
+          group.add(shed, roof);
+          break;
+        }
+        case 'lumber_sawmill':
+        case 'lumber_cart':
+        case 'lumber_carpentry':
+        case 'lumber_replant': {
+          const offsetMap: Record<string, [number, number]> = {
+            lumber_sawmill: [-0.28, -0.04],
+            lumber_cart: [0.27, 0.1],
+            lumber_carpentry: [0.0, -0.27],
+            lumber_replant: [-0.22, 0.22],
+          };
+          const [ox, oz] = offsetMap[modId] ?? [-0.26, 0.0];
+          const rack = new THREE.Mesh(boxSmallGeo, this.upgradeTimberMat);
+          rack.position.set(ox, yBase + 0.045, oz);
+          const cap = new THREE.Mesh(
+            modId === 'lumber_replant' ? coneCapGeo : roofCapGeo,
+            modId === 'lumber_cart' ? this.upgradeGoldMat : this.upgradeRoofMat
+          );
+          cap.position.set(ox, yBase + 0.12, oz);
+          cap.rotation.y = Math.PI / 4;
+          group.add(rack, cap);
+          break;
+        }
+        case 'mine_deep_shaft':
+        case 'mine_rail_carts':
+        case 'mine_pumps':
+        case 'mine_fortified_gal': {
+          const offsetMap: Record<string, [number, number]> = {
+            mine_deep_shaft: [-0.28, -0.04],
+            mine_rail_carts: [0.26, 0.08],
+            mine_pumps: [0.0, -0.27],
+            mine_fortified_gal: [-0.2, 0.24],
+          };
+          const [ox, oz] = offsetMap[modId] ?? [0.26, -0.04];
+          const base = new THREE.Mesh(
+            modId === 'mine_pumps' ? chimneyGeo : boxSmallGeo,
+            this.upgradeStoneMat
+          );
+          base.position.set(ox, yBase + (modId === 'mine_pumps' ? 0.12 : 0.05), oz);
+          const accent = new THREE.Mesh(
+            modId === 'mine_rail_carts' ? beamGeo : roofCapGeo,
+            modId === 'mine_deep_shaft' ? this.upgradeTimberMat : this.upgradeGoldMat
+          );
+          accent.position.set(ox, yBase + (modId === 'mine_pumps' ? 0.25 : 0.12), oz);
+          group.add(base, accent);
+          break;
+        }
+        case 'market_stalls':
+        case 'market_warehouse':
+        case 'market_guild':
+        case 'market_coin_scale': {
+          const offsetMap: Record<string, [number, number]> = {
+            market_stalls: [-0.28, 0.05],
+            market_warehouse: [0.27, -0.06],
+            market_guild: [0.0, -0.28],
+            market_coin_scale: [0.22, 0.22],
+          };
+          const [ox, oz] = offsetMap[modId] ?? [-0.27, 0.04];
+          const stall = new THREE.Mesh(
+            modId === 'market_coin_scale' ? postGeo : boxSmallGeo,
+            modId === 'market_guild' ? this.upgradeStoneMat : this.upgradeTimberMat
+          );
+          stall.position.set(ox, yBase + 0.055, oz);
+          const awning = new THREE.Mesh(
+            roofCapGeo,
+            modId === 'market_coin_scale' || modId === 'market_guild'
+              ? this.upgradeGoldMat
+              : this.upgradeRoofMat
+          );
+          awning.position.set(ox, yBase + 0.135, oz);
+          awning.rotation.y = Math.PI / 4;
+          group.add(stall, awning);
+          break;
+        }
+        case 'smelter_furnace':
+        case 'smelter_bellows':
+        case 'smelter_coal_depot':
+        case 'smelter_foundry_yard': {
+          const offsetMap: Record<string, [number, number]> = {
+            smelter_furnace: [-0.28, -0.06],
+            smelter_bellows: [0.28, 0.04],
+            smelter_coal_depot: [0.0, -0.28],
+            smelter_foundry_yard: [0.2, 0.22],
+          };
+          const [ox, oz] = offsetMap[modId] ?? [-0.28, -0.06];
+          const stack = new THREE.Mesh(
+            modId === 'smelter_furnace' ? chimneyGeo : boxSmallGeo,
+            this.upgradeStoneMat
+          );
+          stack.position.set(ox, yBase + (modId === 'smelter_furnace' ? 0.12 : 0.05), oz);
+          const ember = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
+          ember.position.set(ox, yBase + (modId === 'smelter_furnace' ? 0.25 : 0.13), oz);
+          group.add(stack, ember);
+          break;
+        }
+        case 'port_crane':
+        case 'port_lighthouse':
+        case 'port_expanded_dock': {
+          if (modId === 'port_lighthouse') {
+            const tower = new THREE.Mesh(chimneyGeo, this.upgradeStoneMat);
+            tower.position.set(-0.27, yBase + 0.12, -0.06);
+            const beacon = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
+            beacon.position.set(-0.27, yBase + 0.26, -0.06);
+            group.add(tower, beacon);
+          } else if (modId === 'port_crane') {
+            const mast = new THREE.Mesh(postGeo, this.upgradeTimberMat);
+            mast.position.set(0.26, yBase + 0.08, 0.08);
+            const boom = new THREE.Mesh(beamGeo, this.upgradeGoldMat);
+            boom.position.set(0.22, yBase + 0.15, 0.08);
+            boom.rotation.z = 0.25;
+            group.add(mast, boom);
+          } else {
+            const pier = new THREE.Mesh(boxSmallGeo, this.upgradeTimberMat);
+            pier.position.set(0.0, yBase + 0.03, 0.28);
+            group.add(pier);
+          }
+          break;
+        }
+        case 'res_extension': {
+          const wing = new THREE.Mesh(boxSmallGeo, this.upgradeTimberMat);
+          wing.position.set(-0.28, yBase + 0.048, -0.02);
+          const roof = new THREE.Mesh(roofCapGeo, this.upgradeRoofMat);
+          roof.position.set(-0.28, yBase + 0.125, -0.02);
+          roof.rotation.y = Math.PI / 4;
+          group.add(wing, roof);
+          break;
+        }
+        case 'res_well': {
+          const well = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-well', () => new THREE.CylinderGeometry(0.055, 0.06, 0.08, 8)),
+            this.upgradeStoneMat
+          );
+          well.position.set(0.28, yBase + 0.04, 0.06);
+          const roof = new THREE.Mesh(coneCapGeo, this.upgradeRoofMat);
+          roof.position.set(0.28, yBase + 0.125, 0.06);
+          group.add(well, roof);
+          break;
+        }
+        case 'res_lighting': {
+          const p1 = new THREE.Mesh(postGeo, this.upgradeTimberMat);
+          p1.position.set(0.27, yBase + 0.07, -0.14);
+          const o1 = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
+          o1.position.set(0.27, yBase + 0.15, -0.14);
+          group.add(p1, o1);
+          break;
+        }
+        case 'res_plaza': {
+          const pad = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-plaza-pad', () => new THREE.CylinderGeometry(0.11, 0.12, 0.025, 6)),
+            this.upgradeStoneMat
+          );
+          pad.position.set(0.0, yBase + 0.015, 0.27);
+          const obelisk = new THREE.Mesh(
+            this.getSharedUpgradeGeo('mod-obelisk', () => new THREE.ConeGeometry(0.036, 0.13, 4)),
+            this.upgradeGoldMat
+          );
+          obelisk.position.set(0.0, yBase + 0.09, 0.27);
+          group.add(pad, obelisk);
+          break;
+        }
+        case 'castle_royal_archive': {
+          const archive = new THREE.Mesh(boxSmallGeo, this.upgradeStoneMat);
+          archive.position.set(0.26, yBase + 0.05, 0.15);
+          const crest = new THREE.Mesh(coneCapGeo, this.upgradeGoldMat);
+          crest.position.set(0.26, yBase + 0.13, 0.15);
+          group.add(archive, crest);
+          break;
+        }
+        case 'acad_library':
+        case 'acad_observatory':
+        case 'acad_laboratory': {
+          const offsetMap: Record<string, [number, number]> = {
+            acad_library: [-0.28, 0.0],
+            acad_observatory: [0.26, 0.05],
+            acad_laboratory: [0.0, -0.27],
+          };
+          const [ox, oz] = offsetMap[modId] ?? [0.26, 0.05];
+          const base = new THREE.Mesh(
+            modId === 'acad_observatory' ? cylGeo : boxSmallGeo,
+            this.upgradeStoneMat
+          );
+          base.position.set(ox, yBase + (modId === 'acad_observatory' ? 0.09 : 0.05), oz);
+          const top = new THREE.Mesh(
+            modId === 'acad_laboratory' ? orbGeo : coneCapGeo,
+            modId === 'acad_laboratory' ? this.nightLanternGlowMat : this.upgradeGoldMat
+          );
+          top.position.set(ox, yBase + (modId === 'acad_observatory' ? 0.2 : 0.13), oz);
+          group.add(base, top);
+          break;
+        }
+        case 'mil_armory':
+        case 'mil_bastion_wall':
+        case 'mil_signal_beacon':
+        case 'mil_training_yard': {
+          if (modId === 'mil_signal_beacon') {
+            const tower = new THREE.Mesh(chimneyGeo, this.upgradeStoneMat);
+            tower.position.set(-0.27, yBase + 0.12, -0.05);
+            const flame = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
+            flame.position.set(-0.27, yBase + 0.255, -0.05);
+            group.add(tower, flame);
+          } else {
+            const offsetMap: Record<string, [number, number]> = {
+              mil_armory: [0.27, -0.04],
+              mil_bastion_wall: [0.0, 0.28],
+              mil_training_yard: [-0.24, 0.2],
+            };
+            const [ox, oz] = offsetMap[modId] ?? [0.27, -0.04];
+            const wallOrShed = new THREE.Mesh(
+              modId === 'mil_bastion_wall' ? beamGeo : boxSmallGeo,
+              this.upgradeStoneMat
+            );
+            wallOrShed.position.set(ox, yBase + 0.045, oz);
+            const roof = new THREE.Mesh(roofCapGeo, this.upgradeRoofMat);
+            roof.position.set(ox, yBase + 0.12, oz);
+            roof.rotation.y = Math.PI / 4;
+            group.add(wallOrShed, roof);
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
   }
 
   public setAtmosphereState(params: {
@@ -3550,22 +3869,28 @@ export class HexSceneController {
             : 'neutral';
         const nextUnder = underSet.has(key);
         const nextLevel = getBuildingLevel(target);
+        const nextModules = this.getTileModulesList(target);
+        const nextModulesSig = this.getModulesSig(target);
         const levelChanged = nextLevel !== entry.level;
+        const modulesChanged = nextModulesSig !== entry.modulesSig;
         const ownerOrUnderChanged =
           nextOwner !== entry.owner || nextUnder !== entry.underConstruction;
 
-        if (ownerOrUnderChanged || levelChanged) {
+        if (ownerOrUnderChanged || levelChanged || modulesChanged) {
           const justCompleted = entry.underConstruction && !nextUnder;
           const justUpgraded = nextLevel > entry.level;
+          const justInstalledModule =
+            modulesChanged && nextModulesSig.length > entry.modulesSig.length;
           entry.owner = nextOwner;
           entry.underConstruction = nextUnder;
           entry.level = nextLevel;
+          entry.modulesSig = nextModulesSig;
 
           if (ownerOrUnderChanged) {
             this.applyOwnerMaterials(entry.group, nextOwner, nextUnder);
           }
 
-          if (levelChanged || ownerOrUnderChanged) {
+          if (levelChanged || ownerOrUnderChanged || modulesChanged) {
             if (entry.upgradeGroup) {
               entry.group.remove(entry.upgradeGroup);
               entry.upgradeGroup = null;
@@ -3574,7 +3899,8 @@ export class HexSceneController {
             const nextUpgradeGroup = this.buildUpgradeAttachmentGroup(
               assetName,
               nextLevel,
-              nextUnder
+              nextUnder,
+              nextModules
             );
             if (nextUpgradeGroup) {
               entry.group.add(nextUpgradeGroup);
@@ -3612,6 +3938,21 @@ export class HexSceneController {
               pos.z,
               0xfbbf24,
               12
+            );
+          } else if (justInstalledModule) {
+            const pos = entry.group.position;
+            entry.group.scale.set(
+              1.08 * HEX_WORLD_SCALE,
+              0.82 * HEX_WORLD_SCALE,
+              1.08 * HEX_WORLD_SCALE
+            );
+            this.popAnims.push({ mesh: entry.group, progress: 0 });
+            this.spawnParticleBurst(
+              pos.x,
+              TILE_SURFACE_Y + 0.12,
+              pos.z,
+              0x34d399,
+              10
             );
           } else if (justCompleted) {
             const pos = entry.group.position;
@@ -3686,7 +4027,13 @@ export class HexSceneController {
       group.add(clone);
 
       const level = getBuildingLevel(tile);
-      const upgradeGroup = this.buildUpgradeAttachmentGroup(asset.name, level, isUnder);
+      const tileModules = this.getTileModulesList(tile);
+      const upgradeGroup = this.buildUpgradeAttachmentGroup(
+        asset.name,
+        level,
+        isUnder,
+        tileModules
+      );
       if (upgradeGroup) {
         group.add(upgradeGroup);
       }
@@ -3705,6 +4052,7 @@ export class HexSceneController {
         owner,
         underConstruction: isUnder,
         level,
+        modulesSig: this.getModulesSig(tile),
       });
 
       if (conquestSet.has(key)) {

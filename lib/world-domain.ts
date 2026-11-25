@@ -36,6 +36,7 @@ export interface TileDomainMetadata {
   level?: number;
   assignedWorkers?: number;
   discovered?: boolean;
+  modules?: string[];
 }
 
 export interface FutureEconomySnapshot {

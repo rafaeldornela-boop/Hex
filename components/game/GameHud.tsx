@@ -1,11 +1,12 @@
 'use client';
 
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowUpCircle,
   Building2,
   Calendar,
+  CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -25,6 +26,7 @@ import {
   Menu,
   Moon,
   Mountain,
+  Package,
   Pause,
   Pickaxe,
   Play,
@@ -46,6 +48,7 @@ import {
   VolumeX,
   Wheat,
   Wind,
+  Wrench,
   X,
   ZoomIn,
   ZoomOut,
@@ -95,6 +98,13 @@ import {
   toRomanLevel,
   type BuildingUpgradeEvaluation,
 } from '@/lib/building-upgrade-engine';
+import {
+  BUILDING_MODULES,
+  isValidBuildingModuleId,
+  type BuildingModuleCategory,
+  type BuildingModuleId,
+  type BuildingModulesEvaluation,
+} from '@/lib/building-modules-engine';
 import { formatHexDisplayName } from '@/lib/world-domain';
 import type { BuilderToolMode, GameModeState } from './HexSceneController';
 import type { KingdomModalTab } from './KingdomModal';
@@ -135,6 +145,7 @@ export interface GameHudProps {
   selectedTileAssetName: string | null;
   selectedBuildingLevel: number;
   selectedUpgradeEvaluation: BuildingUpgradeEvaluation | null;
+  selectedBuildingModules: BuildingModulesEvaluation | null;
   selectedExpansion: ExpansionCheckResult | null;
   selectedTerrainInfo: TerrainDescriptor | null;
   selectedStrategicInfo: StrategicRegionInfo | null;
@@ -170,6 +181,7 @@ export interface GameHudProps {
   onConfirmSelectedHex: () => void;
   onBuildRoadSelected: () => void;
   onUpgradeSelectedHex: () => void;
+  onInstallBuildingModule: (moduleId: BuildingModuleId) => void;
   onDemolishSelectedHex: () => void;
   onRecruitUnit: (unitType: UnitType) => void;
   onStartUnitCommand: () => void;
@@ -194,10 +206,23 @@ function formatCompactCost(cost: ResourceCost | null, fallbackGold: number): str
   if (cost.gold > 0) parts.push(formatCash(cost.gold));
   if (cost.wood > 0) parts.push(`${cost.wood} Mad`);
   if (cost.stone > 0) parts.push(`${cost.stone} Ped`);
+  if (cost.food > 0) parts.push(`${cost.food} Alim`);
   if (cost.ore > 0) parts.push(`${cost.ore} Min`);
   if (cost.metal > 0) parts.push(`${cost.metal} Met`);
   return parts.length > 0 ? parts.join(' · ') : 'Grátis';
 }
+
+const MODULE_CATEGORY_LABELS_PT: Record<BuildingModuleCategory, string> = {
+  agro: 'Agro',
+  forestry: 'Florestal',
+  mining: 'Mineração',
+  commerce: 'Comércio',
+  industry: 'Indústria',
+  maritime: 'Marítimo',
+  residential: 'Urbano',
+  academic: 'Acadêmico',
+  military: 'Militar',
+};
 
 function formatLiveBuildingYield(
   report: BuildingOperationReport,
@@ -315,6 +340,7 @@ const GameHud = memo(function GameHud({
   selectedTileAssetName,
   selectedBuildingLevel,
   selectedUpgradeEvaluation,
+  selectedBuildingModules,
   selectedExpansion,
   selectedTerrainInfo,
   selectedStrategicInfo,
@@ -350,6 +376,7 @@ const GameHud = memo(function GameHud({
   onConfirmSelectedHex,
   onBuildRoadSelected,
   onUpgradeSelectedHex,
+  onInstallBuildingModule,
   onDemolishSelectedHex,
   onRecruitUnit,
   onStartUnitCommand,
@@ -391,12 +418,27 @@ const GameHud = memo(function GameHud({
     return `${selectedRoadCheck.isUpgrade ? 'Melhorar' : 'Estrada'}: ${def.shortNamePt} (${formatCompactCost(def.cost, def.cost.gold)})`;
   }, [selectedRoad, selectedRoadCheck]);
 
+  const [modulesDrawerOpen, setModulesDrawerOpen] = useState(false);
+
   const isNewBuildInProgress = Boolean(
-    selectedHexConstruction && selectedHexConstruction.kind !== 'upgrade'
+    selectedHexConstruction &&
+      selectedHexConstruction.kind !== 'upgrade' &&
+      selectedHexConstruction.kind !== 'module'
   );
   const isUpgradeInProgress = Boolean(
     selectedHexConstruction && selectedHexConstruction.kind === 'upgrade'
   );
+  const isModuleInProgress = Boolean(
+    selectedHexConstruction && selectedHexConstruction.kind === 'module'
+  );
+  const activeModuleLabelPt =
+    isModuleInProgress &&
+    selectedHexConstruction?.moduleId &&
+    isValidBuildingModuleId(selectedHexConstruction.moduleId)
+      ? BUILDING_MODULES[selectedHexConstruction.moduleId].labelPt
+      : null;
+  const showModulesDrawer =
+    modulesDrawerOpen && Boolean(selectedBuildingModules) && !isNewBuildInProgress;
 
   const selectedBuildingDef = selectedTileAssetName
     ? getBuildingDefinition(selectedTileAssetName)
@@ -919,6 +961,14 @@ const GameHud = memo(function GameHud({
                           {selectedBuildingReport.statusLabelPt}
                         </span>
                       )}
+                      {selectedBuildingModules && !isNewBuildInProgress && (
+                        <span
+                          data-testid="mobile-building-modules-badge"
+                          className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-emerald-100 text-emerald-950 border border-emerald-300 tabular-nums"
+                        >
+                          Módulos {selectedBuildingModules.slotsUsed}/{selectedBuildingModules.slotsMax}
+                        </span>
+                      )}
                       {selectedRoad && (
                         <span
                           data-testid="mobile-road-badge"
@@ -945,11 +995,16 @@ const GameHud = memo(function GameHud({
                             {selectedCity.name} · {selectedCity.stageLabelPt} ({selectedCity.level}/5)
                           </span>
                         </p>
-                        <p className="text-[10px] font-semibold text-[#5c5140] tabular-nums truncate">
-                          Pop. ~{selectedCity.localPopulation} ·{' '}
+                        <p className="text-[10px] font-semibold text-[#5c5140] tabular-nums">
+                          População: {selectedCity.population} / {selectedCity.housingCapacity} · Cresc.{' '}
+                          {selectedCity.growthPerTurn >= 0 ? '+' : ''}
+                          {selectedCity.growthPerTurn}/t · Trab. livres: {selectedCity.availableWorkers}
+                        </p>
+                        <p className="text-[10px] font-medium text-[#6e604a] tabular-nums truncate">
                           {(selectedCity.regionHexKeys?.length ?? 0) > 0
-                            ? `${selectedCity.regionHexKeys?.length} hexes na região`
-                            : selectedCity.stabilityLabelPt}
+                            ? `${selectedCity.regionHexKeys?.length} hexes na região · `
+                            : ''}
+                          {selectedCity.stabilityLabelPt}
                           {selectedCity.nextLevelScore !== null
                             ? ` · Evol. ${selectedCity.developmentScore}/${selectedCity.nextLevelScore}`
                             : ' · Estágio Máx.'}
@@ -1030,6 +1085,25 @@ const GameHud = memo(function GameHud({
                               {selectedHexConstruction.totalTurns} turnos)
                             </p>
                           )}
+                          {isModuleInProgress && selectedHexConstruction && (
+                            <p
+                              data-testid="mobile-module-progress"
+                              className="text-[11px] font-bold text-emerald-800"
+                            >
+                              Instalando módulo: {activeModuleLabelPt ?? 'Melhoria'} (faltam{' '}
+                              {selectedHexConstruction.turnsRemaining}/
+                              {selectedHexConstruction.totalTurns} turnos)
+                            </p>
+                          )}
+                          {selectedBuildingModules &&
+                            selectedBuildingModules.installedModuleIds.length > 0 && (
+                              <p className="text-[10px] font-semibold text-emerald-900">
+                                Módulos:{' '}
+                                {selectedBuildingModules.installedModuleIds
+                                  .map((id) => BUILDING_MODULES[id].labelPt)
+                                  .join(' · ')}
+                              </p>
+                            )}
                           {selectedUpgradeEvaluation &&
                             !isUpgradeInProgress &&
                             selectedExpansion.owner === 'player' &&
@@ -1196,6 +1270,22 @@ const GameHud = memo(function GameHud({
                               Evoluir Nv. {toRomanLevel(selectedUpgradeEvaluation.nextTier.level)} (
                               {formatCompactCost(selectedUpgradeEvaluation.effectiveCost, 0)} ·{' '}
                               {selectedUpgradeEvaluation.nextTier.upgradeTimeTurns}t)
+                            </span>
+                          </button>
+                        )}
+                      {selectedHexHasConstruction &&
+                        !isNewBuildInProgress &&
+                        selectedBuildingModules && (
+                          <button
+                            type="button"
+                            data-testid="mobile-modules-button"
+                            onClick={() => setModulesDrawerOpen(true)}
+                            className="min-h-[46px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5"
+                          >
+                            <Wrench className="w-4 h-4 shrink-0" aria-hidden="true" />
+                            <span>
+                              Melhorias ({selectedBuildingModules.slotsUsed}/
+                              {selectedBuildingModules.slotsMax})
                             </span>
                           </button>
                         )}
@@ -1614,6 +1704,14 @@ const GameHud = memo(function GameHud({
                         {selectedBuildingReport.statusLabelPt}
                       </span>
                     )}
+                    {selectedBuildingModules && !isNewBuildInProgress && (
+                      <span
+                        data-testid="desktop-building-modules-badge"
+                        className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-emerald-100 text-emerald-950 border border-emerald-300 tabular-nums"
+                      >
+                        Módulos {selectedBuildingModules.slotsUsed}/{selectedBuildingModules.slotsMax}
+                      </span>
+                    )}
                     {selectedRoad && (
                       <span
                         data-testid="desktop-road-badge"
@@ -1658,8 +1756,13 @@ const GameHud = memo(function GameHud({
                         <Building2 className="w-3.5 h-3.5 text-amber-700 shrink-0" aria-hidden="true" />
                         {selectedCity.name} · {selectedCity.stageLabelPt} ({selectedCity.level}/5)
                       </span>
+                      <span className="font-semibold text-[#3c3426] tabular-nums">
+                        População: {selectedCity.population} / {selectedCity.housingCapacity} · Cresc.{' '}
+                        {selectedCity.growthPerTurn >= 0 ? '+' : ''}
+                        {selectedCity.growthPerTurn}/turno · Trab. livres:{' '}
+                        {selectedCity.availableWorkers}
+                      </span>
                       <span className="text-[#5c5140] tabular-nums">
-                        Pop. ~{selectedCity.localPopulation} ·{' '}
                         {(selectedCity.regionHexKeys?.length ?? 0) > 0
                           ? `${selectedCity.regionHexKeys?.length} hexes na região · `
                           : ''}
@@ -1754,6 +1857,26 @@ const GameHud = memo(function GameHud({
                       {selectedHexConstruction.totalTurns} turnos)
                     </p>
                   )}
+                  {isModuleInProgress && selectedHexConstruction && (
+                    <p
+                      data-testid="desktop-module-progress"
+                      className="text-[11px] font-bold text-emerald-800 mt-0.5"
+                    >
+                      Instalando módulo: {activeModuleLabelPt ?? 'Melhoria'} (faltam{' '}
+                      {selectedHexConstruction.turnsRemaining}/
+                      {selectedHexConstruction.totalTurns} turnos)
+                    </p>
+                  )}
+                  {selectedBuildingModules &&
+                    !isNewBuildInProgress &&
+                    selectedBuildingModules.installedModuleIds.length > 0 && (
+                      <p className="text-[11px] font-semibold text-emerald-900 mt-0.5">
+                        Módulos instalados:{' '}
+                        {selectedBuildingModules.installedModuleIds
+                          .map((id) => BUILDING_MODULES[id].labelPt)
+                          .join(' · ')}
+                      </p>
+                    )}
 
                   {selectedUpgradeEvaluation &&
                     !isUpgradeInProgress &&
@@ -1928,6 +2051,22 @@ const GameHud = memo(function GameHud({
                       >
                         Nível Máximo
                       </span>
+                    )}
+
+                  {selectedExpansion.owner === 'player' &&
+                    selectedHexHasConstruction &&
+                    !isNewBuildInProgress &&
+                    selectedBuildingModules && (
+                      <button
+                        type="button"
+                        data-testid="desktop-modules-button"
+                        onClick={() => setModulesDrawerOpen(true)}
+                        className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-[#1e2d24] bg-emerald-700 text-white shadow-[0_2px_0_#1e2d24] hover:bg-emerald-800 whitespace-nowrap cursor-pointer"
+                      >
+                        <Wrench className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        Melhorias ({selectedBuildingModules.slotsUsed}/
+                        {selectedBuildingModules.slotsMax})
+                      </button>
                     )}
 
                   {selectedExpansion.owner === 'player' && selectedHexHasConstruction && (
@@ -2335,6 +2474,168 @@ const GameHud = memo(function GameHud({
             </div>
           </div>
         </>
+      )}
+
+      {/* MODULAR BUILDING IMPROVEMENTS DRAWER / MODAL */}
+      {gameState === 'playing' && showModulesDrawer && selectedBuildingModules && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="building-modules-title"
+          className="fixed inset-0 z-40 bg-[#1a221d]/45 flex items-end sm:items-center justify-center sm:p-4 pointer-events-auto"
+        >
+          <div
+            data-testid="building-modules-panel"
+            className="w-full max-w-xl max-h-[82dvh] flex flex-col bg-[#fcf9f2] border-t-2 sm:border-2 border-[#3c3426] rounded-t-3xl sm:rounded-2xl shadow-[0_8px_0_#3c3426]"
+            style={{
+              paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
+            }}
+          >
+            <div className="px-4 sm:px-5 pt-4 pb-3 border-b border-[#d9ceb8] flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2
+                    id="building-modules-title"
+                    className="font-display text-lg font-bold text-[#1f1a12] flex items-center gap-1.5"
+                  >
+                    <Package className="w-4 h-4 text-emerald-700 shrink-0" aria-hidden="true" />
+                    <span>Melhorias Modulares · {selectedBuildingLabel}</span>
+                  </h2>
+                  <span className="px-2 py-0.5 rounded bg-amber-100 border border-amber-300 text-[11px] font-bold text-amber-950">
+                    Nv. {toRomanLevel(selectedBuildingModules.level)}/
+                    {toRomanLevel(selectedBuildingModules.maxLevel)}
+                  </span>
+                  <span
+                    data-testid="modules-slots-counter"
+                    className="px-2 py-0.5 rounded bg-emerald-100 border border-emerald-300 text-[11px] font-bold text-emerald-950 tabular-nums"
+                  >
+                    Slots: {selectedBuildingModules.slotsUsed}/
+                    {selectedBuildingModules.slotsMax}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-[#5c5140]">
+                  {selectedBuildingModules.level < selectedBuildingModules.maxLevel
+                    ? `Cada módulo ocupa 1 slot. Evolua para Nv. ${toRomanLevel(
+                        selectedBuildingModules.level + 1
+                      )} para desbloquear mais slots.`
+                    : 'Escolha estratégica entre os módulos compatíveis desta estrutura.'}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setModulesDrawerOpen(false)}
+                aria-label="Fechar painel de melhorias"
+                className="w-11 h-11 rounded-xl bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] flex items-center justify-center shrink-0 cursor-pointer hover:bg-[#e5dcc7]"
+              >
+                <X className="w-5 h-5" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto hex-touch-scroll p-4 sm:p-5 space-y-2.5">
+              {selectedBuildingModules.options.map((opt) => {
+                const isBuilt = opt.status === 'built';
+                const isBuilding = opt.status === 'building';
+                const isAvailable = opt.status === 'available';
+                return (
+                  <div
+                    key={opt.definition.id}
+                    data-testid={`module-option-${opt.definition.id}`}
+                    className={`rounded-xl border-2 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                      isBuilt
+                        ? 'bg-emerald-50 border-emerald-400'
+                        : isBuilding
+                          ? 'bg-amber-50 border-amber-400'
+                          : isAvailable
+                            ? 'bg-white border-[#3c3426]'
+                            : 'bg-[#f4efe4] border-[#d9ceb8]'
+                    }`}
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-display text-sm font-bold text-[#1f1a12]">
+                          {opt.definition.labelPt}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded bg-[#efe8d8] text-[#3c3426] text-[10px] font-bold">
+                          {MODULE_CATEGORY_LABELS_PT[opt.definition.category]}
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                            isBuilt
+                              ? 'bg-emerald-700 text-white'
+                              : isBuilding
+                                ? 'bg-amber-500 text-[#1f1a12]'
+                                : isAvailable
+                                  ? 'bg-sky-100 text-sky-900'
+                                  : 'bg-[#e5dcc7] text-[#5c5140]'
+                          }`}
+                        >
+                          {opt.statusLabelPt}
+                        </span>
+                      </div>
+
+                      <p className="text-xs font-medium text-[#2a2319]">
+                        {opt.definition.summaryPt}
+                      </p>
+
+                      {!isBuilt && !isBuilding && (
+                        <p className="text-[11px] font-semibold text-[#5c5140] tabular-nums">
+                          Custo: {formatCompactCost(opt.scaledCost, 0)} · Tempo:{' '}
+                          {opt.definition.buildTimeTurns}{' '}
+                          {opt.definition.buildTimeTurns === 1 ? 'turno' : 'turnos'}
+                        </p>
+                      )}
+
+                      {opt.reasonPt && (
+                        <p className="text-[11px] font-bold text-rose-700">
+                          {opt.reasonPt}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="shrink-0">
+                      {isBuilt ? (
+                        <span className="inline-flex items-center gap-1 px-3 min-h-[44px] rounded-xl bg-emerald-700 text-white text-xs font-bold">
+                          <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          Instalado
+                        </span>
+                      ) : isBuilding ? (
+                        <span className="inline-flex items-center gap-1 px-3 min-h-[44px] rounded-xl bg-amber-500 text-[#1f1a12] text-xs font-bold tabular-nums">
+                          <Hammer className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          {opt.turnsRemaining}t restantes
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          data-testid={`install-module-${opt.definition.id}`}
+                          disabled={!isAvailable}
+                          onClick={() => onInstallBuildingModule(opt.definition.id)}
+                          className={`w-full sm:w-auto min-h-[44px] px-4 rounded-xl font-display text-xs font-bold border-2 inline-flex items-center justify-center gap-1.5 ${
+                            isAvailable
+                              ? 'bg-emerald-700 text-white border-[#1e2d24] shadow-[0_2px_0_#1e2d24] hover:bg-emerald-800 cursor-pointer active:translate-y-0.5'
+                              : 'bg-[#e8e0cf] text-[#6e604a] border-[#c8ba9f] cursor-not-allowed'
+                          }`}
+                        >
+                          {isAvailable ? (
+                            <>
+                              <Wrench className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                              Instalar
+                            </>
+                          ) : (
+                            <>
+                              <Lock className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                              Bloqueado
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* PAUSE / SECONDARY MENU SHEET */}

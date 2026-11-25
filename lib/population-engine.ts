@@ -77,6 +77,27 @@ export function computeFoodDemand(population: number, foodDemandMult = 1): numbe
 }
 
 /**
+ * Smooth worker shortage throttle:
+ * - 100% staffed -> 1.0
+ * - 75%..99% staffed -> 0.80..1.0
+ * - 1%..74% staffed -> linear 0.65 * ratio
+ * - 0% staffed -> 0
+ */
+export function computeWorkerProductionScale(
+  assigned: number,
+  required: number
+): number {
+  if (!Number.isFinite(required) || required <= 0) return 1;
+  if (!Number.isFinite(assigned) || assigned <= 0) return 0;
+  const ratio = Math.max(0, Math.min(1, assigned / required));
+  if (ratio >= 1) return 1;
+  if (ratio >= 0.75) {
+    return Number((0.8 + (ratio - 0.75) * 0.8).toFixed(4));
+  }
+  return Number(Math.max(0, ratio * 0.65).toFixed(4));
+}
+
+/**
  * Deterministically allocates available citizens across completed buildings requiring workers.
  * Essential food and extraction buildings are staffed before commerce/science/garrisons,
  * so worker shortages visibly stall or throttle specific structures rather than hiding causes.
@@ -166,6 +187,9 @@ export function evaluatePopulationDynamics(params: {
   activeEffects?: ActiveWorldEffect[];
   foodDemandMult?: number;
   seasonalPopGrowthBonusMod?: number;
+  urbanQualityScore?: number;
+  roadConnectivityScore?: number;
+  stabilityBonus?: number;
 }): PopulationDynamicsResult {
   const safePop = Math.max(
     0,
@@ -181,6 +205,9 @@ export function evaluatePopulationDynamics(params: {
   const activeEffects = params.activeEffects ?? [];
   const foodDemandMult = params.foodDemandMult ?? 1;
   const seasonalGrowthMod = params.seasonalPopGrowthBonusMod ?? 0;
+  const urbanQualityScore = Math.max(0, params.urbanQualityScore ?? 0);
+  const roadConnectivityScore = Math.max(0, params.roadConnectivityScore ?? 0);
+  const stabilityBonus = params.stabilityBonus ?? 0;
 
   const foodConsumption = computeFoodDemand(safePop, foodDemandMult);
   const totalAvailableFood = safeFoodStock + safeFoodProd;
@@ -209,14 +236,29 @@ export function evaluatePopulationDynamics(params: {
       const spareHousing = safeCap - safePop;
       const foodNet = safeFoodProd - foodConsumption;
       const baseGrowth = foodNet >= 10 && spareHousing >= 2 ? 2 : 1;
+      const qualityBonus =
+        urbanQualityScore >= 5 && foodNet >= 6
+          ? 1
+          : 0;
+      const connectivityBonus =
+        roadConnectivityScore >= 2 && foodNet >= 12
+          ? 1
+          : 0;
+      const stabilityMod = stabilityBonus < 0 ? -1 : stabilityBonus >= 2 && foodNet >= 10 ? 1 : 0;
+      const rawGrowth = baseGrowth + qualityBonus + connectivityBonus + stabilityMod;
+      // Diminishing returns for larger kingdoms so growth remains organic
+      const sizeDamped =
+        safePop >= 40 && rawGrowth > 1
+          ? rawGrowth - 1
+          : rawGrowth;
       const seasonalAdjusted =
         seasonalGrowthMod > 0
-          ? Math.min(spareHousing, baseGrowth + (foodNet >= 6 ? 1 : 0))
+          ? Math.min(spareHousing, sizeDamped + (foodNet >= 6 ? 1 : 0))
           : seasonalGrowthMod < 0
             ? foodNet >= 14 && spareHousing >= 2
               ? 1
               : 0
-            : baseGrowth;
+            : sizeDamped;
       projectedGrowth = Math.max(0, Math.min(spareHousing, seasonalAdjusted));
     }
   }

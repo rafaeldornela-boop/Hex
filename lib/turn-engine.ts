@@ -38,12 +38,18 @@ import {
   type CityEntity,
 } from './city-engine';
 import type { RoadMap } from './road-engine';
+import {
+  BUILDING_MODULES,
+  isValidBuildingModuleId,
+  type BuildingModuleId,
+} from './building-modules-engine';
 
 export interface TurnAdvanceResult {
   nextState: KingdomState;
   completedTech: TechDefinition | null;
   completedBuildings: string[];
   completedUpgrades: string[];
+  completedModules: string[];
   incorporatedKeys: string[];
   foundedCities: string[];
   leveledUpCities: string[];
@@ -91,9 +97,10 @@ export function processKingdomTurn(
     worldSeed: working.worldSeed ?? working.worldState.seed,
   });
 
-  // Step 1a: Progress active multi-turn constructions & building upgrades
+  // Step 1a: Progress active multi-turn constructions, upgrades & modular improvements
   const completedBuildings: string[] = [];
   const completedUpgrades: string[] = [];
+  const completedModules: string[] = [];
   const nextConstructions: ActiveConstruction[] = [];
   const nextHexes = { ...working.worldState.hexes };
   let hexesMutated = false;
@@ -117,6 +124,34 @@ export function processKingdomTurn(
         const label = `${getBuildingDefinition(c.assetName).labelPt} Nv.${toRomanLevel(c.targetLevel)}`;
         completedUpgrades.push(label);
         completedBuildings.push(label);
+      } else if (
+        c.kind === 'module' &&
+        c.moduleId &&
+        isValidBuildingModuleId(c.moduleId)
+      ) {
+        const key = hexKey(c.q, c.r);
+        const existing = nextHexes[key];
+        if (existing) {
+          const prevModules = Array.isArray(existing.modules)
+            ? existing.modules
+            : Array.isArray(existing.meta?.modules)
+              ? existing.meta.modules
+              : [];
+          const nextModules = prevModules.includes(c.moduleId)
+            ? prevModules
+            : [...prevModules, c.moduleId];
+          nextHexes[key] = {
+            ...existing,
+            modules: nextModules,
+            ...(existing.meta
+              ? { meta: { ...existing.meta, modules: nextModules } }
+              : {}),
+          };
+          hexesMutated = true;
+        }
+        const modLabel = `${BUILDING_MODULES[c.moduleId].labelPt} (${getBuildingDefinition(c.assetName).labelPt})`;
+        completedModules.push(modLabel);
+        completedBuildings.push(modLabel);
       } else {
         completedBuildings.push(getBuildingDefinition(c.assetName).labelPt);
       }
@@ -126,16 +161,32 @@ export function processKingdomTurn(
   }
 
   const underKeysAfterBuild = new Set(
-    nextConstructions.filter((c) => c.kind !== 'upgrade').map((c) => hexKey(c.q, c.r))
+    nextConstructions
+      .filter((c) => c.kind !== 'upgrade' && c.kind !== 'module')
+      .map((c) => hexKey(c.q, c.r))
   );
   const upgradingByKeyAfterBuild: Record<
     string,
     { targetLevel: number; turnsRemaining: number; totalTurns: number }
   > = {};
+  const moduleByKeyAfterBuild: Record<
+    string,
+    { moduleId: BuildingModuleId; turnsRemaining: number; totalTurns: number }
+  > = {};
   for (const c of nextConstructions) {
     if (c.kind === 'upgrade' && typeof c.targetLevel === 'number') {
       upgradingByKeyAfterBuild[hexKey(c.q, c.r)] = {
         targetLevel: c.targetLevel,
+        turnsRemaining: c.turnsRemaining,
+        totalTurns: c.totalTurns,
+      };
+    } else if (
+      c.kind === 'module' &&
+      c.moduleId &&
+      isValidBuildingModuleId(c.moduleId)
+    ) {
+      moduleByKeyAfterBuild[hexKey(c.q, c.r)] = {
+        moduleId: c.moduleId,
         turnsRemaining: c.turnsRemaining,
         totalTurns: c.totalTurns,
       };
@@ -238,6 +289,7 @@ export function processKingdomTurn(
     season: nextCalendar.season,
     weather: weatherStep.weather,
     upgradingConstructionsByKey: upgradingByKeyAfterBuild,
+    moduleConstructionsByKey: moduleByKeyAfterBuild,
   });
 
   // Step 4: Treasury update
@@ -340,6 +392,8 @@ export function processKingdomTurn(
   }
   if (completedUpgrades.length > 0) {
     summaryParts.push(`Evoluiu: ${completedUpgrades.join(', ')}`);
+  } else if (completedModules.length > 0) {
+    summaryParts.push(`Módulos: ${completedModules.join(', ')}`);
   } else if (completedBuildings.length > 0) {
     summaryParts.push(`Pronto: ${completedBuildings.join(', ')}`);
   }
@@ -406,6 +460,7 @@ export function processKingdomTurn(
     completedTech: researchStep.completedTech,
     completedBuildings,
     completedUpgrades,
+    completedModules,
     incorporatedKeys,
     foundedCities,
     leveledUpCities,

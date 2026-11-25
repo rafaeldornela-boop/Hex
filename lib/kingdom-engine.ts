@@ -108,6 +108,13 @@ import {
   toRomanLevel,
   type BuildingUpgradeEvaluation,
 } from './building-upgrade-engine';
+import {
+  BUILDING_MODULES,
+  evaluateBuildingModules,
+  isValidBuildingModuleId,
+  type BuildingModuleId,
+  type BuildingModulesEvaluation,
+} from './building-modules-engine';
 
 export interface ActiveConstruction {
   q: number;
@@ -118,8 +125,9 @@ export interface ActiveConstruction {
   turnsRemaining: number;
   totalTurns: number;
   owner: HexOwner;
-  kind?: 'build' | 'upgrade';
+  kind?: 'build' | 'upgrade' | 'module';
   targetLevel?: number;
+  moduleId?: BuildingModuleId;
 }
 
 export interface KingdomState {
@@ -149,7 +157,7 @@ export interface KingdomState {
 export function getUnderConstructionKeys(state: KingdomState): Set<string> {
   return new Set(
     state.constructions
-      .filter((c) => c.kind !== 'upgrade')
+      .filter((c) => c.kind !== 'upgrade' && c.kind !== 'module')
       .map((c) => hexKey(c.q, c.r))
   );
 }
@@ -169,6 +177,25 @@ export function getUpgradingConstructionsByKey(
     if (c.kind === 'upgrade' && typeof c.targetLevel === 'number') {
       map[hexKey(c.q, c.r)] = {
         targetLevel: c.targetLevel,
+        turnsRemaining: c.turnsRemaining,
+        totalTurns: c.totalTurns,
+      };
+    }
+  }
+  return map;
+}
+
+export function getModuleConstructionsByKey(
+  state: KingdomState
+): Record<string, { moduleId: BuildingModuleId; turnsRemaining: number; totalTurns: number }> {
+  const map: Record<
+    string,
+    { moduleId: BuildingModuleId; turnsRemaining: number; totalTurns: number }
+  > = {};
+  for (const c of state.constructions) {
+    if (c.kind === 'module' && c.moduleId && isValidBuildingModuleId(c.moduleId)) {
+      map[hexKey(c.q, c.r)] = {
+        moduleId: c.moduleId,
         turnsRemaining: c.turnsRemaining,
         totalTurns: c.totalTurns,
       };
@@ -272,6 +299,7 @@ export function getKingdomEconomy(
   const tradePactBonus = getTradePactBonusGold(state.factions);
   const underKeys = getUnderConstructionKeys(state);
   const upgradingByKey = getUpgradingConstructionsByKey(state);
+  const moduleByKey = getModuleConstructionsByKey(state);
   const calendar = state.calendar ?? computeCalendarSnapshot(state.turn);
   const weather = state.climateWeather ?? createInitialClimateWeather();
   const expansionWorkersUsed = (state.expansions ?? [])
@@ -299,6 +327,7 @@ export function getKingdomEconomy(
     season: calendar.season,
     weather,
     upgradingConstructionsByKey: upgradingByKey,
+    moduleConstructionsByKey: moduleByKey,
   });
 }
 
@@ -725,6 +754,119 @@ export function upgradeBuildingInKingdom(
   };
 }
 
+export function evaluateBuildingModulesInKingdom(
+  state: KingdomState,
+  q: number,
+  r: number,
+  assets: HexAssetEntry[]
+): BuildingModulesEvaluation | null {
+  return evaluateBuildingModules({
+    worldState: state.worldState,
+    q,
+    r,
+    assets,
+    resources: state.resources,
+    unlockedTechs: state.research.unlocked,
+    constructions: state.constructions,
+    underConstructionKeys: getUnderConstructionKeys(state),
+  });
+}
+
+export function installBuildingModuleInKingdom(
+  state: KingdomState,
+  q: number,
+  r: number,
+  moduleId: BuildingModuleId,
+  assets: HexAssetEntry[]
+): {
+  nextState: KingdomState;
+  started: boolean;
+  evaluation: BuildingModulesEvaluation | null;
+  messagePt: string;
+} {
+  const evaluation = evaluateBuildingModulesInKingdom(state, q, r, assets);
+  if (!evaluation) {
+    return {
+      nextState: state,
+      started: false,
+      evaluation: null,
+      messagePt: 'Esta estrutura não possui melhorias modulares compatíveis.',
+    };
+  }
+
+  const option = evaluation.options.find((opt) => opt.definition.id === moduleId);
+  if (!option) {
+    return {
+      nextState: state,
+      started: false,
+      evaluation,
+      messagePt: 'Módulo incompatível com esta construção.',
+    };
+  }
+
+  if (option.status !== 'available') {
+    return {
+      nextState: state,
+      started: false,
+      evaluation,
+      messagePt: option.reasonPt ?? option.statusLabelPt,
+    };
+  }
+
+  const tile = state.worldState.hexes[hexKey(q, r)];
+  if (!tile) {
+    return {
+      nextState: state,
+      started: false,
+      evaluation,
+      messagePt: 'Território inválido.',
+    };
+  }
+
+  const assetName = assets[tile.structureIndex]?.name ?? '';
+  const cost = option.scaledCost;
+  const totalTurns = Math.max(1, option.definition.buildTimeTurns);
+
+  const moduleOrder: ActiveConstruction = {
+    q,
+    r,
+    structureIndex: tile.structureIndex,
+    orientation: tile.orientation,
+    assetName,
+    turnsRemaining: totalTurns,
+    totalTurns,
+    owner: 'player',
+    kind: 'module',
+    moduleId,
+  };
+
+  const nextState: KingdomState = {
+    ...state,
+    worldState: {
+      ...state.worldState,
+      cash: state.worldState.cash - cost.gold,
+    },
+    resources: {
+      ...state.resources,
+      wood: state.resources.wood - cost.wood,
+      stone: state.resources.stone - cost.stone,
+      food: state.resources.food - cost.food,
+      ore: state.resources.ore - cost.ore,
+      metal: state.resources.metal - cost.metal,
+    },
+    constructions: [...state.constructions, moduleOrder],
+  };
+
+  return {
+    nextState,
+    started: true,
+    evaluation: evaluateBuildingModulesInKingdom(nextState, q, r, assets),
+    messagePt: `Instalando módulo ${BUILDING_MODULES[moduleId].labelPt} (${totalTurns} ${
+      totalTurns === 1 ? 'turno' : 'turnos'
+    })!`,
+  };
+}
+
 export function buildOrUpgradeRoadInKingdom(
   state: KingdomState,
   q: number,
@@ -915,7 +1057,11 @@ export function demolishInKingdom(
     population: state.population,
     unlockedTechs: state.research.unlocked,
     assets,
-    underConstructionKeys: new Set(nextConstructions.map((c) => hexKey(c.q, c.r))),
+    underConstructionKeys: new Set(
+      nextConstructions
+        .filter((c) => c.kind !== 'upgrade' && c.kind !== 'module')
+        .map((c) => hexKey(c.q, c.r))
+    ),
     hasFoodDeficit: (state.foodDeficitTurns ?? 0) > 0,
     turn: state.turn,
     worldSeed: state.worldSeed ?? res.nextState.seed,
@@ -1628,7 +1774,7 @@ export function serializeKingdomState(state: KingdomState): string {
   const dayPhase = state.dayPhase ?? getDayPhaseForTurn(state.turn);
   const climateWeather = state.climateWeather ?? createInitialClimateWeather();
   return JSON.stringify({
-    version: 9,
+    version: 10,
     turn: state.turn,
     calendar,
     dayPhase,
@@ -1694,7 +1840,9 @@ export function deserializeKingdomState(
               typeof c.q === 'number' &&
               typeof c.r === 'number' &&
               typeof c.turnsRemaining === 'number' &&
-              c.turnsRemaining > 0
+              c.turnsRemaining > 0 &&
+              (c.kind !== 'module' ||
+                (typeof c.moduleId === 'string' && isValidBuildingModuleId(c.moduleId)))
           )
           .map((c) => ({
             q: Math.round(c.q),
@@ -1705,9 +1853,19 @@ export function deserializeKingdomState(
             turnsRemaining: Math.max(1, Math.round(c.turnsRemaining)),
             totalTurns: Math.max(1, Math.round(c.totalTurns || c.turnsRemaining)),
             owner: typeof c.owner === 'string' && c.owner.trim() ? c.owner.trim() : 'player',
-            kind: c.kind === 'upgrade' ? 'upgrade' : 'build',
+            kind:
+              c.kind === 'upgrade'
+                ? 'upgrade'
+                : c.kind === 'module'
+                  ? 'module'
+                  : 'build',
             ...(typeof c.targetLevel === 'number' && c.targetLevel >= 2
               ? { targetLevel: Math.min(4, Math.round(c.targetLevel)) }
+              : {}),
+            ...(c.kind === 'module' &&
+            typeof c.moduleId === 'string' &&
+            isValidBuildingModuleId(c.moduleId)
+              ? { moduleId: c.moduleId }
               : {}),
           }))
       : [];
