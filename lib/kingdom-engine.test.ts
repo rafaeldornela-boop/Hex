@@ -424,7 +424,7 @@ test('military recruitment, movement, and combat capture of enemy territory', ()
   assert.equal(capturedEnemyTile, true, 'Knight should reach and capture enemy territory');
 });
 
-test('serializeKingdomState and deserializeKingdomState round-trip v7 state with active expansions, roads, cities and support v1/v6 fallback', () => {
+test('serializeKingdomState and deserializeKingdomState round-trip v8 state with calendar/levels/expansions/roads/cities and support v7/v6/v1 fallback', () => {
   let starter = createStarterKingdomState(HEX_ASSETS, 987654);
   starter = setActiveResearchInKingdom(starter, 'mining').nextState;
   const freeCoord = getFreeOwnedCoord(starter);
@@ -437,7 +437,7 @@ test('serializeKingdomState and deserializeKingdomState round-trip v7 state with
 
   const json = serializeKingdomState(starter);
   const parsed = JSON.parse(savedJsonOrThrow(json));
-  assert.equal(parsed.version, 7);
+  assert.equal(parsed.version, 8);
 
   const loaded = deserializeKingdomState(json, HEX_ASSETS.length);
   assert.ok(loaded !== null);
@@ -445,6 +445,8 @@ test('serializeKingdomState and deserializeKingdomState round-trip v7 state with
   assert.deepEqual(loaded.playerCapital, starter.playerCapital);
   assert.equal(Object.keys(loaded.worldState.hexes).length, 1024);
   assert.equal(loaded.turn, 1);
+  assert.equal(loaded.calendar.season, 'spring');
+  assert.equal(loaded.dayPhase, 'morning');
   assert.equal(loaded.population, 18);
   assert.equal(loaded.research.activeTechId, 'mining');
   assert.equal(loaded.constructions.length, 1);
@@ -456,8 +458,19 @@ test('serializeKingdomState and deserializeKingdomState round-trip v7 state with
   assert.equal(loaded.units.length, 2);
   assert.ok(loaded.cities.length >= 1);
 
-  // v6 payload backward-compatibility (no roads/cities fields)
-  const v6Payload = { ...parsed, version: 6 };
+  // v7 payload backward-compatibility (no calendar/dayPhase/climateWeather)
+  const v7Payload = { ...parsed, version: 7 };
+  delete v7Payload.calendar;
+  delete v7Payload.dayPhase;
+  delete v7Payload.climateWeather;
+  const loadedV7 = deserializeKingdomState(JSON.stringify(v7Payload), HEX_ASSETS.length);
+  assert.ok(loadedV7 !== null);
+  assert.equal(loadedV7.calendar.year, 1);
+  assert.equal(loadedV7.calendar.season, 'spring');
+  assert.equal(loadedV7.climateWeather.id, 'clear');
+
+  // v6 payload backward-compatibility (no roads/cities/calendar fields)
+  const v6Payload = { ...v7Payload, version: 6 };
   delete v6Payload.roads;
   delete v6Payload.cities;
   const loadedV6 = deserializeKingdomState(JSON.stringify(v6Payload), HEX_ASSETS.length);

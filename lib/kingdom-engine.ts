@@ -20,7 +20,7 @@ import {
   normalizeFactionState,
   type FactionState,
 } from './faction-engine';
-import { processKingdomTurn } from './turn-engine';
+import { processKingdomTurn, type TurnAdvanceResult } from './turn-engine';
 import {
   createEmptyWorldState,
   demolishHexInState,
@@ -88,6 +88,26 @@ import {
   syncAndEvolveCities,
   type CityEntity,
 } from './city-engine';
+import {
+  computeCalendarSnapshot,
+  normalizeCalendarSnapshot,
+  type CalendarSnapshot,
+} from './calendar-engine';
+import {
+  getDayPhaseForTurn,
+  isValidDayPhase,
+  type DayPhaseId,
+} from './day-night-engine';
+import {
+  createInitialClimateWeather,
+  normalizeClimateWeather,
+  type ActiveClimateWeather,
+} from './season-engine';
+import {
+  evaluateBuildingUpgrade,
+  toRomanLevel,
+  type BuildingUpgradeEvaluation,
+} from './building-upgrade-engine';
 
 export interface ActiveConstruction {
   q: number;
@@ -98,10 +118,15 @@ export interface ActiveConstruction {
   turnsRemaining: number;
   totalTurns: number;
   owner: HexOwner;
+  kind?: 'build' | 'upgrade';
+  targetLevel?: number;
 }
 
 export interface KingdomState {
   turn: number;
+  calendar: CalendarSnapshot;
+  dayPhase: DayPhaseId;
+  climateWeather: ActiveClimateWeather;
   worldSeed?: number;
   playerCapital?: AxialCoord;
   worldState: HexWorldState;
@@ -122,7 +147,34 @@ export interface KingdomState {
 }
 
 export function getUnderConstructionKeys(state: KingdomState): Set<string> {
+  return new Set(
+    state.constructions
+      .filter((c) => c.kind !== 'upgrade')
+      .map((c) => hexKey(c.q, c.r))
+  );
+}
+
+export function getAllActiveConstructionOverlayKeys(state: KingdomState): Set<string> {
   return new Set(state.constructions.map((c) => hexKey(c.q, c.r)));
+}
+
+export function getUpgradingConstructionsByKey(
+  state: KingdomState
+): Record<string, { targetLevel: number; turnsRemaining: number; totalTurns: number }> {
+  const map: Record<
+    string,
+    { targetLevel: number; turnsRemaining: number; totalTurns: number }
+  > = {};
+  for (const c of state.constructions) {
+    if (c.kind === 'upgrade' && typeof c.targetLevel === 'number') {
+      map[hexKey(c.q, c.r)] = {
+        targetLevel: c.targetLevel,
+        turnsRemaining: c.turnsRemaining,
+        totalTurns: c.totalTurns,
+      };
+    }
+  }
+  return map;
 }
 
 export function getConstructionAt(
@@ -166,6 +218,9 @@ export function createStarterKingdomState(
 
   return {
     turn: 1,
+    calendar: computeCalendarSnapshot(1),
+    dayPhase: getDayPhaseForTurn(1),
+    climateWeather: createInitialClimateWeather(),
     worldSeed: generated.seed,
     playerCapital: generated.playerCapital,
     worldState: generated.worldState,
@@ -189,6 +244,9 @@ export function createStarterKingdomState(
 export function createSandboxKingdomState(): KingdomState {
   return {
     turn: 1,
+    calendar: computeCalendarSnapshot(1),
+    dayPhase: getDayPhaseForTurn(1),
+    climateWeather: createInitialClimateWeather(),
     worldState: createEmptyWorldState(),
     resources: createInitialResources(),
     population: 8,
@@ -213,6 +271,9 @@ export function getKingdomEconomy(
 ): TurnProductionBreakdown {
   const tradePactBonus = getTradePactBonusGold(state.factions);
   const underKeys = getUnderConstructionKeys(state);
+  const upgradingByKey = getUpgradingConstructionsByKey(state);
+  const calendar = state.calendar ?? computeCalendarSnapshot(state.turn);
+  const weather = state.climateWeather ?? createInitialClimateWeather();
   const expansionWorkersUsed = (state.expansions ?? [])
     .filter((e) => e.owner === 'player')
     .reduce((sum, e) => sum + e.workersCommitted, 0);
@@ -235,6 +296,9 @@ export function getKingdomEconomy(
     cities: state.cities ?? [],
     playerCapital: state.playerCapital,
     worldSeed: state.worldSeed ?? state.worldState.seed,
+    season: calendar.season,
+    weather,
+    upgradingConstructionsByKey: upgradingByKey,
   });
 }
 
@@ -533,6 +597,7 @@ export function buildInKingdom(
     turnsRemaining: totalTurns,
     totalTurns,
     owner: 'player',
+    kind: 'build',
   };
 
   return {
@@ -560,6 +625,103 @@ export function buildInKingdom(
       : `${bDef.labelPt} em construção (${totalTurns} ${
           totalTurns === 1 ? 'turno' : 'turnos'
         })!`,
+  };
+}
+
+export function evaluateBuildingUpgradeInKingdom(
+  state: KingdomState,
+  q: number,
+  r: number,
+  assets: HexAssetEntry[]
+): BuildingUpgradeEvaluation {
+  const econ = getKingdomEconomy(state, assets);
+  return evaluateBuildingUpgrade({
+    worldState: state.worldState,
+    q,
+    r,
+    assets,
+    resources: state.resources,
+    population: state.population,
+    unlockedTechs: state.research.unlocked,
+    availableWorkers: econ.population.availableWorkers,
+    hasActiveConstructionAtCoord: Boolean(getConstructionAt(state, q, r)),
+    roads: state.roads ?? {},
+    roadConnectivity: econ.roadConnectivity,
+    cities: state.cities ?? [],
+  });
+}
+
+export function upgradeBuildingInKingdom(
+  state: KingdomState,
+  q: number,
+  r: number,
+  assets: HexAssetEntry[]
+): {
+  nextState: KingdomState;
+  started: boolean;
+  evaluation: BuildingUpgradeEvaluation;
+  messagePt: string;
+} {
+  const evaluation = evaluateBuildingUpgradeInKingdom(state, q, r, assets);
+  if (!evaluation.canUpgrade || !evaluation.nextTier || !evaluation.effectiveCost) {
+    return {
+      nextState: state,
+      started: false,
+      evaluation,
+      messagePt: evaluation.reasonPt ?? 'Não é possível evoluir esta estrutura.',
+    };
+  }
+
+  const tile = state.worldState.hexes[hexKey(q, r)];
+  if (!tile) {
+    return {
+      nextState: state,
+      started: false,
+      evaluation,
+      messagePt: 'Território inválido.',
+    };
+  }
+
+  const assetName = assets[tile.structureIndex]?.name ?? '';
+  const cost = evaluation.effectiveCost;
+  const tier = evaluation.nextTier;
+  const totalTurns = Math.max(1, tier.upgradeTimeTurns);
+
+  const upgradeOrder: ActiveConstruction = {
+    q,
+    r,
+    structureIndex: tile.structureIndex,
+    orientation: tile.orientation,
+    assetName,
+    turnsRemaining: totalTurns,
+    totalTurns,
+    owner: 'player',
+    kind: 'upgrade',
+    targetLevel: tier.level,
+  };
+
+  return {
+    nextState: {
+      ...state,
+      worldState: {
+        ...state.worldState,
+        cash: state.worldState.cash - cost.gold,
+      },
+      resources: {
+        ...state.resources,
+        wood: state.resources.wood - cost.wood,
+        stone: state.resources.stone - cost.stone,
+        food: state.resources.food - cost.food,
+        ore: state.resources.ore - cost.ore,
+        metal: state.resources.metal - cost.metal,
+      },
+      constructions: [...state.constructions, upgradeOrder],
+    },
+    started: true,
+    evaluation,
+    messagePt: `Evoluindo para Nível ${toRomanLevel(tier.level)} (${totalTurns} ${
+      totalTurns === 1 ? 'turno' : 'turnos'
+    })!`,
   };
 }
 
@@ -1431,17 +1593,7 @@ export function resolveKingdomEvent(
 export function advanceKingdomTurn(
   state: KingdomState,
   assets: HexAssetEntry[]
-): {
-  nextState: KingdomState;
-  completedTech: TechDefinition | null;
-  completedBuildings: string[];
-  incorporatedKeys: string[];
-  foundedCities: string[];
-  leveledUpCities: string[];
-  newEvent: ActiveKingdomEvent | null;
-  conqueredByAiKeys: string[];
-  headlinePt: string;
-} {
+): TurnAdvanceResult {
   let working = state;
   if (working.activeEvent && working.activeEvent.choices.length > 0) {
     const fallbackChoice =
@@ -1453,9 +1605,15 @@ export function advanceKingdomTurn(
 }
 
 export function serializeKingdomState(state: KingdomState): string {
+  const calendar = state.calendar ?? computeCalendarSnapshot(state.turn);
+  const dayPhase = state.dayPhase ?? getDayPhaseForTurn(state.turn);
+  const climateWeather = state.climateWeather ?? createInitialClimateWeather();
   return JSON.stringify({
-    version: 7,
+    version: 8,
     turn: state.turn,
+    calendar,
+    dayPhase,
+    climateWeather,
     worldSeed: state.worldSeed ?? state.worldState.seed,
     playerCapital: state.playerCapital,
     seed: state.worldState.seed ?? state.worldSeed,
@@ -1510,14 +1668,29 @@ export function deserializeKingdomState(
         : createInitialFactions();
 
     const constructions: ActiveConstruction[] = Array.isArray(parsed.constructions)
-      ? parsed.constructions.filter(
-          (c): c is ActiveConstruction =>
-            Boolean(c) &&
-            typeof c.q === 'number' &&
-            typeof c.r === 'number' &&
-            typeof c.turnsRemaining === 'number' &&
-            c.turnsRemaining > 0
-        )
+      ? parsed.constructions
+          .filter(
+            (c): c is ActiveConstruction =>
+              Boolean(c) &&
+              typeof c.q === 'number' &&
+              typeof c.r === 'number' &&
+              typeof c.turnsRemaining === 'number' &&
+              c.turnsRemaining > 0
+          )
+          .map((c) => ({
+            q: Math.round(c.q),
+            r: Math.round(c.r),
+            structureIndex: c.structureIndex,
+            orientation: c.orientation,
+            assetName: c.assetName,
+            turnsRemaining: Math.max(1, Math.round(c.turnsRemaining)),
+            totalTurns: Math.max(1, Math.round(c.totalTurns || c.turnsRemaining)),
+            owner: typeof c.owner === 'string' && c.owner.trim() ? c.owner.trim() : 'player',
+            kind: c.kind === 'upgrade' ? 'upgrade' : 'build',
+            ...(typeof c.targetLevel === 'number' && c.targetLevel >= 2
+              ? { targetLevel: Math.min(4, Math.round(c.targetLevel)) }
+              : {}),
+          }))
       : [];
 
     const expansions: ActiveExpansion[] = Array.isArray(parsed.expansions)
@@ -1585,8 +1758,18 @@ export function deserializeKingdomState(
       worldSeed ?? 42026
     );
 
+    const turn = typeof parsed.turn === 'number' && parsed.turn >= 1 ? Math.round(parsed.turn) : 1;
+    const calendar = normalizeCalendarSnapshot(parsed.calendar, turn);
+    const dayPhase = isValidDayPhase(parsed.dayPhase)
+      ? parsed.dayPhase
+      : getDayPhaseForTurn(turn);
+    const climateWeather = normalizeClimateWeather(parsed.climateWeather);
+
     return {
-      turn: typeof parsed.turn === 'number' && parsed.turn >= 1 ? parsed.turn : 1,
+      turn,
+      calendar,
+      dayPhase,
+      climateWeather,
       ...(typeof worldSeed === 'number' ? { worldSeed } : {}),
       ...(playerCapital ? { playerCapital } : {}),
       worldState,

@@ -3,11 +3,14 @@
 import { memo, useMemo } from 'react';
 import {
   AlertTriangle,
+  ArrowUpCircle,
   Building2,
+  Calendar,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  CloudRain,
   Coins,
   Crosshair,
   Crown,
@@ -20,6 +23,7 @@ import {
   Layers,
   Lock,
   Menu,
+  Moon,
   Mountain,
   Pause,
   Pickaxe,
@@ -28,14 +32,20 @@ import {
   RotateCw,
   Route,
   Save,
+  Snowflake,
   Sparkles,
+  Sun,
+  Sunrise,
+  Sunset,
   Swords,
+  Thermometer,
   Trash2,
   Trees,
   Users,
   Volume2,
   VolumeX,
   Wheat,
+  Wind,
   X,
   ZoomIn,
   ZoomOut,
@@ -77,6 +87,14 @@ import {
   type RoadTile,
 } from '@/lib/road-engine';
 import type { CityEntity } from '@/lib/city-engine';
+import type { CalendarSnapshot } from '@/lib/calendar-engine';
+import { DAY_PHASE_META, type DayPhaseId } from '@/lib/day-night-engine';
+import type { ActiveClimateWeather } from '@/lib/season-engine';
+import {
+  getEffectiveBuildingStats,
+  toRomanLevel,
+  type BuildingUpgradeEvaluation,
+} from '@/lib/building-upgrade-engine';
 import { formatHexDisplayName } from '@/lib/world-domain';
 import type { BuilderToolMode, GameModeState } from './HexSceneController';
 import type { KingdomModalTab } from './KingdomModal';
@@ -91,6 +109,9 @@ export interface RoadBuildCheckView {
 export interface GameHudProps {
   gameState: GameModeState;
   turn: number;
+  calendar: CalendarSnapshot;
+  dayPhase: DayPhaseId;
+  climateWeather: ActiveClimateWeather;
   worldSeed?: number;
   cash: number;
   territoryCount: number;
@@ -112,6 +133,8 @@ export interface GameHudProps {
   selectedHexConstruction: ActiveConstruction | null;
   selectedHexActiveExpansion: ActiveExpansion | null;
   selectedTileAssetName: string | null;
+  selectedBuildingLevel: number;
+  selectedUpgradeEvaluation: BuildingUpgradeEvaluation | null;
   selectedExpansion: ExpansionCheckResult | null;
   selectedTerrainInfo: TerrainDescriptor | null;
   selectedStrategicInfo: StrategicRegionInfo | null;
@@ -146,6 +169,7 @@ export interface GameHudProps {
   onSetToolMode: (mode: BuilderToolMode) => void;
   onConfirmSelectedHex: () => void;
   onBuildRoadSelected: () => void;
+  onUpgradeSelectedHex: () => void;
   onDemolishSelectedHex: () => void;
   onRecruitUnit: (unitType: UnitType) => void;
   onStartUnitCommand: () => void;
@@ -177,11 +201,13 @@ function formatCompactCost(cost: ResourceCost | null, fallbackGold: number): str
 
 function formatLiveBuildingYield(
   report: BuildingOperationReport,
-  def: BuildingDefinition
+  def: BuildingDefinition,
+  level = 1
 ): string {
+  const effective = getEffectiveBuildingStats(def.assetName, level);
   const parts: string[] = [];
   const p = report.actualProduction;
-  if (def.housingCapacity > 0) parts.push(`+${def.housingCapacity} Moradia`);
+  if (effective.housingCapacity > 0) parts.push(`+${effective.housingCapacity} Moradia`);
   if (p.gold > 0) parts.push(`+${p.gold} Ouro`);
   if (p.wood > 0) parts.push(`+${p.wood} Mad`);
   if (p.stone > 0) parts.push(`+${p.stone} Ped`);
@@ -189,9 +215,38 @@ function formatLiveBuildingYield(
   if (p.ore > 0) parts.push(`+${p.ore} Min`);
   if (p.metal > 0) parts.push(`+${p.metal} Met`);
   if (p.science > 0) parts.push(`+${p.science} Ciên`);
-  if (def.defenseBonus > 0) parts.push(`+${def.defenseBonus} Def`);
-  if (def.storageBonus > 0) parts.push(`+${def.storageBonus} Arm`);
+  if (effective.defenseBonus > 0) parts.push(`+${effective.defenseBonus} Def`);
+  if (effective.storageBonus > 0) parts.push(`+${effective.storageBonus} Arm`);
   return parts.length > 0 ? parts.join(' · ') : def.summaryPt;
+}
+
+function renderDayPhaseIcon(phase: DayPhaseId) {
+  if (phase === 'dawn') {
+    return <Sunrise className="w-3.5 h-3.5 text-amber-600 shrink-0" aria-hidden="true" />;
+  }
+  if (phase === 'dusk') {
+    return <Sunset className="w-3.5 h-3.5 text-orange-600 shrink-0" aria-hidden="true" />;
+  }
+  if (phase === 'night') {
+    return <Moon className="w-3.5 h-3.5 text-indigo-700 shrink-0" aria-hidden="true" />;
+  }
+  return <Sun className="w-3.5 h-3.5 text-amber-500 shrink-0" aria-hidden="true" />;
+}
+
+function renderWeatherIcon(weatherId: ActiveClimateWeather['id']) {
+  if (weatherId === 'rain') {
+    return <CloudRain className="w-3.5 h-3.5 text-sky-700 shrink-0" aria-hidden="true" />;
+  }
+  if (weatherId === 'frost') {
+    return <Snowflake className="w-3.5 h-3.5 text-sky-600 shrink-0" aria-hidden="true" />;
+  }
+  if (weatherId === 'storm') {
+    return <Wind className="w-3.5 h-3.5 text-slate-700 shrink-0" aria-hidden="true" />;
+  }
+  if (weatherId === 'drought_weather') {
+    return <Thermometer className="w-3.5 h-3.5 text-amber-700 shrink-0" aria-hidden="true" />;
+  }
+  return null;
 }
 
 function getExpansionButtonLabel(check: ExpansionCheckResult): string {
@@ -234,6 +289,9 @@ function getExpansionDotColor(
 const GameHud = memo(function GameHud({
   gameState,
   turn,
+  calendar,
+  dayPhase,
+  climateWeather,
   worldSeed,
   cash,
   territoryCount,
@@ -255,6 +313,8 @@ const GameHud = memo(function GameHud({
   selectedHexConstruction,
   selectedHexActiveExpansion,
   selectedTileAssetName,
+  selectedBuildingLevel,
+  selectedUpgradeEvaluation,
   selectedExpansion,
   selectedTerrainInfo,
   selectedStrategicInfo,
@@ -289,6 +349,7 @@ const GameHud = memo(function GameHud({
   onSetToolMode,
   onConfirmSelectedHex,
   onBuildRoadSelected,
+  onUpgradeSelectedHex,
   onDemolishSelectedHex,
   onRecruitUnit,
   onStartUnitCommand,
@@ -330,13 +391,20 @@ const GameHud = memo(function GameHud({
     return `${selectedRoadCheck.isUpgrade ? 'Melhorar' : 'Estrada'}: ${def.shortNamePt} (${formatCompactCost(def.cost, def.cost.gold)})`;
   }, [selectedRoad, selectedRoadCheck]);
 
+  const isNewBuildInProgress = Boolean(
+    selectedHexConstruction && selectedHexConstruction.kind !== 'upgrade'
+  );
+  const isUpgradeInProgress = Boolean(
+    selectedHexConstruction && selectedHexConstruction.kind === 'upgrade'
+  );
+
   const selectedBuildingDef = selectedTileAssetName
     ? getBuildingDefinition(selectedTileAssetName)
     : null;
   const canRecruitHere = Boolean(
     selectedHexOwned &&
       selectedHexHasConstruction &&
-      !selectedHexConstruction &&
+      !isNewBuildInProgress &&
       selectedBuildingDef?.canRecruitUnits &&
       !selectedHexUnit
   );
@@ -516,6 +584,47 @@ const GameHud = memo(function GameHud({
                   </div>
                 </div>
               </div>
+
+              {/* Compact Calendar, Season, Day/Night & Weather Plaque */}
+              <button
+                type="button"
+                data-testid="hud-calendar"
+                onClick={() => onOpenKingdomModal('economy')}
+                title="Ver Calendário, Estação e Clima do Reino"
+                className="flex flex-wrap items-center gap-x-2 gap-y-0.5 bg-[#fcf9f2]/95 border-2 border-[#3c3426] rounded-xl px-2.5 py-1 shadow-[0_2px_0_#3c3426] text-[11px] font-bold text-[#2a2319] tabular-nums hover:bg-white cursor-pointer max-w-[calc(100vw-1.5rem)]"
+              >
+                <span className="inline-flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-emerald-700 shrink-0" aria-hidden="true" />
+                  <span>{calendar.formattedDatePt}</span>
+                </span>
+                <span
+                  data-testid="hud-dayphase"
+                  className="inline-flex items-center gap-1 pl-2 border-l border-[#d9ceb8]"
+                >
+                  {renderDayPhaseIcon(dayPhase)}
+                  <span>{DAY_PHASE_META[dayPhase].labelPt}</span>
+                </span>
+                {climateWeather.id !== 'clear' && (
+                  <span
+                    data-testid="hud-weather"
+                    className="inline-flex items-center gap-1 pl-2 border-l border-[#d9ceb8] text-sky-900"
+                  >
+                    {renderWeatherIcon(climateWeather.id)}
+                    <span>
+                      {climateWeather.labelPt} ({climateWeather.turnsRemaining}t)
+                    </span>
+                  </span>
+                )}
+                {calendar.isWinterWarning && (
+                  <span
+                    data-testid="hud-winter-warning"
+                    className="inline-flex items-center gap-1 pl-2 border-l border-[#d9ceb8] text-sky-800"
+                  >
+                    <Snowflake className="w-3 h-3 text-sky-600 shrink-0" aria-hidden="true" />
+                    <span>Inverno em {calendar.turnsUntilWinter}t</span>
+                  </span>
+                )}
+              </button>
 
               {/* Compact Population & Resource Stockpile Bar (tapping opens Economy tab) */}
               <button
@@ -719,7 +828,7 @@ const GameHud = memo(function GameHud({
               role="status"
               aria-live="polite"
               style={{
-                top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 5.75rem)',
+                top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 7.5rem)',
               }}
               className="absolute left-1/2 -translate-x-1/2 z-30 bg-[#1f2923] text-[#fcf9f2] border-2 border-[#3c3426] rounded-xl px-4 py-2 text-xs font-semibold shadow-md whitespace-nowrap max-w-[92vw] truncate"
             >
@@ -731,7 +840,7 @@ const GameHud = memo(function GameHud({
           {commandModeActive && (
             <div
               style={{
-                top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 5.75rem)',
+                top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 7.5rem)',
               }}
               className="pointer-events-auto absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-emerald-800 text-white border-2 border-[#1e2d24] rounded-xl px-3.5 py-2 text-xs font-semibold shadow-md max-w-[94vw]"
             >
@@ -782,7 +891,21 @@ const GameHud = memo(function GameHud({
                       <p className="text-xs font-bold text-[#1f1a12] truncate">
                         {selectedBuildingLabel}
                       </p>
-                      {selectedBuildingReport && !selectedHexConstruction && (
+                      {selectedHexHasConstruction &&
+                        !isNewBuildInProgress &&
+                        (selectedBuildingLevel > 1 ||
+                          (selectedUpgradeEvaluation?.maxLevel ?? 1) > 1) && (
+                          <span
+                            data-testid="mobile-building-level"
+                            className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-amber-100 text-amber-950 border border-amber-300"
+                          >
+                            Nv. {toRomanLevel(selectedBuildingLevel)}
+                            {selectedUpgradeEvaluation
+                              ? `/${toRomanLevel(selectedUpgradeEvaluation.maxLevel)}`
+                              : ''}
+                          </span>
+                        )}
+                      {selectedBuildingReport && !isNewBuildInProgress && (
                         <span
                           data-testid="mobile-building-status"
                           className={`px-1.5 py-0.5 rounded text-[10px] font-bold leading-none ${
@@ -804,7 +927,7 @@ const GameHud = memo(function GameHud({
                           {ROAD_CATALOG[selectedRoad.level].namePt}
                         </span>
                       )}
-                      {selectedBuildingReport?.districtLabelPt && !selectedHexConstruction && (
+                      {selectedBuildingReport?.districtLabelPt && !isNewBuildInProgress && (
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-sky-100 text-sky-900">
                           {selectedBuildingReport.districtLabelPt}
                         </span>
@@ -839,7 +962,7 @@ const GameHud = memo(function GameHud({
                       </div>
                     )}
 
-                    {selectedHexConstruction ? (
+                    {isNewBuildInProgress && selectedHexConstruction ? (
                       <p
                         data-testid="mobile-construction-status"
                         className="text-[11px] font-bold text-amber-800 mt-0.5"
@@ -851,7 +974,11 @@ const GameHud = memo(function GameHud({
                       selectedBuildingReport ? (
                         <div className="mt-0.5 space-y-0.5">
                           <p className="text-[11px] font-medium text-[#2a2319]">
-                            {formatLiveBuildingYield(selectedBuildingReport, selectedBuildingDef)}
+                            {formatLiveBuildingYield(
+                              selectedBuildingReport,
+                              selectedBuildingDef,
+                              selectedBuildingLevel
+                            )}
                           </p>
                           {(selectedBuildingReport.workersRequired > 0 ||
                             selectedBuildingReport.locationEfficiencyPct !== 100 ||
@@ -877,6 +1004,41 @@ const GameHud = memo(function GameHud({
                                 : ''}
                             </p>
                           )}
+                          {selectedBuildingReport.seasonalNotePt && (
+                            <p className="text-[10px] font-semibold text-sky-900">
+                              {selectedBuildingReport.seasonalNotePt}
+                            </p>
+                          )}
+                          {isUpgradeInProgress && selectedHexConstruction && (
+                            <p
+                              data-testid="mobile-upgrade-status"
+                              className="text-[11px] font-bold text-amber-800"
+                            >
+                              Melhorando p/ Nv.{' '}
+                              {toRomanLevel(
+                                selectedHexConstruction.targetLevel ?? selectedBuildingLevel + 1
+                              )}{' '}
+                              (faltam {selectedHexConstruction.turnsRemaining}/
+                              {selectedHexConstruction.totalTurns} turnos)
+                            </p>
+                          )}
+                          {selectedUpgradeEvaluation &&
+                            !isUpgradeInProgress &&
+                            selectedExpansion.owner === 'player' &&
+                            !selectedUpgradeEvaluation.isMaxLevel &&
+                            selectedUpgradeEvaluation.nextTier && (
+                              <p className="text-[10px] font-semibold text-[#5c5140]">
+                                Próx. Nv. {toRomanLevel(selectedUpgradeEvaluation.nextTier.level)}:{' '}
+                                {selectedUpgradeEvaluation.deltaSummaryPt.slice(0, 3).join(' · ')}
+                                {!selectedUpgradeEvaluation.canUpgrade &&
+                                  selectedUpgradeEvaluation.reasonPt && (
+                                    <span className="text-rose-700 font-bold">
+                                      {' '}
+                                      · {selectedUpgradeEvaluation.reasonPt}
+                                    </span>
+                                  )}
+                              </p>
+                            )}
                           {selectedBuildingReport.reasonPt && (
                             <p className="text-[11px] font-bold text-rose-700">
                               {selectedBuildingReport.reasonPt}
@@ -1006,12 +1168,35 @@ const GameHud = memo(function GameHud({
 
                   {selectedExpansion.owner === 'player' ? (
                     <>
+                      {selectedHexHasConstruction &&
+                        !selectedHexConstruction &&
+                        selectedUpgradeEvaluation &&
+                        !selectedUpgradeEvaluation.isMaxLevel &&
+                        selectedUpgradeEvaluation.nextTier && (
+                          <button
+                            type="button"
+                            data-testid="mobile-upgrade-selected"
+                            onClick={onUpgradeSelectedHex}
+                            className={`flex-1 min-h-[46px] px-3 rounded-xl font-display text-xs font-bold border-2 flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5 ${
+                              selectedUpgradeEvaluation.canUpgrade
+                                ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426]'
+                                : 'bg-[#efe8d8] text-[#5c5140] border-[#bcae96]'
+                            }`}
+                          >
+                            <ArrowUpCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                            <span className="truncate">
+                              Evoluir Nv. {toRomanLevel(selectedUpgradeEvaluation.nextTier.level)} (
+                              {formatCompactCost(selectedUpgradeEvaluation.effectiveCost, 0)} ·{' '}
+                              {selectedUpgradeEvaluation.nextTier.upgradeTimeTurns}t)
+                            </span>
+                          </button>
+                        )}
                       {selectedHexHasConstruction ? (
                         <button
                           type="button"
                           data-testid="mobile-demolish-selected"
                           onClick={onDemolishSelectedHex}
-                          className="flex-1 min-h-[46px] px-3 rounded-xl bg-rose-700 text-white font-display text-xs font-bold border-2 border-rose-950 shadow-[0_2px_0_#4c0519] flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5"
+                          className="min-h-[46px] px-3 rounded-xl bg-rose-700 text-white font-display text-xs font-bold border-2 border-rose-950 shadow-[0_2px_0_#4c0519] flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5"
                         >
                           <Trash2 className="w-4 h-4 shrink-0" aria-hidden="true" />
                           Demolir
@@ -1393,7 +1578,21 @@ const GameHud = memo(function GameHud({
                     <p className="text-xs font-bold text-[#1f1a12]">
                       {selectedBuildingLabel}
                     </p>
-                    {selectedBuildingReport && !selectedHexConstruction && (
+                    {selectedHexHasConstruction &&
+                      !isNewBuildInProgress &&
+                      (selectedBuildingLevel > 1 ||
+                        (selectedUpgradeEvaluation?.maxLevel ?? 1) > 1) && (
+                        <span
+                          data-testid="desktop-building-level"
+                          className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-amber-100 text-amber-950 border border-amber-300"
+                        >
+                          Nv. {toRomanLevel(selectedBuildingLevel)}
+                          {selectedUpgradeEvaluation
+                            ? `/${toRomanLevel(selectedUpgradeEvaluation.maxLevel)}`
+                            : ''}
+                        </span>
+                      )}
+                    {selectedBuildingReport && !isNewBuildInProgress && (
                       <span
                         data-testid="desktop-building-status"
                         className={`px-1.5 py-0.5 rounded text-[10px] font-bold leading-none ${
@@ -1415,12 +1614,12 @@ const GameHud = memo(function GameHud({
                         {ROAD_CATALOG[selectedRoad.level].namePt}
                       </span>
                     )}
-                    {selectedBuildingReport?.districtLabelPt && !selectedHexConstruction && (
+                    {selectedBuildingReport?.districtLabelPt && !isNewBuildInProgress && (
                       <span className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-sky-100 text-sky-900">
                         {selectedBuildingReport.districtLabelPt}
                       </span>
                     )}
-                    {selectedHexConstruction ? (
+                    {isNewBuildInProgress && selectedHexConstruction ? (
                       <span
                         data-testid="desktop-construction-status"
                         className="text-[11px] font-bold text-amber-800"
@@ -1432,7 +1631,11 @@ const GameHud = memo(function GameHud({
                       <span className="text-[11px] font-medium text-[#5c5140]">
                         ·{' '}
                         {selectedBuildingReport
-                          ? formatLiveBuildingYield(selectedBuildingReport, selectedBuildingDef)
+                          ? formatLiveBuildingYield(
+                              selectedBuildingReport,
+                              selectedBuildingDef,
+                              selectedBuildingLevel
+                            )
                           : selectedBuildingDef.summaryPt}
                       </span>
                     ) : null}
@@ -1465,10 +1668,11 @@ const GameHud = memo(function GameHud({
                   )}
 
                   {selectedBuildingReport &&
-                    !selectedHexConstruction &&
+                    !isNewBuildInProgress &&
                     (selectedBuildingReport.workersRequired > 0 ||
                       selectedBuildingReport.locationEfficiencyPct !== 100 ||
                       selectedBuildingReport.logisticsEfficiencyPct !== 100 ||
+                      selectedBuildingReport.seasonalNotePt ||
                       selectedBuildingReport.reasonPt) && (
                       <p className="text-[11px] font-semibold text-[#5c5140] mt-0.5 tabular-nums">
                         {selectedBuildingReport.workersRequired > 0
@@ -1496,15 +1700,57 @@ const GameHud = memo(function GameHud({
                         {selectedBuildingReport.roadBonusNotesPt.length > 0
                           ? ` · ${selectedBuildingReport.roadBonusNotesPt[0]}`
                           : ''}
-                        {selectedBuildingReport.reasonPt ? (
-                          <span className="text-rose-700 font-bold">
+                        {selectedBuildingReport.seasonalNotePt ? (
+                          <span className="text-sky-900">
                             {(selectedBuildingReport.workersRequired > 0 ||
                             selectedBuildingReport.locationEfficiencyPct !== 100 ||
                             selectedBuildingReport.logisticsEfficiencyPct !== 100
                               ? ' · '
+                              : '') + selectedBuildingReport.seasonalNotePt}
+                          </span>
+                        ) : null}
+                        {selectedBuildingReport.reasonPt ? (
+                          <span className="text-rose-700 font-bold">
+                            {(selectedBuildingReport.workersRequired > 0 ||
+                            selectedBuildingReport.locationEfficiencyPct !== 100 ||
+                            selectedBuildingReport.logisticsEfficiencyPct !== 100 ||
+                            selectedBuildingReport.seasonalNotePt
+                              ? ' · '
                               : '') + selectedBuildingReport.reasonPt}
                           </span>
                         ) : null}
+                      </p>
+                    )}
+
+                  {isUpgradeInProgress && selectedHexConstruction && (
+                    <p
+                      data-testid="desktop-upgrade-status"
+                      className="text-[11px] font-bold text-amber-800 mt-0.5"
+                    >
+                      Melhoria em andamento para Nv.{' '}
+                      {toRomanLevel(
+                        selectedHexConstruction.targetLevel ?? selectedBuildingLevel + 1
+                      )}{' '}
+                      (faltam {selectedHexConstruction.turnsRemaining}/
+                      {selectedHexConstruction.totalTurns} turnos)
+                    </p>
+                  )}
+
+                  {selectedUpgradeEvaluation &&
+                    !isUpgradeInProgress &&
+                    selectedExpansion.owner === 'player' &&
+                    !selectedUpgradeEvaluation.isMaxLevel &&
+                    selectedUpgradeEvaluation.nextTier && (
+                      <p className="text-[11px] font-semibold text-[#5c5140] mt-0.5">
+                        Evolução Nv. {toRomanLevel(selectedUpgradeEvaluation.nextTier.level)}:{' '}
+                        {selectedUpgradeEvaluation.deltaSummaryPt.slice(0, 4).join(' · ')}
+                        {!selectedUpgradeEvaluation.canUpgrade &&
+                          selectedUpgradeEvaluation.reasonPt && (
+                            <span className="text-rose-700 font-bold">
+                              {' '}
+                              · {selectedUpgradeEvaluation.reasonPt}
+                            </span>
+                          )}
                       </p>
                     )}
 
@@ -1625,6 +1871,45 @@ const GameHud = memo(function GameHud({
                       {roadButtonLabel}
                     </button>
                   )}
+
+                  {selectedExpansion.owner === 'player' &&
+                    selectedHexHasConstruction &&
+                    !selectedHexConstruction &&
+                    selectedUpgradeEvaluation &&
+                    !selectedUpgradeEvaluation.isMaxLevel &&
+                    selectedUpgradeEvaluation.nextTier && (
+                      <button
+                        type="button"
+                        data-testid="desktop-upgrade-selected"
+                        title={
+                          selectedUpgradeEvaluation.reasonPt ??
+                          selectedUpgradeEvaluation.nextTier.descriptionPt
+                        }
+                        onClick={onUpgradeSelectedHex}
+                        className={`inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 whitespace-nowrap cursor-pointer ${
+                          selectedUpgradeEvaluation.canUpgrade
+                            ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426] hover:bg-amber-400'
+                            : 'bg-[#efe8d8] text-[#5c5140] border-[#bcae96]'
+                        }`}
+                      >
+                        <ArrowUpCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        Evoluir p/ Nv. {toRomanLevel(selectedUpgradeEvaluation.nextTier.level)} (
+                        {formatCompactCost(selectedUpgradeEvaluation.effectiveCost, 0)} ·{' '}
+                        {selectedUpgradeEvaluation.nextTier.upgradeTimeTurns}t)
+                      </button>
+                    )}
+
+                  {selectedExpansion.owner === 'player' &&
+                    selectedHexHasConstruction &&
+                    !selectedHexConstruction &&
+                    selectedUpgradeEvaluation?.isMaxLevel && (
+                      <span
+                        data-testid="desktop-upgrade-max"
+                        className="inline-flex items-center gap-1 px-2.5 h-9 rounded-xl font-display text-xs font-bold bg-[#efe8d8] text-[#5c5140] border border-[#c8ba9f] whitespace-nowrap"
+                      >
+                        Nível Máximo
+                      </span>
+                    )}
 
                   {selectedExpansion.owner === 'player' && selectedHexHasConstruction && (
                     <button

@@ -42,6 +42,21 @@ import {
   type RoadMap,
 } from '@/lib/road-engine';
 import type { CityEntity } from '@/lib/city-engine';
+import type { SeasonId } from '@/lib/calendar-engine';
+import {
+  computeAtmosphereTarget,
+  type AtmosphereTarget,
+  type DayPhaseId,
+} from '@/lib/day-night-engine';
+import {
+  computeTileClimateProfile,
+  computeTileSeasonalTintHex,
+  type ClimateWeatherId,
+} from '@/lib/season-engine';
+import {
+  getBuildingLevel,
+  getBuildingUpgradeTier,
+} from '@/lib/building-upgrade-engine';
 import { HEX_ASSETS } from '@/lib/repo-data';
 
 export type GameModeState = 'title' | 'playing' | 'paused';
@@ -110,6 +125,23 @@ const _yAxis = new THREE.Vector3(0, 1, 0);
 const _posVec = new THREE.Vector3();
 const _scaleVec = new THREE.Vector3(HEX_WORLD_SCALE, HEX_WORLD_SCALE, HEX_WORLD_SCALE);
 const _colorTmp = new THREE.Color();
+const _targetColorTmp = new THREE.Color();
+
+const NIGHT_LANTERN_BUILDING_ASSETS = new Set([
+  'building-castle',
+  'building-house',
+  'building-cabin',
+  'building-village',
+  'unit-mansion',
+  'building-market',
+  'building-port',
+  'building-wizard-tower',
+  'building-archery',
+  'unit-wall-tower',
+  'building-tower',
+  'building-smelter',
+  'building-mill',
+]);
 
 function detectSoftwareWebGL(): boolean {
   if (typeof document === 'undefined') return true;
@@ -466,12 +498,62 @@ export class HexSceneController {
     string,
     {
       group: THREE.Group;
+      upgradeGroup: THREE.Group | null;
       structureIndex: number;
       orientation: number;
       owner: HexOwner;
       underConstruction: boolean;
+      level: number;
     }
   >();
+  private terrainInstanceEntries: Array<{
+    im: THREE.InstancedMesh;
+    entries: Array<{ tile: PlacedHex; owner: HexOwner }>;
+  }> = [];
+
+  // Atmosphere, day/night & seasonal state
+  private hemiLight: THREE.HemisphereLight;
+  private rimLight: THREE.DirectionalLight;
+  private sceneFog: THREE.Fog;
+  private waterMat: THREE.MeshStandardMaterial;
+  private starsPoints: THREE.Points;
+  private starsMat: THREE.PointsMaterial;
+  private nightLanternGlowMat: THREE.MeshStandardMaterial;
+  private upgradeStoneMat: THREE.MeshStandardMaterial;
+  private upgradeTimberMat: THREE.MeshStandardMaterial;
+  private upgradeRoofMat: THREE.MeshStandardMaterial;
+  private upgradeGoldMat: THREE.MeshStandardMaterial;
+  private upgradeGeoCache = new Map<string, THREE.BufferGeometry>();
+  private roadLanternsMesh: THREE.InstancedMesh;
+  private currentSeason: SeasonId = 'spring';
+  private currentSeasonProgress = 0;
+  private currentWeather: ClimateWeatherId = 'clear';
+  private currentWorldSeed = 42026;
+  private lastTerrainSeasonSig = '';
+  private currentAtmosTarget: AtmosphereTarget = computeAtmosphereTarget({
+    phase: 'morning',
+    season: 'spring',
+    weather: 'clear',
+  });
+  private curSunAzimuth = 0.72;
+  private curSunElevation = 0.78;
+  private curSunColor = new THREE.Color(0xfff3d8);
+  private curSunIntensity = 1.56;
+  private curHemiSky = new THREE.Color(0x98d2f7);
+  private curHemiGround = new THREE.Color(0x5a6e47);
+  private curHemiIntensity = 0.6;
+  private curRimColor = new THREE.Color(0xc2e4ff);
+  private curRimIntensity = 0.28;
+  private curSkyColor = new THREE.Color(0xa6d8f2);
+  private curFogColor = new THREE.Color(0xaad9f0);
+  private curFogNear = 36;
+  private curFogFar = 130;
+  private curWaterTint = new THREE.Color(0xffffff);
+  private curExposure = 0.93;
+  private curEnvIntensity = 0.32;
+  private curNightGlow = 0.05;
+  private curStarOpacity = 0;
+  private atmosDirty = false;
 
   // Territorial borders, influence aura & active/expandable frontier overlays
   private territoryTrimMesh: THREE.Mesh;
@@ -558,6 +640,9 @@ export class HexSceneController {
   private frameId = 0;
   private lastFrameMs = 0;
   private lastRenderMs = 0;
+  private hasRenderedInitialFrame = false;
+  private isIdleSleeping = false;
+  private pendingSoftwareRender = true;
   private resizeObserver: ResizeObserver;
   private elapsedSec = 0;
 
@@ -594,9 +679,9 @@ export class HexSceneController {
 
     // Scene & Atmosphere (wide horizon fog supports regional zoom-out across 32x32 world)
     this.scene = new THREE.Scene();
-    const skyColor = new THREE.Color(0x9bd2ee);
-    this.scene.background = skyColor;
-    this.scene.fog = new THREE.Fog(0x9bd2ee, 36, 130);
+    this.scene.background = this.curSkyColor.clone();
+    this.sceneFog = new THREE.Fog(this.curFogColor.getHex(), this.curFogNear, this.curFogFar);
+    this.scene.fog = this.sceneFog;
 
     // Studio RoomEnvironment for subtle PBR sheen without washing out pastel colormaps
     const pmrem = new THREE.PMREMGenerator(this.renderer);
@@ -613,11 +698,11 @@ export class HexSceneController {
     this.camera = new THREE.PerspectiveCamera(aspect < 0.8 ? 36 : 32, aspect, 0.1, 260);
 
     // Warm/Cool 3-Point Outdoor Lighting Rig (1 shadow caster following camTarget)
-    const hemiLight = new THREE.HemisphereLight(0x8ecbf5, 0x566842, 0.58);
-    hemiLight.position.set(0, 30, 0);
-    this.scene.add(hemiLight);
+    this.hemiLight = new THREE.HemisphereLight(0x98d2f7, 0x5a6e47, 0.6);
+    this.hemiLight.position.set(0, 30, 0);
+    this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xfff1d0, 1.65);
+    this.sunLight = new THREE.DirectionalLight(0xfff3d8, 1.56);
     this.sunLight.position.set(14, 24, 12);
     if (this.quality.shadowsEnabled) {
       this.sunLight.castShadow = true;
@@ -637,11 +722,79 @@ export class HexSceneController {
     }
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
-    this.updateCameraTransform(1);
 
-    const rimLight = new THREE.DirectionalLight(0xbbe0ff, 0.28);
-    rimLight.position.set(-14, 10, -14);
-    this.scene.add(rimLight);
+    this.rimLight = new THREE.DirectionalLight(0xc2e4ff, 0.28);
+    this.rimLight.position.set(-14, 10, -14);
+    this.scene.add(this.rimLight);
+
+    // Night starfield dome (lightweight single Points draw call, visible only at dusk/night)
+    const starPositions: number[] = [];
+    let starSeed = 918273;
+    const nextRand = () => {
+      starSeed = (starSeed * 16807) % 2147483647;
+      return (starSeed - 1) / 2147483646;
+    };
+    const starCount = 210;
+    for (let i = 0; i < starCount; i++) {
+      const theta = nextRand() * Math.PI * 2;
+      const phi = 0.06 + nextRand() * 1.18;
+      const radius = 84 + nextRand() * 16;
+      starPositions.push(
+        Math.cos(theta) * Math.cos(phi) * radius,
+        Math.sin(phi) * radius + 6,
+        Math.sin(theta) * Math.cos(phi) * radius
+      );
+    }
+    const starsGeo = new THREE.BufferGeometry();
+    starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPositions, 3));
+    this.starsMat = new THREE.PointsMaterial({
+      color: 0xe6f1ff,
+      size: 1.35,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      fog: false,
+    });
+    this.starsPoints = new THREE.Points(starsGeo, this.starsMat);
+    this.starsPoints.frustumCulled = false;
+    this.starsPoints.visible = false;
+    this.scene.add(this.starsPoints);
+
+    // Shared materials for night lanterns & multi-tier architectural upgrades
+    this.nightLanternGlowMat = new THREE.MeshStandardMaterial({
+      color: 0xffd27d,
+      emissive: 0xffa733,
+      emissiveIntensity: 0.12,
+      roughness: 0.35,
+      metalness: 0.08,
+    });
+    this.upgradeStoneMat = new THREE.MeshStandardMaterial({
+      color: 0xd8cfc0,
+      roughness: 0.85,
+      metalness: 0.06,
+      flatShading: true,
+    });
+    this.upgradeTimberMat = new THREE.MeshStandardMaterial({
+      color: 0x7c4d2b,
+      roughness: 0.78,
+      metalness: 0.04,
+      flatShading: true,
+    });
+    this.upgradeRoofMat = new THREE.MeshStandardMaterial({
+      color: 0x913b2e,
+      roughness: 0.68,
+      metalness: 0.08,
+      flatShading: true,
+    });
+    this.upgradeGoldMat = new THREE.MeshStandardMaterial({
+      color: 0xe6b44c,
+      roughness: 0.35,
+      metalness: 0.6,
+      flatShading: true,
+    });
+
+    this.updateCameraTransform(1);
 
     // Expansive ocean surface extending to horizon fog
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
@@ -652,13 +805,13 @@ export class HexSceneController {
     this.waterTexture.repeat.set(38, 38);
     const waterGeo = new THREE.PlaneGeometry(420, 420);
     waterGeo.rotateX(-Math.PI / 2);
-    const waterMat = new THREE.MeshStandardMaterial({
+    this.waterMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       map: this.waterTexture,
       roughness: 0.42,
       metalness: 0.06,
     });
-    this.waterMesh = new THREE.Mesh(waterGeo, waterMat);
+    this.waterMesh = new THREE.Mesh(waterGeo, this.waterMat);
     this.waterMesh.position.y = -0.025 * HEX_WORLD_SCALE;
     this.waterMesh.receiveShadow = this.quality.shadowsEnabled;
     this.scene.add(this.waterMesh);
@@ -878,6 +1031,16 @@ export class HexSceneController {
     this.tradeCorridorsMesh.frustumCulled = false;
     this.scene.add(this.tradeCorridorsMesh);
 
+    const roadLampOrbGeo = new THREE.SphereGeometry(0.036 * HEX_WORLD_SCALE, 6, 5);
+    this.roadLanternsMesh = new THREE.InstancedMesh(
+      roadLampOrbGeo,
+      this.nightLanternGlowMat,
+      1
+    );
+    this.roadLanternsMesh.count = 0;
+    this.roadLanternsMesh.frustumCulled = false;
+    this.scene.add(this.roadLanternsMesh);
+
     this.scene.add(this.citiesGroup);
     this.scene.add(this.unitsGroup);
 
@@ -985,6 +1148,7 @@ export class HexSceneController {
         this.updateCameraTransform(1);
       }
     }
+    this.wakeRenderLoop();
   }
 
   public getQualityProfile(): RenderQualityProfile {
@@ -1049,6 +1213,7 @@ export class HexSceneController {
       this.resetTransientInput();
     } else {
       this.lastFrameMs = performance.now();
+      this.wakeRenderLoop();
     }
   };
 
@@ -1067,6 +1232,7 @@ export class HexSceneController {
     } else if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
       this.zoomBy(2.0);
     }
+    this.wakeRenderLoop();
   };
 
   private onKeyUp = (e: KeyboardEvent) => {
@@ -1292,6 +1458,7 @@ export class HexSceneController {
     this.hoveredCoord = null;
     this.refreshSelectorAnchor();
     this.callbacks.onHoverChange(null, null);
+    this.wakeRenderLoop();
   };
 
   private onWheel = (e: WheelEvent) => {
@@ -1303,6 +1470,7 @@ export class HexSceneController {
       const zoomStep = e.ctrlKey || e.metaKey ? 1.4 : 2.4;
       this.zoomBy(e.deltaY > 0 ? zoomStep : -zoomStep);
     }
+    this.wakeRenderLoop();
   };
 
   private updateHoverFromPointer(clientX: number, clientY: number) {
@@ -1325,6 +1493,7 @@ export class HexSceneController {
       const existing =
         this.currentWorldState.hexes[hexKey(coord.q, coord.r)] ?? null;
       this.callbacks.onHoverChange(coord, existing);
+      this.wakeRenderLoop();
     }
   }
 
@@ -1412,6 +1581,7 @@ export class HexSceneController {
   public setSelectedHex(coord: AxialCoord | null) {
     this.selectedCoord = coord;
     this.refreshSelectorAnchor();
+    this.wakeRenderLoop();
   }
 
   public getHoveredCoord(): AxialCoord | null {
@@ -1437,6 +1607,7 @@ export class HexSceneController {
     }
 
     this.refreshSelectorAnchor();
+    this.wakeRenderLoop();
   }
 
   public setToolMode(mode: BuilderToolMode) {
@@ -1444,6 +1615,7 @@ export class HexSceneController {
     this.selectorPreviewGroup.visible = mode === 'build';
     this.frontierOverlayMesh.visible = true;
     this.refreshSelectorAnchor();
+    this.wakeRenderLoop();
   }
 
   public centerCamera() {
@@ -1453,6 +1625,7 @@ export class HexSceneController {
     const home = this.getHomeWorldPos();
     this.camTargetGoal.set(home.x, 0, home.z);
     this.camDistanceGoal = this.getDefaultCameraDistance(aspect);
+    this.wakeRenderLoop();
   }
 
   public zoomBy(delta: number) {
@@ -1461,10 +1634,12 @@ export class HexSceneController {
       CAMERA_MIN_DIST,
       CAMERA_MAX_DIST
     );
+    this.wakeRenderLoop();
   }
 
   public rotateCameraBy(radians: number) {
     this.camYawGoal += radians;
+    this.wakeRenderLoop();
   }
 
   public setSelectedPiece(structureIndex: number, rotationDeg: number) {
@@ -1476,6 +1651,7 @@ export class HexSceneController {
       this.refreshSelectorPreview(structureIndex);
       this.refreshSelectorAnchor();
     }
+    this.wakeRenderLoop();
   }
 
   private async refreshSelectorPreview(structureIndex: number) {
@@ -1499,6 +1675,7 @@ export class HexSceneController {
         }
       });
       this.selectorPreviewGroup.add(clone);
+      this.wakeRenderLoop();
     } catch {
       // Ignore individual load errors gracefully
     }
@@ -1824,6 +2001,352 @@ export class HexSceneController {
     gemGeo.dispose();
   }
 
+  private getSharedUpgradeGeo(
+    key: string,
+    factory: () => THREE.BufferGeometry
+  ): THREE.BufferGeometry {
+    let geo = this.upgradeGeoCache.get(key);
+    if (!geo) {
+      geo = factory();
+      this.upgradeGeoCache.set(key, geo);
+    }
+    return geo;
+  }
+
+  private buildUpgradeAttachmentGroup(
+    assetName: string,
+    level: number,
+    isUnderConstruction: boolean
+  ): THREE.Group | null {
+    if (isUnderConstruction) return null;
+    const hasLanternBaseline = NIGHT_LANTERN_BUILDING_ASSETS.has(assetName);
+    if (level <= 1 && !hasLanternBaseline) return null;
+
+    const group = new THREE.Group();
+    const yBase = 0.2; // local hex top surface inside GLB template coordinates
+
+    // Subtle courtyard lantern post for completed settlements/civic structures at night
+    if (hasLanternBaseline) {
+      const postGeo = this.getSharedUpgradeGeo(
+        'lantern-post',
+        () => new THREE.CylinderGeometry(0.014, 0.02, 0.14, 5)
+      );
+      const orbGeo = this.getSharedUpgradeGeo(
+        'lantern-orb',
+        () => new THREE.SphereGeometry(0.028, 6, 5)
+      );
+      const post = new THREE.Mesh(postGeo, this.upgradeTimberMat);
+      post.position.set(-0.28, yBase + 0.07, 0.22);
+      const orb = new THREE.Mesh(orbGeo, this.nightLanternGlowMat);
+      orb.position.set(-0.28, yBase + 0.15, 0.22);
+      group.add(post, orb);
+    }
+
+    if (level < 2) {
+      return group;
+    }
+
+    const tierInfo = getBuildingUpgradeTier(assetName, level);
+    const hint = tierInfo?.visualHint ?? 'plinth';
+
+    // Tier 2+: Elevated stone foundation plinth & glowing facade window panes
+    const plinthGeo = this.getSharedUpgradeGeo(
+      'tier-plinth',
+      () => new THREE.CylinderGeometry(0.41, 0.44, 0.048, 6)
+    );
+    const plinth = new THREE.Mesh(plinthGeo, this.upgradeStoneMat);
+    plinth.position.set(0, yBase + 0.018, 0);
+    group.add(plinth);
+
+    const winGeo = this.getSharedUpgradeGeo(
+      'tier-window',
+      () => new THREE.BoxGeometry(0.045, 0.055, 0.02)
+    );
+    const w1 = new THREE.Mesh(winGeo, this.nightLanternGlowMat);
+    w1.position.set(0.18, yBase + 0.15, 0.24);
+    const w2 = new THREE.Mesh(winGeo, this.nightLanternGlowMat);
+    w2.position.set(-0.18, yBase + 0.15, 0.24);
+    group.add(w1, w2);
+
+    // Side annex / wing / reinforced bastion for Tier 2+
+    if (hint === 'wing' || hint === 'plinth' || level >= 2) {
+      const annexGeo = this.getSharedUpgradeGeo(
+        'tier-annex',
+        () => new THREE.BoxGeometry(0.16, 0.14, 0.16)
+      );
+      const annexRoofGeo = this.getSharedUpgradeGeo(
+        'tier-annex-roof',
+        () => new THREE.ConeGeometry(0.135, 0.1, 4)
+      );
+      const annex = new THREE.Mesh(annexGeo, this.upgradeStoneMat);
+      annex.position.set(0.26, yBase + 0.09, -0.14);
+      const roof = new THREE.Mesh(annexRoofGeo, this.upgradeRoofMat);
+      roof.position.set(0.26, yBase + 0.21, -0.14);
+      roof.rotation.y = Math.PI / 4;
+      group.add(annex, roof);
+    }
+
+    // Extra courtyard lantern at Tier 2+
+    const orbGeo2 = this.getSharedUpgradeGeo(
+      'lantern-orb',
+      () => new THREE.SphereGeometry(0.028, 6, 5)
+    );
+    const postGeo2 = this.getSharedUpgradeGeo(
+      'lantern-post',
+      () => new THREE.CylinderGeometry(0.014, 0.02, 0.14, 5)
+    );
+    const post2 = new THREE.Mesh(postGeo2, this.upgradeTimberMat);
+    post2.position.set(0.28, yBase + 0.07, 0.22);
+    const orb2 = new THREE.Mesh(orbGeo2, this.nightLanternGlowMat);
+    orb2.position.set(0.28, yBase + 0.15, 0.22);
+    group.add(post2, orb2);
+
+    // Tier 3+: Watchtower / spire turret & gilded trim
+    if (level >= 3) {
+      const turretGeo = this.getSharedUpgradeGeo(
+        'tier3-turret',
+        () => new THREE.CylinderGeometry(0.075, 0.09, 0.28, 6)
+      );
+      const spireGeo = this.getSharedUpgradeGeo(
+        'tier3-spire',
+        () => new THREE.ConeGeometry(0.105, 0.16, 6)
+      );
+      const turret = new THREE.Mesh(turretGeo, this.upgradeStoneMat);
+      turret.position.set(-0.24, yBase + 0.16, -0.2);
+      const spire = new THREE.Mesh(spireGeo, this.upgradeRoofMat);
+      spire.position.set(-0.24, yBase + 0.38, -0.2);
+
+      const beacon = new THREE.Mesh(orbGeo2, this.nightLanternGlowMat);
+      beacon.position.set(-0.24, yBase + 0.47, -0.2);
+      group.add(turret, spire, beacon);
+
+      const crestGeo = this.getSharedUpgradeGeo(
+        'tier3-crest',
+        () => new THREE.BoxGeometry(0.22, 0.032, 0.05)
+      );
+      const crest = new THREE.Mesh(crestGeo, this.upgradeGoldMat);
+      crest.position.set(0, yBase + 0.34, 0.21);
+      group.add(crest);
+    }
+
+    // Tier 4 (Castelo Real IV — Bastilha Imperial): Corner bastions + imperial gold crown
+    if (level >= 4) {
+      const bastionGeo = this.getSharedUpgradeGeo(
+        'tier4-bastion',
+        () => new THREE.CylinderGeometry(0.055, 0.068, 0.24, 6)
+      );
+      const finialGeo = this.getSharedUpgradeGeo(
+        'tier4-finial',
+        () => new THREE.OctahedronGeometry(0.05, 0)
+      );
+      const corners: Array<[number, number]> = [
+        [0.32, 0.0],
+        [-0.32, 0.0],
+        [0.0, -0.32],
+      ];
+      for (const [cx, cz] of corners) {
+        const bastion = new THREE.Mesh(bastionGeo, this.upgradeStoneMat);
+        bastion.position.set(cx, yBase + 0.14, cz);
+        const brazier = new THREE.Mesh(orbGeo2, this.nightLanternGlowMat);
+        brazier.position.set(cx, yBase + 0.275, cz);
+        group.add(bastion, brazier);
+      }
+      const crown = new THREE.Mesh(finialGeo, this.upgradeGoldMat);
+      crown.position.set(0, yBase + 0.66, 0);
+      group.add(crown);
+    }
+
+    return group;
+  }
+
+  public setAtmosphereState(params: {
+    phase: DayPhaseId;
+    season: SeasonId;
+    seasonProgress: number;
+    weather: ClimateWeatherId;
+    worldSeed?: number;
+    snap?: boolean;
+  }) {
+    const { phase, season, seasonProgress, weather, worldSeed, snap = false } = params;
+    this.currentAtmosTarget = computeAtmosphereTarget({ phase, season, weather });
+
+    const seed = worldSeed ?? this.currentWorldSeed;
+    const progressBucket = Math.round(seasonProgress * 12);
+    const terrainSig = `${season}:${progressBucket}:${weather}:${seed}`;
+    const terrainChanged = terrainSig !== this.lastTerrainSeasonSig;
+
+    this.currentSeason = season;
+    this.currentSeasonProgress = seasonProgress;
+    this.currentWeather = weather;
+    this.currentWorldSeed = seed;
+
+    if (terrainChanged) {
+      this.lastTerrainSeasonSig = terrainSig;
+      this.applySeasonalTerrainColors();
+    }
+
+    if (snap) {
+      this.applyAtmosphereImmediate(this.currentAtmosTarget);
+      this.atmosDirty = false;
+      this.wakeRenderLoop();
+    } else {
+      this.atmosDirty = true;
+      this.wakeRenderLoop();
+    }
+  }
+
+  private applyAtmosphereImmediate(t: AtmosphereTarget) {
+    this.curSunAzimuth = t.sunAzimuthRad;
+    this.curSunElevation = t.sunElevationRad;
+    this.curSunColor.setHex(t.sunColorHex);
+    this.curSunIntensity = t.sunIntensity;
+    this.curHemiSky.setHex(t.hemiSkyHex);
+    this.curHemiGround.setHex(t.hemiGroundHex);
+    this.curHemiIntensity = t.hemiIntensity;
+    this.curRimColor.setHex(t.rimColorHex);
+    this.curRimIntensity = t.rimIntensity;
+    this.curSkyColor.setHex(t.skyHex);
+    this.curFogColor.setHex(t.fogHex);
+    this.curFogNear = t.fogNear;
+    this.curFogFar = t.fogFar;
+    this.curWaterTint.setHex(t.waterTintHex);
+    this.curExposure = t.exposure;
+    this.curEnvIntensity = t.environmentIntensity;
+    this.curNightGlow = Math.max(t.cityNightGlow, t.roadLampGlow);
+    this.curStarOpacity = t.starVisibility;
+    this.commitAtmosphereToScene();
+  }
+
+  private commitAtmosphereToScene() {
+    this.sunLight.color.copy(this.curSunColor);
+    this.sunLight.intensity = this.curSunIntensity;
+    this.hemiLight.color.copy(this.curHemiSky);
+    this.hemiLight.groundColor.copy(this.curHemiGround);
+    this.hemiLight.intensity = this.curHemiIntensity;
+    this.rimLight.color.copy(this.curRimColor);
+    this.rimLight.intensity = this.curRimIntensity;
+
+    if (this.scene.background instanceof THREE.Color) {
+      this.scene.background.copy(this.curSkyColor);
+    }
+    this.sceneFog.color.copy(this.curFogColor);
+    this.sceneFog.near = this.curFogNear;
+    this.sceneFog.far = this.curFogFar;
+    this.waterMat.color.copy(this.curWaterTint);
+    this.renderer.toneMappingExposure = this.curExposure;
+    this.scene.environmentIntensity = this.curEnvIntensity;
+
+    this.nightLanternGlowMat.emissiveIntensity = 0.08 + this.curNightGlow * 2.6;
+    this.starsMat.opacity = this.curStarOpacity;
+    this.starsPoints.visible = this.curStarOpacity > 0.02;
+    this.updateSunDirection();
+  }
+
+  private updateSunDirection() {
+    const focusX = this.gameState === 'title' ? this.getHomeWorldPos().x : this.camTarget.x;
+    const focusZ = this.gameState === 'title' ? this.getHomeWorldPos().z : this.camTarget.z;
+    const dist = 30;
+    const horiz = Math.cos(this.curSunElevation) * dist;
+    const sy = Math.max(6, Math.sin(this.curSunElevation) * dist);
+    this.sunLight.position.set(
+      focusX + Math.cos(this.curSunAzimuth) * horiz,
+      sy,
+      focusZ + Math.sin(this.curSunAzimuth) * horiz
+    );
+    this.sunLight.target.position.set(focusX, 0, focusZ);
+    this.starsPoints.position.set(focusX, 0, focusZ);
+  }
+
+  private updateAtmosphereStep(dt: number) {
+    if (!this.atmosDirty) return;
+    const t = this.currentAtmosTarget;
+    const lambda = 5.4;
+    const alpha = 1 - Math.exp(-lambda * dt);
+
+    this.curSunAzimuth = THREE.MathUtils.damp(this.curSunAzimuth, t.sunAzimuthRad, lambda, dt);
+    this.curSunElevation = THREE.MathUtils.damp(this.curSunElevation, t.sunElevationRad, lambda, dt);
+    this.curSunIntensity = THREE.MathUtils.damp(this.curSunIntensity, t.sunIntensity, lambda, dt);
+    this.curHemiIntensity = THREE.MathUtils.damp(this.curHemiIntensity, t.hemiIntensity, lambda, dt);
+    this.curRimIntensity = THREE.MathUtils.damp(this.curRimIntensity, t.rimIntensity, lambda, dt);
+    this.curFogNear = THREE.MathUtils.damp(this.curFogNear, t.fogNear, lambda, dt);
+    this.curFogFar = THREE.MathUtils.damp(this.curFogFar, t.fogFar, lambda, dt);
+    this.curExposure = THREE.MathUtils.damp(this.curExposure, t.exposure, lambda, dt);
+    this.curEnvIntensity = THREE.MathUtils.damp(
+      this.curEnvIntensity,
+      t.environmentIntensity,
+      lambda,
+      dt
+    );
+    const targetGlow = Math.max(t.cityNightGlow, t.roadLampGlow);
+    this.curNightGlow = THREE.MathUtils.damp(this.curNightGlow, targetGlow, lambda, dt);
+    this.curStarOpacity = THREE.MathUtils.damp(this.curStarOpacity, t.starVisibility, lambda, dt);
+
+    this.curSunColor.lerp(_targetColorTmp.setHex(t.sunColorHex), alpha);
+    this.curHemiSky.lerp(_targetColorTmp.setHex(t.hemiSkyHex), alpha);
+    this.curHemiGround.lerp(_targetColorTmp.setHex(t.hemiGroundHex), alpha);
+    this.curRimColor.lerp(_targetColorTmp.setHex(t.rimColorHex), alpha);
+    this.curSkyColor.lerp(_targetColorTmp.setHex(t.skyHex), alpha);
+    this.curFogColor.lerp(_targetColorTmp.setHex(t.fogHex), alpha);
+    this.curWaterTint.lerp(_targetColorTmp.setHex(t.waterTintHex), alpha);
+
+    this.commitAtmosphereToScene();
+
+    if (
+      Math.abs(this.curSunIntensity - t.sunIntensity) < 0.005 &&
+      Math.abs(this.curEnvIntensity - t.environmentIntensity) < 0.004 &&
+      Math.abs(this.curExposure - t.exposure) < 0.004 &&
+      Math.abs(this.curNightGlow - targetGlow) < 0.005 &&
+      Math.abs(this.curStarOpacity - t.starVisibility) < 0.005 &&
+      Math.abs(this.curSunElevation - t.sunElevationRad) < 0.005
+    ) {
+      this.applyAtmosphereImmediate(t);
+      this.atmosDirty = false;
+    }
+  }
+
+  private computeTileColorHex(tile: PlacedHex, owner: HexOwner): number {
+    const ownerTintHex =
+      owner === 'player'
+        ? 0xffffff
+        : owner === 'iron_clan'
+          ? 0xf2b5b5
+          : owner === 'azure_league'
+            ? 0xb5d0f2
+            : 0x8fa7be;
+
+    const terrain = getHexTerrainAndResource(tile.q, tile.r, tile).terrainType;
+    const climate = computeTileClimateProfile({
+      q: tile.q,
+      r: tile.r,
+      tile,
+      worldCols: this.currentWorldState.worldCols,
+      worldRows: this.currentWorldState.worldRows,
+      worldSeed: this.currentWorldSeed,
+    });
+    return computeTileSeasonalTintHex({
+      ownerTintHex,
+      terrainType: terrain,
+      season: this.currentSeason,
+      seasonProgress: this.currentSeasonProgress,
+      climate,
+      weather: this.currentWeather,
+    });
+  }
+
+  private applySeasonalTerrainColors() {
+    for (const bucket of this.terrainInstanceEntries) {
+      const { im, entries } = bucket;
+      for (let i = 0; i < entries.length; i++) {
+        const { tile, owner } = entries[i];
+        im.setColorAt(i, _colorTmp.setHex(this.computeTileColorHex(tile, owner)));
+      }
+      if (im.instanceColor) {
+        im.instanceColor.needsUpdate = true;
+      }
+    }
+    this.wakeRenderLoop();
+  }
+
   public syncRoadsAndCities(params: {
     roads: RoadMap;
     cities: CityEntity[];
@@ -2055,19 +2578,76 @@ export class HexSceneController {
     this.tradeCorridorsMesh.geometry = nextCorridorGeo;
     oldCorridorGeo.dispose();
 
-    // Rebuild organic city plazas + banner spires scaled by city stage (1..5)
+    // Rebuild instanced road streetlamps (1 draw call for all road lanterns across the map)
+    const roadLampCoords: Array<{ x: number; z: number }> = [];
+    for (const node of roadNodes.values()) {
+      if (!node.isExplicitRoad && !node.isBridge) continue;
+      if (node.level >= 2 || (node.q + node.r) % 2 === 0) {
+        const c = axialToWorld(node.q, node.r);
+        roadLampCoords.push({
+          x: c.x + 0.14 * HEX_WORLD_SCALE,
+          z: c.z - 0.14 * HEX_WORLD_SCALE,
+        });
+      }
+    }
+    if (roadLampCoords.length > 0) {
+      if (this.roadLanternsMesh.instanceMatrix.count < roadLampCoords.length) {
+        const oldGeo = this.roadLanternsMesh.geometry;
+        this.scene.remove(this.roadLanternsMesh);
+        this.roadLanternsMesh.dispose();
+        this.roadLanternsMesh = new THREE.InstancedMesh(
+          oldGeo,
+          this.nightLanternGlowMat,
+          Math.max(16, roadLampCoords.length)
+        );
+        this.roadLanternsMesh.frustumCulled = false;
+        this.scene.add(this.roadLanternsMesh);
+      }
+      for (let i = 0; i < roadLampCoords.length; i++) {
+        _dummy.position.set(
+          roadLampCoords[i].x,
+          TILE_SURFACE_Y + 0.08 * HEX_WORLD_SCALE,
+          roadLampCoords[i].z
+        );
+        _dummy.rotation.set(0, 0, 0);
+        _dummy.scale.setScalar(1);
+        _dummy.updateMatrix();
+        this.roadLanternsMesh.setMatrixAt(i, _dummy.matrix);
+      }
+      this.roadLanternsMesh.count = roadLampCoords.length;
+      this.roadLanternsMesh.instanceMatrix.needsUpdate = true;
+    } else {
+      this.roadLanternsMesh.count = 0;
+    }
+
+    // Rebuild organic city plazas + banner spires + warm night lanterns scaled by city stage (1..5)
     while (this.citiesGroup.children.length > 0) {
       const child = this.citiesGroup.children[0];
       this.citiesGroup.remove(child);
       child.traverse((obj) => {
         const m = obj as THREE.Mesh;
-        if (m.geometry) m.geometry.dispose();
-        if (m.material) {
+        if (m.geometry && !m.userData?.sharedGeo) m.geometry.dispose();
+        if (m.material && !m.userData?.sharedMat) {
           if (Array.isArray(m.material)) m.material.forEach((mm) => mm.dispose());
           else m.material.dispose();
         }
       });
     }
+
+    const cityLampPostGeo = this.getSharedUpgradeGeo(
+      'city-lamp-post',
+      () =>
+        new THREE.CylinderGeometry(
+          0.015 * HEX_WORLD_SCALE,
+          0.02 * HEX_WORLD_SCALE,
+          0.16 * HEX_WORLD_SCALE,
+          5
+        )
+    );
+    const cityLampOrbGeo = this.getSharedUpgradeGeo(
+      'city-lamp-orb',
+      () => new THREE.SphereGeometry(0.036 * HEX_WORLD_SCALE, 6, 5)
+    );
 
     for (const city of cities) {
       const pos = axialToWorld(city.center.q, city.center.r);
@@ -2138,12 +2718,30 @@ export class HexSceneController {
       pennant.position.set(bx, TILE_SURFACE_Y + poleHeight + 0.04 * HEX_WORLD_SCALE, bz);
       group.add(pole, pennant);
 
+      // Warm city plaza night lanterns (shared geometry + shared nightLanternGlowMat)
+      const lampOffsets: Array<[number, number]> =
+        city.level >= 2
+          ? [
+              [-0.32 * HEX_WORLD_SCALE, -0.22 * HEX_WORLD_SCALE],
+              [0.3 * HEX_WORLD_SCALE, -0.22 * HEX_WORLD_SCALE],
+            ]
+          : [[-0.32 * HEX_WORLD_SCALE, -0.22 * HEX_WORLD_SCALE]];
+      for (const [lx, lz] of lampOffsets) {
+        const lPost = new THREE.Mesh(cityLampPostGeo, this.upgradeTimberMat);
+        lPost.userData.sharedGeo = true;
+        lPost.userData.sharedMat = true;
+        lPost.position.set(lx, TILE_SURFACE_Y + 0.08 * HEX_WORLD_SCALE, lz);
+        const lOrb = new THREE.Mesh(cityLampOrbGeo, this.nightLanternGlowMat);
+        lOrb.userData.sharedGeo = true;
+        lOrb.userData.sharedMat = true;
+        lOrb.position.set(lx, TILE_SURFACE_Y + 0.17 * HEX_WORLD_SCALE, lz);
+        group.add(lPost, lOrb);
+      }
+
       this.citiesGroup.add(group);
     }
 
-    if (!this.disposed) {
-      this.renderer.render(this.scene, this.camera);
-    }
+    this.wakeRenderLoop();
   }
 
   public syncUnits(
@@ -2286,6 +2884,7 @@ export class HexSceneController {
 
       this.unitsGroup.add(unitGroup);
     }
+    this.wakeRenderLoop();
   }
 
   private spawnConquestWave(x: number, z: number) {
@@ -2316,6 +2915,7 @@ export class HexSceneController {
       this.terrainInstancesGroup.remove(child);
       child.dispose();
     }
+    this.terrainInstanceEntries = [];
 
     for (const [assetName, entries] of terrainBuckets.entries()) {
       if (entries.length === 0) continue;
@@ -2339,16 +2939,7 @@ export class HexSceneController {
           _tileMatrix.compose(_posVec, _quat, _scaleVec);
           _finalMatrix.multiplyMatrices(_tileMatrix, sub.localMatrix);
           im.setMatrixAt(i, _finalMatrix);
-
-          const tintHex =
-            owner === 'player'
-              ? 0xffffff
-              : owner === 'iron_clan'
-                ? 0xf2b5b5
-                : owner === 'azure_league'
-                  ? 0xb5d0f2
-                  : 0x8fa7be;
-          im.setColorAt(i, _colorTmp.setHex(tintHex));
+          im.setColorAt(i, _colorTmp.setHex(this.computeTileColorHex(tile, owner)));
         }
 
         im.instanceMatrix.needsUpdate = true;
@@ -2357,6 +2948,7 @@ export class HexSceneController {
         }
         im.computeBoundingSphere();
         this.terrainInstancesGroup.add(im);
+        this.terrainInstanceEntries.push({ im, entries });
       }
     }
   }
@@ -2366,16 +2958,19 @@ export class HexSceneController {
     animateNewKeys?: string[],
     conqueredKeys?: string[],
     underConstructionKeys?: Set<string>,
-    attentionKeys?: string[]
+    attentionKeys?: string[],
+    upgradingKeys?: Set<string>
   ) {
     this.currentWorldState = nextState;
     const animSet = new Set(animateNewKeys ?? []);
     const conquestSet = new Set(conqueredKeys ?? []);
     const underSet = underConstructionKeys ?? new Set<string>();
+    const upgradeSet = upgradingKeys ?? new Set<string>();
+    const overlayActiveSet = new Set<string>([...underSet, ...upgradeSet]);
 
-    // Update territory border ribbon, construction overlay, and conquerable frontier immediately
+    // Update territory border ribbon, construction/upgrade overlay, and conquerable frontier immediately
     this.rebuildTerritoryOverlays(nextState);
-    this.rebuildUnderConstructionOverlay(nextState, underSet);
+    this.rebuildUnderConstructionOverlay(nextState, overlayActiveSet);
     if (attentionKeys) {
       this.lastAttentionSignature = attentionKeys.join('|');
       this.rebuildAttentionOverlay(nextState, new Set(attentionKeys));
@@ -2455,11 +3050,39 @@ export class HexSceneController {
             ? target.owner.trim()
             : 'neutral';
         const nextUnder = underSet.has(key);
-        if (nextOwner !== entry.owner || nextUnder !== entry.underConstruction) {
+        const nextLevel = getBuildingLevel(target);
+        const levelChanged = nextLevel !== entry.level;
+        const ownerOrUnderChanged =
+          nextOwner !== entry.owner || nextUnder !== entry.underConstruction;
+
+        if (ownerOrUnderChanged || levelChanged) {
           const justCompleted = entry.underConstruction && !nextUnder;
+          const justUpgraded = nextLevel > entry.level;
           entry.owner = nextOwner;
           entry.underConstruction = nextUnder;
-          this.applyOwnerMaterials(entry.group, nextOwner, nextUnder);
+          entry.level = nextLevel;
+
+          if (ownerOrUnderChanged) {
+            this.applyOwnerMaterials(entry.group, nextOwner, nextUnder);
+          }
+
+          if (levelChanged || ownerOrUnderChanged) {
+            if (entry.upgradeGroup) {
+              entry.group.remove(entry.upgradeGroup);
+              entry.upgradeGroup = null;
+            }
+            const assetName = HEX_ASSETS[target.structureIndex]?.name ?? '';
+            const nextUpgradeGroup = this.buildUpgradeAttachmentGroup(
+              assetName,
+              nextLevel,
+              nextUnder
+            );
+            if (nextUpgradeGroup) {
+              entry.group.add(nextUpgradeGroup);
+              entry.upgradeGroup = nextUpgradeGroup;
+            }
+          }
+
           if (conquestSet.has(key)) {
             const pos = entry.group.position;
             entry.group.scale.set(
@@ -2472,6 +3095,21 @@ export class HexSceneController {
             this.spawnParticleBurst(
               pos.x,
               TILE_SURFACE_Y + 0.08,
+              pos.z,
+              0xfbbf24,
+              12
+            );
+          } else if (justUpgraded) {
+            const pos = entry.group.position;
+            entry.group.scale.set(
+              1.12 * HEX_WORLD_SCALE,
+              0.7 * HEX_WORLD_SCALE,
+              1.12 * HEX_WORLD_SCALE
+            );
+            this.popAnims.push({ mesh: entry.group, progress: 0 });
+            this.spawnParticleBurst(
+              pos.x,
+              TILE_SURFACE_Y + 0.14,
               pos.z,
               0xfbbf24,
               12
@@ -2546,6 +3184,12 @@ export class HexSceneController {
       this.applyOwnerMaterials(clone, owner, isUnder);
       group.add(clone);
 
+      const level = getBuildingLevel(tile);
+      const upgradeGroup = this.buildUpgradeAttachmentGroup(asset.name, level, isUnder);
+      if (upgradeGroup) {
+        group.add(upgradeGroup);
+      }
+
       const pos = axialToWorld(tile.q, tile.r);
       group.position.set(pos.x, 0, pos.z);
       group.rotation.y = THREE.MathUtils.degToRad(tile.orientation);
@@ -2554,10 +3198,12 @@ export class HexSceneController {
 
       this.placedMeshes.set(key, {
         group,
+        upgradeGroup,
         structureIndex: tile.structureIndex,
         orientation: tile.orientation,
         owner,
         underConstruction: isUnder,
+        level,
       });
 
       if (conquestSet.has(key)) {
@@ -2580,9 +3226,7 @@ export class HexSceneController {
       }
     }
 
-    if (!this.disposed) {
-      this.renderer.render(this.scene, this.camera);
-    }
+    this.wakeRenderLoop();
   }
 
   private spawnParticleBurst(
@@ -2626,7 +3270,7 @@ export class HexSceneController {
     this.camera.fov = aspect < 0.8 ? 36 : 32;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
-    this.renderer.render(this.scene, this.camera);
+    this.wakeRenderLoop();
   }
 
   private isCameraSettling(): boolean {
@@ -2659,10 +3303,7 @@ export class HexSceneController {
         focusZ + Math.cos(this.titleOrbitAngle) * horiz
       );
       this.camera.lookAt(focusX, 0.45, focusZ);
-      if (this.sunLight) {
-        this.sunLight.position.set(focusX + 14, 24, focusZ + 12);
-        this.sunLight.target.position.set(focusX, 0, focusZ);
-      }
+      this.updateSunDirection();
       return;
     }
 
@@ -2729,14 +3370,12 @@ export class HexSceneController {
       this.camTarget.z + Math.cos(this.camYaw) * horiz
     );
     this.camera.lookAt(this.camTarget.x, 0.22, this.camTarget.z);
-    if (this.sunLight) {
-      this.sunLight.position.set(this.camTarget.x + 14, 24, this.camTarget.z + 12);
-      this.sunLight.target.position.set(this.camTarget.x, 0, this.camTarget.z);
-    }
+    this.updateSunDirection();
   }
 
-  private updateEffects(dt: number) {
+  private updateEffects(dt: number, atmosDt: number = dt) {
     this.elapsedSec += dt;
+    this.updateAtmosphereStep(atmosDt);
 
     // Gentle ocean drift
     this.waterTexture.offset.x = (this.elapsedSec * 0.015) % 1;
@@ -2872,9 +3511,24 @@ export class HexSceneController {
     }
   }
 
+  private wakeRenderLoop() {
+    if (this.disposed) return;
+    this.lastRenderMs = 0;
+    this.pendingSoftwareRender = true;
+    if (this.isSoftwareGl && this.isIdleSleeping) {
+      this.isIdleSleeping = false;
+      this.lastFrameMs = performance.now();
+      this.frameId = requestAnimationFrame(this.tick);
+    }
+  }
+
   private scheduleNextFrame() {
     if (this.disposed) return;
     if (this.isSoftwareGl) {
+      if (this.hasRenderedInitialFrame && !this.isSceneActive() && !this.pendingSoftwareRender) {
+        this.isIdleSleeping = true;
+        return;
+      }
       this.afterDraw(this.tick);
     } else {
       this.frameId = requestAnimationFrame(this.tick);
@@ -2884,6 +3538,7 @@ export class HexSceneController {
   private isSceneActive(): boolean {
     return (
       this.gameState === 'title' ||
+      this.atmosDirty ||
       this.activeTouchPointers.size > 0 ||
       this.keysHeld.size > 0 ||
       this.isOrbitDragging ||
@@ -2898,7 +3553,21 @@ export class HexSceneController {
     if (this.disposed) return;
 
     if (document.hidden) {
+      if (this.isSoftwareGl) {
+        this.isIdleSleeping = true;
+        return;
+      }
       this.scheduleNextFrame();
+      return;
+    }
+
+    if (
+      this.isSoftwareGl &&
+      this.hasRenderedInitialFrame &&
+      !this.isSceneActive() &&
+      !this.pendingSoftwareRender
+    ) {
+      this.isIdleSleeping = true;
       return;
     }
 
@@ -2915,16 +3584,21 @@ export class HexSceneController {
       return;
     }
 
+    this.pendingSoftwareRender = false;
     const rawDt = (now - this.lastFrameMs) / 1000;
     this.lastFrameMs = now;
     this.lastRenderMs = now;
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
+    const atmosDt = this.isSoftwareGl
+      ? Math.min(Math.max(rawDt, 0.001), 0.25)
+      : dt;
 
     this.updateCameraTransform(dt);
     if (this.gameState !== 'paused') {
-      this.updateEffects(dt);
+      this.updateEffects(dt, atmosDt);
     }
     this.renderer.render(this.scene, this.camera);
+    this.hasRenderedInitialFrame = true;
     this.scheduleNextFrame();
   };
 
@@ -2966,6 +3640,14 @@ export class HexSceneController {
       addMat(pair.azureLeague);
       addMat(pair.underConstruction);
     }
+    for (const geo of this.upgradeGeoCache.values()) {
+      geometries.add(geo);
+    }
+    materials.add(this.nightLanternGlowMat);
+    materials.add(this.upgradeStoneMat);
+    materials.add(this.upgradeTimberMat);
+    materials.add(this.upgradeRoofMat);
+    materials.add(this.upgradeGoldMat);
 
     geometries.add(this.conquestRingGeo);
     geometries.forEach((g) => g.dispose());
@@ -2978,6 +3660,8 @@ export class HexSceneController {
     }
 
     this.conquestWaves = [];
+    this.terrainInstanceEntries = [];
+    this.upgradeGeoCache.clear();
     this.ownerMaterialPairs.clear();
     this.terrainSubMeshes.clear();
     this.modelCache.clear();

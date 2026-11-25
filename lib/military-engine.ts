@@ -1,5 +1,5 @@
 import type { HexAssetEntry } from './godot-docs';
-import { getBuildingDefinition } from './buildings-catalog';
+import { getBuildingLevel, getEffectiveBuildingStats } from './building-upgrade-engine';
 import { hexKey, type AxialCoord, type HexOwner, type HexWorldState } from './hex-engine';
 import { getHexTerrainAndResource, getTerrainDefenseBonus } from './terrain-engine';
 import { AXIAL_DIRECTIONS } from './territory-engine';
@@ -135,8 +135,8 @@ export function computeFactionMilitaryPower(
     if (tile.owner !== owner) continue;
     if (underConstructionKeys?.has(hexKey(tile.q, tile.r))) continue;
     const assetName = assets[tile.structureIndex]?.name ?? '';
-    const bDef = getBuildingDefinition(assetName);
-    defensePower += bDef.defenseBonus;
+    const stats = getEffectiveBuildingStats(assetName, getBuildingLevel(tile));
+    defensePower += stats.defenseBonus;
   }
 
   return { attackPower, defensePower, unitCount, unitMaintenanceGold };
@@ -157,7 +157,7 @@ export function computeHexDefenseScore(
 
   if (tile && !underConstructionKeys?.has(hexKey(q, r))) {
     const assetName = assets[tile.structureIndex]?.name ?? '';
-    score += getBuildingDefinition(assetName).defenseBonus;
+    score += getEffectiveBuildingStats(assetName, getBuildingLevel(tile)).defenseBonus;
   }
 
   const defender = getUnitAt(units, q, r);

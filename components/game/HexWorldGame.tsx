@@ -44,6 +44,13 @@ import {
   type RoadTile,
 } from '@/lib/road-engine';
 import { getCityAtCoord, type CityEntity } from '@/lib/city-engine';
+import { computeCalendarSnapshot } from '@/lib/calendar-engine';
+import { getDayPhaseForTurn } from '@/lib/day-night-engine';
+import { createInitialClimateWeather } from '@/lib/season-engine';
+import {
+  getBuildingLevel,
+  type BuildingUpgradeEvaluation,
+} from '@/lib/building-upgrade-engine';
 import {
   advanceKingdomTurn,
   buildInKingdom,
@@ -53,6 +60,7 @@ import {
   createStarterKingdomState,
   demolishInKingdom,
   deserializeKingdomState,
+  evaluateBuildingUpgradeInKingdom,
   evaluateExpansionInKingdom,
   getConstructionAt,
   getExpansionAt,
@@ -62,6 +70,7 @@ import {
   getKingdomRoadSummary,
   getKingdomTerritoryCapacity,
   getUnderConstructionKeys,
+  getUpgradingConstructionsByKey,
   performDiplomacyAction,
   recruitUnitInKingdom,
   resolveKingdomEvent,
@@ -69,6 +78,7 @@ import {
   setActiveResearchInKingdom,
   startExpansionInKingdom,
   tradeResourceInKingdom,
+  upgradeBuildingInKingdom,
   type KingdomState,
 } from '@/lib/kingdom-engine';
 import { gameAudio } from '@/lib/game-audio';
@@ -131,6 +141,10 @@ function computeValidUnitTargets(
   }
 
   return targets;
+}
+
+function getUpgradingKeysSet(state: KingdomState): Set<string> {
+  return new Set(Object.keys(getUpgradingConstructionsByKey(state)));
 }
 
 export default function HexWorldGame({ initialAutostart = false }: HexWorldGameProps) {
@@ -242,6 +256,23 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     []
   );
 
+  const syncSceneAtmosphere = useCallback(
+    (nextKingdom: KingdomState, snap = false) => {
+      const cal = nextKingdom.calendar ?? computeCalendarSnapshot(nextKingdom.turn);
+      const phase = nextKingdom.dayPhase ?? getDayPhaseForTurn(nextKingdom.turn);
+      const weather = (nextKingdom.climateWeather ?? createInitialClimateWeather()).id;
+      controllerRef.current?.setAtmosphereState({
+        phase,
+        season: cal.season,
+        seasonProgress: cal.seasonProgress,
+        weather,
+        worldSeed: nextKingdom.worldSeed ?? nextKingdom.worldState.seed,
+        snap,
+      });
+    },
+    []
+  );
+
   const setSelectedHexSynced = useCallback((coord: AxialCoord | null) => {
     selectedHexRef.current = coord;
     setSelectedHex(coord);
@@ -279,11 +310,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setKingdomState(res.nextState);
       gameAudio.playPlace();
       const under = getUnderConstructionKeys(res.nextState);
+      const upgrading = getUpgradingKeysSet(res.nextState);
       controllerRef.current?.syncWorldState(
         res.nextState.worldState,
         [hexKey(q, r)],
         undefined,
-        under
+        under,
+        undefined,
+        upgrading
       );
       syncSceneRoadsAndCities(res.nextState, under);
       if (res.messagePt) showToast(res.messagePt);
@@ -331,11 +365,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setKingdomState(res.nextState);
       gameAudio.playDemolish();
       const under = getUnderConstructionKeys(res.nextState);
+      const upgrading = getUpgradingKeysSet(res.nextState);
       controllerRef.current?.syncWorldState(
         res.nextState.worldState,
         [hexKey(q, r)],
         undefined,
-        under
+        under,
+        undefined,
+        upgrading
       );
       syncSceneRoadsAndCities(res.nextState, under);
       if (res.messagePt) showToast(res.messagePt);
@@ -391,11 +428,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         if (cmdRes.capturedKey) {
           gameAudio.playConquest();
           const under = getUnderConstructionKeys(cmdRes.nextState);
+          const upgrading = getUpgradingKeysSet(cmdRes.nextState);
           controllerRef.current?.syncWorldState(
             cmdRes.nextState.worldState,
             undefined,
             [cmdRes.capturedKey],
-            under
+            under,
+            undefined,
+            upgrading
           );
           syncSceneRoadsAndCities(cmdRes.nextState, under);
         } else {
@@ -476,6 +516,37 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     if (!coord) return;
     handleDemolishAt(coord.q, coord.r);
   }, [handleDemolishAt]);
+
+  const handleUpgradeSelectedHex = useCallback(() => {
+    const coord = selectedHexRef.current;
+    if (!coord) return;
+    const res = upgradeBuildingInKingdom(
+      kingdomStateRef.current,
+      coord.q,
+      coord.r,
+      HEX_ASSETS
+    );
+    if (!res.started) {
+      gameAudio.playError();
+      showToast(res.messagePt);
+      return;
+    }
+    kingdomStateRef.current = res.nextState;
+    setKingdomState(res.nextState);
+    gameAudio.playPlace();
+    const under = getUnderConstructionKeys(res.nextState);
+    const upgrading = getUpgradingKeysSet(res.nextState);
+    controllerRef.current?.syncWorldState(
+      res.nextState.worldState,
+      [hexKey(coord.q, coord.r)],
+      undefined,
+      under,
+      undefined,
+      upgrading
+    );
+    syncSceneRoadsAndCities(res.nextState, under);
+    showToast(res.messagePt);
+  }, [showToast, syncSceneRoadsAndCities]);
 
   const handleCancelAction = useCallback(() => {
     let didCancel = false;
@@ -598,11 +669,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       controllerRef.current?.setToolMode('expand');
       gameAudio.playPlace();
       const under = getUnderConstructionKeys(res.nextState);
+      const upgrading = getUpgradingKeysSet(res.nextState);
       controllerRef.current?.syncWorldState(
         res.nextState.worldState,
         [hexKey(coord.q, coord.r)],
         undefined,
-        under
+        under,
+        undefined,
+        upgrading
       );
       syncSceneRoadsAndCities(res.nextState, under);
       if (res.messagePt) showToast(res.messagePt);
@@ -619,19 +693,24 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     } else {
       syncSceneUnits(res.nextState, null);
     }
+    syncSceneAtmosphere(res.nextState, false);
     const waveKeys = [...res.incorporatedKeys, ...res.conqueredByAiKeys];
     const under = getUnderConstructionKeys(res.nextState);
+    const upgrading = getUpgradingKeysSet(res.nextState);
     controllerRef.current?.syncWorldState(
       res.nextState.worldState,
       undefined,
       waveKeys.length > 0 ? waveKeys : undefined,
-      under
+      under,
+      undefined,
+      upgrading
     );
     syncSceneRoadsAndCities(res.nextState, under);
     if (
       res.completedTech ||
       res.newEvent ||
       res.completedBuildings.length > 0 ||
+      res.completedUpgrades.length > 0 ||
       res.incorporatedKeys.length > 0 ||
       res.foundedCities.length > 0 ||
       res.leveledUpCities.length > 0
@@ -641,7 +720,13 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       gameAudio.playSaveChime();
     }
     showToast(res.headlinePt);
-  }, [clearCommandMode, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
+  }, [
+    clearCommandMode,
+    showToast,
+    syncSceneAtmosphere,
+    syncSceneRoadsAndCities,
+    syncSceneUnits,
+  ]);
 
   // Optional auto-turn timer
   useEffect(() => {
@@ -814,12 +899,16 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setSelectedHexSynced(null);
       clearCommandMode(loaded);
       controllerRef.current?.setHomeCoord(loaded.playerCapital ?? { q: 0, r: 0 }, true);
+      syncSceneAtmosphere(loaded, true);
       const under = getUnderConstructionKeys(loaded);
+      const upgrading = getUpgradingKeysSet(loaded);
       controllerRef.current?.syncWorldState(
         loaded.worldState,
         undefined,
         undefined,
-        under
+        under,
+        undefined,
+        upgrading
       );
       syncSceneRoadsAndCities(loaded, under);
       syncSceneUnits(loaded, null);
@@ -829,7 +918,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     } catch {
       showToast('Erro ao carregar reino');
     }
-  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
+  }, [
+    clearCommandMode,
+    setSelectedHexSynced,
+    showToast,
+    syncSceneAtmosphere,
+    syncSceneRoadsAndCities,
+    syncSceneUnits,
+  ]);
 
   const handleStartGame = useCallback(() => {
     document.body.dataset.state = 'playing';
@@ -864,19 +960,30 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     setSelectedHexSynced(null);
     clearCommandMode(starter);
     controllerRef.current?.setHomeCoord(starter.playerCapital ?? { q: 0, r: 0 }, true);
+    syncSceneAtmosphere(starter, true);
     const under = getUnderConstructionKeys(starter);
+    const upgrading = getUpgradingKeysSet(starter);
     controllerRef.current?.syncWorldState(
       starter.worldState,
       undefined,
       undefined,
-      under
+      under,
+      undefined,
+      upgrading
     );
     syncSceneRoadsAndCities(starter, under);
     syncSceneUnits(starter, null);
     controllerRef.current?.centerCamera();
     setGameState('playing');
     showToast('Reino inicial restaurado');
-  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
+  }, [
+    clearCommandMode,
+    setSelectedHexSynced,
+    showToast,
+    syncSceneAtmosphere,
+    syncSceneRoadsAndCities,
+    syncSceneUnits,
+  ]);
 
   const handleNewProceduralWorld = useCallback(() => {
     const newSeed = createRandomWorldSeed();
@@ -886,19 +993,30 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     setSelectedHexSynced(null);
     clearCommandMode(starter);
     controllerRef.current?.setHomeCoord(starter.playerCapital ?? { q: 0, r: 0 }, true);
+    syncSceneAtmosphere(starter, true);
     const under = getUnderConstructionKeys(starter);
+    const upgrading = getUpgradingKeysSet(starter);
     controllerRef.current?.syncWorldState(
       starter.worldState,
       undefined,
       undefined,
-      under
+      under,
+      undefined,
+      upgrading
     );
     syncSceneRoadsAndCities(starter, under);
     syncSceneUnits(starter, null);
     controllerRef.current?.centerCamera();
     setGameState('playing');
     showToast(`Novo mundo gerado (#${newSeed})`);
-  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
+  }, [
+    clearCommandMode,
+    setSelectedHexSynced,
+    showToast,
+    syncSceneAtmosphere,
+    syncSceneRoadsAndCities,
+    syncSceneUnits,
+  ]);
 
   const handleClearMap = useCallback(() => {
     const empty = createSandboxKingdomState();
@@ -907,19 +1025,30 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     setSelectedHexSynced(null);
     clearCommandMode(empty);
     controllerRef.current?.setHomeCoord({ q: 0, r: 0 }, true);
+    syncSceneAtmosphere(empty, true);
     const under = getUnderConstructionKeys(empty);
+    const upgrading = getUpgradingKeysSet(empty);
     controllerRef.current?.syncWorldState(
       empty.worldState,
       undefined,
       undefined,
-      under
+      under,
+      undefined,
+      upgrading
     );
     syncSceneRoadsAndCities(empty, under);
     syncSceneUnits(empty, null);
     controllerRef.current?.centerCamera();
     setGameState('playing');
     showToast('Mapa limpo — modo livre');
-  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
+  }, [
+    clearCommandMode,
+    setSelectedHexSynced,
+    showToast,
+    syncSceneAtmosphere,
+    syncSceneRoadsAndCities,
+    syncSceneUnits,
+  ]);
 
   const handleToggleMute = useCallback(() => {
     setMuted((prev) => {
@@ -976,12 +1105,34 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     controller.setGameState(gameStateRef.current);
     controller.setToolMode(toolModeRef.current);
     controller.setSelectedPiece(selectedIndexRef.current, rotationDegRef.current);
+    const initCal =
+      kingdomStateRef.current.calendar ??
+      computeCalendarSnapshot(kingdomStateRef.current.turn);
+    const initPhase =
+      kingdomStateRef.current.dayPhase ??
+      getDayPhaseForTurn(kingdomStateRef.current.turn);
+    const initWeather = (
+      kingdomStateRef.current.climateWeather ?? createInitialClimateWeather()
+    ).id;
+    controller.setAtmosphereState({
+      phase: initPhase,
+      season: initCal.season,
+      seasonProgress: initCal.seasonProgress,
+      weather: initWeather,
+      worldSeed:
+        kingdomStateRef.current.worldSeed ??
+        kingdomStateRef.current.worldState.seed,
+      snap: true,
+    });
     const under = getUnderConstructionKeys(kingdomStateRef.current);
+    const upgrading = getUpgradingKeysSet(kingdomStateRef.current);
     controller.syncWorldState(
       kingdomStateRef.current.worldState,
       undefined,
       undefined,
-      under
+      under,
+      undefined,
+      upgrading
     );
     controller.syncRoadsAndCities({
       roads: kingdomStateRef.current.roads ?? {},
@@ -1345,6 +1496,31 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     });
   }, [kingdomState, selectedHex, worldState]);
 
+  const calendar = useMemo(
+    () => kingdomState.calendar ?? computeCalendarSnapshot(kingdomState.turn),
+    [kingdomState.calendar, kingdomState.turn]
+  );
+
+  const dayPhase = kingdomState.dayPhase ?? getDayPhaseForTurn(kingdomState.turn);
+  const climateWeather =
+    kingdomState.climateWeather ?? createInitialClimateWeather();
+
+  const selectedBuildingLevel = useMemo(() => {
+    if (!selectedHex) return 1;
+    const tile = worldState.hexes[hexKey(selectedHex.q, selectedHex.r)];
+    return getBuildingLevel(tile);
+  }, [selectedHex, worldState.hexes]);
+
+  const selectedUpgradeEvaluation = useMemo<BuildingUpgradeEvaluation | null>(() => {
+    if (!selectedHex || !selectedHexHasConstruction) return null;
+    return evaluateBuildingUpgradeInKingdom(
+      kingdomState,
+      selectedHex.q,
+      selectedHex.r,
+      HEX_ASSETS
+    );
+  }, [kingdomState, selectedHex, selectedHexHasConstruction]);
+
   return (
     <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-[#9bd2ee] hex-game-viewport">
       {/* Isolated WebGL canvas mount container */}
@@ -1358,6 +1534,9 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       <GameHud
         gameState={gameState}
         turn={kingdomState.turn}
+        calendar={calendar}
+        dayPhase={dayPhase}
+        climateWeather={climateWeather}
         worldSeed={kingdomState.worldSeed}
         cash={worldState.cash}
         territoryCount={territoryCount}
@@ -1379,6 +1558,8 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         selectedHexConstruction={selectedHexConstruction}
         selectedHexActiveExpansion={selectedHexActiveExpansion}
         selectedTileAssetName={selectedTileAssetName}
+        selectedBuildingLevel={selectedBuildingLevel}
+        selectedUpgradeEvaluation={selectedUpgradeEvaluation}
         selectedExpansion={selectedExpansion}
         selectedTerrainInfo={selectedTerrainInfo}
         selectedStrategicInfo={selectedStrategicInfo}
@@ -1413,6 +1594,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         onSetToolMode={handleSetToolMode}
         onConfirmSelectedHex={handleConfirmSelectedHex}
         onBuildRoadSelected={handleBuildRoadSelected}
+        onUpgradeSelectedHex={handleUpgradeSelectedHex}
         onDemolishSelectedHex={handleDemolishSelectedHex}
         onRecruitUnit={handleRecruitUnit}
         onStartUnitCommand={handleStartUnitCommand}

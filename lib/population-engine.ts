@@ -70,9 +70,10 @@ function getBuildingStaffingPriority(order: BuildingWorkOrder): number {
   }
 }
 
-export function computeFoodDemand(population: number): number {
+export function computeFoodDemand(population: number, foodDemandMult = 1): number {
   const safePop = Math.max(0, Number.isFinite(population) ? population : 0);
-  return Math.max(2, Math.ceil(safePop * FOOD_CONSUMPTION_PER_CITIZEN));
+  const safeMult = Number.isFinite(foodDemandMult) ? Math.max(0.5, foodDemandMult) : 1;
+  return Math.max(2, Math.ceil(safePop * FOOD_CONSUMPTION_PER_CITIZEN * safeMult));
 }
 
 /**
@@ -163,6 +164,8 @@ export function evaluatePopulationDynamics(params: {
   foodProduced: number;
   foodDeficitTurns?: number;
   activeEffects?: ActiveWorldEffect[];
+  foodDemandMult?: number;
+  seasonalPopGrowthBonusMod?: number;
 }): PopulationDynamicsResult {
   const safePop = Math.max(
     0,
@@ -176,8 +179,10 @@ export function evaluatePopulationDynamics(params: {
   const safeFoodProd = Math.max(0, Number.isFinite(params.foodProduced) ? params.foodProduced : 0);
   const prevDeficitTurns = Math.max(0, Math.round(params.foodDeficitTurns ?? 0));
   const activeEffects = params.activeEffects ?? [];
+  const foodDemandMult = params.foodDemandMult ?? 1;
+  const seasonalGrowthMod = params.seasonalPopGrowthBonusMod ?? 0;
 
-  const foodConsumption = computeFoodDemand(safePop);
+  const foodConsumption = computeFoodDemand(safePop, foodDemandMult);
   const totalAvailableFood = safeFoodStock + safeFoodProd;
   const hasFoodDeficit = totalAvailableFood < foodConsumption;
   const foodSurplusAfterFeed = totalAvailableFood - foodConsumption;
@@ -203,7 +208,16 @@ export function evaluatePopulationDynamics(params: {
     if (safePop < safeCap && foodSurplusAfterFeed >= 4) {
       const spareHousing = safeCap - safePop;
       const foodNet = safeFoodProd - foodConsumption;
-      projectedGrowth = foodNet >= 10 && spareHousing >= 2 ? 2 : 1;
+      const baseGrowth = foodNet >= 10 && spareHousing >= 2 ? 2 : 1;
+      const seasonalAdjusted =
+        seasonalGrowthMod > 0
+          ? Math.min(spareHousing, baseGrowth + (foodNet >= 6 ? 1 : 0))
+          : seasonalGrowthMod < 0
+            ? foodNet >= 14 && spareHousing >= 2
+              ? 1
+              : 0
+            : baseGrowth;
+      projectedGrowth = Math.max(0, Math.min(spareHousing, seasonalAdjusted));
     }
   }
 

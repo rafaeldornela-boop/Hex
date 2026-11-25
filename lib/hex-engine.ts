@@ -43,6 +43,8 @@ export interface PlacedHex {
   resourceAmount?: number;
   /** Persistent rare strategic feature on procedural worlds */
   rareFeature?: RareFeatureType;
+  /** Building upgrade tier (1 = base, 2..4 = upgraded) */
+  level?: number;
   /** Optional seam for upcoming territory, level, and worker mechanics */
   meta?: TileDomainMetadata;
 }
@@ -280,6 +282,8 @@ export function demolishHexInState(
           terrainType: terrainInfo.terrainType,
           resourceType: terrainInfo.resourceType,
           resourceAmount: terrainInfo.resourceAmount,
+          level: undefined,
+          ...(existing.meta ? { meta: { ...existing.meta, level: undefined } } : {}),
         },
       },
     },
@@ -345,6 +349,10 @@ export function deserializeWorldState(
             resourceType: terrainInfo.resourceType,
             resourceAmount: terrainInfo.resourceAmount,
           };
+          const rawLevel = (item as PlacedHex).level;
+          if (typeof rawLevel === 'number' && Number.isFinite(rawLevel) && rawLevel >= 1) {
+            tile.level = Math.max(1, Math.min(4, Math.round(rawLevel)));
+          }
           if (isValidRareFeatureType(rawRare)) {
             tile.rareFeature = rawRare;
           }

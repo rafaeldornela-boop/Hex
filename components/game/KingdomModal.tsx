@@ -4,19 +4,28 @@ import { useState } from 'react';
 import {
   AlertTriangle,
   Building2,
+  Calendar,
   Check,
+  CloudRain,
   Coins,
   Flag,
   FlaskConical,
   Hammer,
   Handshake,
   Lock,
+  Moon,
   Route,
   Scale,
   Shield,
+  Snowflake,
   Sparkles,
+  Sun,
+  Sunrise,
+  Sunset,
   Swords,
+  Thermometer,
   Users,
+  Wind,
   X,
 } from 'lucide-react';
 import { getBuildingDefinition } from '@/lib/buildings-catalog';
@@ -28,6 +37,10 @@ import { TECH_BY_ID, TECH_TREE, canStartResearch, type TechId } from '@/lib/tech
 import { TERRAIN_METADATA, getHexTerrainAndResource } from '@/lib/terrain-engine';
 import type { TerritorialCapacitySummary } from '@/lib/territory-engine';
 import type { MarketSummary, TradableResource } from '@/lib/trade-engine';
+import { computeCalendarSnapshot } from '@/lib/calendar-engine';
+import { DAY_PHASE_META, getDayPhaseForTurn } from '@/lib/day-night-engine';
+import { SEASON_PROFILES, createInitialClimateWeather } from '@/lib/season-engine';
+import { toRomanLevel } from '@/lib/building-upgrade-engine';
 
 export type KingdomModalTab = 'economy' | 'trade' | 'research' | 'military' | 'diplomacy';
 
@@ -97,6 +110,42 @@ export default function KingdomModal({
   const activeTech = kingdomState.research.activeTechId
     ? TECH_BY_ID[kingdomState.research.activeTechId]
     : null;
+  const calendar =
+    kingdomState.calendar ?? computeCalendarSnapshot(kingdomState.turn);
+  const dayPhase =
+    kingdomState.dayPhase ?? getDayPhaseForTurn(kingdomState.turn);
+  const climateWeather =
+    kingdomState.climateWeather ?? createInitialClimateWeather();
+  const seasonProfile = SEASON_PROFILES[calendar.season];
+
+  const renderPhaseIcon = () => {
+    if (dayPhase === 'dawn') {
+      return <Sunrise className="w-4 h-4 text-amber-600 shrink-0" aria-hidden="true" />;
+    }
+    if (dayPhase === 'dusk') {
+      return <Sunset className="w-4 h-4 text-orange-600 shrink-0" aria-hidden="true" />;
+    }
+    if (dayPhase === 'night') {
+      return <Moon className="w-4 h-4 text-indigo-700 shrink-0" aria-hidden="true" />;
+    }
+    return <Sun className="w-4 h-4 text-amber-500 shrink-0" aria-hidden="true" />;
+  };
+
+  const renderWeatherIcon = () => {
+    if (climateWeather.id === 'rain') {
+      return <CloudRain className="w-4 h-4 text-sky-700 shrink-0" aria-hidden="true" />;
+    }
+    if (climateWeather.id === 'frost') {
+      return <Snowflake className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />;
+    }
+    if (climateWeather.id === 'storm') {
+      return <Wind className="w-4 h-4 text-slate-700 shrink-0" aria-hidden="true" />;
+    }
+    if (climateWeather.id === 'drought_weather') {
+      return <Thermometer className="w-4 h-4 text-amber-700 shrink-0" aria-hidden="true" />;
+    }
+    return <Sun className="w-4 h-4 text-emerald-700 shrink-0" aria-hidden="true" />;
+  };
 
   const tabs: Array<{ id: KingdomModalTab; label: string; alert?: boolean }> = [
     { id: 'economy', label: 'Economia' },
@@ -190,6 +239,71 @@ export default function KingdomModal({
         <div className="flex-1 min-h-0 overflow-y-auto hex-touch-scroll p-4 sm:p-5 space-y-4">
           {activeTab === 'economy' && (
             <div className="space-y-4">
+              {/* Calendar, Season & Climate */}
+              <section
+                data-testid="season-climate-card"
+                className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 space-y-2.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-display text-sm font-bold text-[#1f1a12] flex items-center gap-1.5">
+                    <Calendar className="w-4 h-4 text-emerald-700" aria-hidden="true" />
+                    Calendário, Estação e Clima
+                  </h3>
+                  <span className="text-xs font-bold text-[#3c3426] tabular-nums">
+                    {calendar.formattedDatePt}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs tabular-nums">
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Estação</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-[#1f1a12]">
+                      {calendar.seasonLabelPt}
+                    </p>
+                  </div>
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Ciclo Visual</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-[#1f1a12] flex items-center gap-1.5">
+                      {renderPhaseIcon()}
+                      <span>{DAY_PHASE_META[dayPhase].labelPt}</span>
+                    </p>
+                  </div>
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Tempo</p>
+                    <p className="mt-0.5 font-display text-sm font-bold text-[#1f1a12] flex items-center gap-1.5">
+                      {renderWeatherIcon()}
+                      <span className="truncate">{climateWeather.labelPt}</span>
+                    </p>
+                  </div>
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Inverno</p>
+                    <p
+                      className={`mt-0.5 font-display text-base font-bold ${
+                        calendar.season === 'winter' || calendar.isWinterWarning
+                          ? 'text-sky-800'
+                          : 'text-[#1f1a12]'
+                      }`}
+                    >
+                      {calendar.season === 'winter'
+                        ? `Ativo (${calendar.turnsUntilNextSeason}t)`
+                        : `Em ${calendar.turnsUntilWinter}t`}
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-xs font-medium text-[#3c3426]">
+                  {seasonProfile.descriptionPt}
+                  {climateWeather.id !== 'clear'
+                    ? ` Clima (${climateWeather.turnsRemaining}t): ${climateWeather.descriptionPt}`
+                    : ''}
+                </p>
+
+                <p className="text-[11px] font-semibold text-[#5c5140] tabular-nums">
+                  Reserva de alimento: {kingdomState.resources.food} ({formatSigned(economy.foodNet)}/turno)
+                  {economy.seasonalSummaryPt ? ` · ${economy.seasonalSummaryPt}` : ''}
+                </p>
+              </section>
+
               {/* Population & Workers */}
               <section className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
@@ -502,12 +616,16 @@ export default function KingdomModal({
                   <div className="space-y-1.5 text-xs">
                     {kingdomState.constructions.map((c) => {
                       const def = getBuildingDefinition(c.assetName);
+                      const title =
+                        c.kind === 'upgrade'
+                          ? `${def.labelPt} → Nv. ${toRomanLevel(c.targetLevel ?? 2)}`
+                          : def.labelPt;
                       return (
                         <div
                           key={`${c.q},${c.r}`}
                           className="flex items-center justify-between gap-2 bg-[#f7f2e6] rounded-lg px-3 py-2"
                         >
-                          <span className="font-bold text-[#1f1a12]">{def.labelPt}</span>
+                          <span className="font-bold text-[#1f1a12]">{title}</span>
                           <span className="text-[11px] font-bold text-amber-800 tabular-nums">
                             Faltam {c.turnsRemaining}/{c.totalTurns} turnos
                           </span>

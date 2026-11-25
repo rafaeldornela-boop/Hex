@@ -32,6 +32,17 @@ import {
   type RegionalWorldSummary,
 } from './regional-engine';
 import { ensureStarterCapitalCity, type CityEntity } from './city-engine';
+import type { SeasonId } from './calendar-engine';
+import {
+  getBuildingLevel,
+  getEffectiveBuildingStats,
+  type EffectiveBuildingStats,
+} from './building-upgrade-engine';
+import {
+  createInitialClimateWeather,
+  getSeasonEconomicProfile,
+  type ActiveClimateWeather,
+} from './season-engine';
 
 export interface KingdomResources {
   wood: number;
@@ -60,9 +71,17 @@ export interface BuildingOperationReport {
   key: string;
   assetName: string;
   labelPt: string;
+  level: number;
+  maxLevel: number;
   status: BuildingOperationStatus;
   statusLabelPt: string;
   reasonPt: string | null;
+  seasonalNotePt: string | null;
+  upgradeInProgress: {
+    targetLevel: number;
+    turnsRemaining: number;
+    totalTurns: number;
+  } | null;
   workersAssigned: number;
   workersRequired: number;
   locationEfficiencyPct: number;
@@ -124,6 +143,10 @@ export interface TurnProductionBreakdown {
   regionalSummary: RegionalWorldSummary;
   buildingsByKey: Record<string, BuildingOperationReport>;
   attentionHexKeys: string[];
+  season: SeasonId | null;
+  weather: ActiveClimateWeather;
+  foodDemandMult: number;
+  seasonalSummaryPt: string | null;
   operationCounts: {
     operating: number;
     partial: number;
@@ -458,6 +481,12 @@ export function computeTurnEconomyBreakdown(params: {
   cities?: CityEntity[];
   playerCapital?: AxialCoord;
   worldSeed?: number;
+  season?: SeasonId;
+  weather?: ActiveClimateWeather;
+  upgradingConstructionsByKey?: Record<
+    string,
+    { targetLevel: number; turnsRemaining: number; totalTurns: number }
+  >;
 }): TurnProductionBreakdown {
   const {
     worldState,
@@ -478,9 +507,23 @@ export function computeTurnEconomyBreakdown(params: {
     cities,
     playerCapital,
     worldSeed,
+    season,
+    weather = createInitialClimateWeather(),
+    upgradingConstructionsByKey = {},
   } = params;
 
   const mods = getTechModifiers(unlockedTechs);
+  const seasonProfile = season ? getSeasonEconomicProfile(season) : null;
+  const seasonFoodMult = seasonProfile ? seasonProfile.foodProductionMult : 1;
+  const seasonWoodMult = seasonProfile ? seasonProfile.woodProductionMult : 1;
+  const seasonTradeMult = seasonProfile ? seasonProfile.tradeBonusMod : 1;
+  const seasonUpkeepMult = seasonProfile ? seasonProfile.upkeepMult : 1;
+  const seasonFoodDemandMult = seasonProfile ? seasonProfile.foodDemandMult : 1;
+  const seasonPopGrowthMod = seasonProfile ? seasonProfile.popGrowthBonusMod : 0;
+
+  const weatherFoodMult = weather?.foodProductionMult ?? 1;
+  const weatherWoodMult = weather?.woodProductionMult ?? 1;
+  const weatherGoldMult = weather?.goldProductionMult ?? 1;
 
   const activeCities =
     owner === 'player'
@@ -561,7 +604,16 @@ export function computeTurnEconomyBreakdown(params: {
     key: string;
     tile: PlacedHex;
     assetName: string;
+    level: number;
+    maxLevel: number;
+    stats: EffectiveBuildingStats;
     bDef: ReturnType<typeof getBuildingDefinition>;
+    hasWaterNeighbor: boolean;
+    upgradeInProgress: {
+      targetLevel: number;
+      turnsRemaining: number;
+      totalTurns: number;
+    } | null;
     locationFactor: number;
     locationNotesPt: string[];
     logisticsFactor: number;
@@ -581,6 +633,9 @@ export function computeTurnEconomyBreakdown(params: {
     const key = hexKey(tile.q, tile.r);
     const assetName = assets[tile.structureIndex]?.name ?? '';
     const isUnderConstruction = Boolean(underConstructionKeys?.has(key));
+    const level = getBuildingLevel(tile);
+    const stats = getEffectiveBuildingStats(assetName, level);
+    const upgradeInfo = upgradingConstructionsByKey[key] ?? null;
 
     const terrainInfo = getHexTerrainAndResource(tile.q, tile.r, tile);
     const strategic = getStrategicRegionInfo(tile.q, tile.r, tile);
@@ -602,16 +657,20 @@ export function computeTurnEconomyBreakdown(params: {
 
     if (isUnderConstruction) {
       underConstructionCount += 1;
-      const bDef = getBuildingDefinition(assetName);
+      const bDef = stats.baseDef;
       buildingsByKey[key] = {
         key,
         assetName,
-        labelPt: bDef.labelPt,
+        labelPt: stats.labelPt,
+        level,
+        maxLevel: stats.maxLevel,
         status: 'under_construction',
         statusLabelPt: 'Em construção',
         reasonPt: 'Aguardando conclusão da obra',
+        seasonalNotePt: null,
+        upgradeInProgress: upgradeInfo,
         workersAssigned: 0,
-        workersRequired: bDef.workersRequired,
+        workersRequired: stats.workersRequired,
         locationEfficiencyPct: 100,
         effectiveEfficiencyPct: 0,
         locationBonusNotesPt: [],
@@ -621,27 +680,27 @@ export function computeTurnEconomyBreakdown(params: {
         hasRoad: hasRoadHere,
         roadLevel: roadLevelHere,
         roadBonusNotesPt: [],
-        potentialProduction: { ...bDef.production },
+        potentialProduction: { ...stats.production },
         actualProduction: { ...ZERO_PROD },
         inputConsumed: {},
       };
       continue;
     }
 
-    const bDef = getBuildingDefinition(assetName);
+    const bDef = stats.baseDef;
     const isConstructedAsset =
-      bDef.housingCapacity > 0 ||
-      bDef.workersRequired > 0 ||
-      bDef.storageBonus > 0 ||
-      bDef.defenseBonus > 0 ||
-      bDef.maintenanceGold > 0 ||
-      hasAnyPositiveOutput(bDef.production);
+      stats.housingCapacity > 0 ||
+      stats.workersRequired > 0 ||
+      stats.storageBonus > 0 ||
+      stats.defenseBonus > 0 ||
+      stats.maintenanceGold > 0 ||
+      hasAnyPositiveOutput(stats.production);
 
     if (!isConstructedAsset) continue;
 
-    capacity += bDef.housingCapacity;
-    storageBonus += bDef.storageBonus;
-    buildingMaint += bDef.maintenanceGold;
+    capacity += stats.housingCapacity;
+    storageBonus += stats.storageBonus;
+    buildingMaint += stats.maintenanceGold;
 
     const loc = computeBuildingLocationEfficiency(
       worldState,
@@ -665,19 +724,35 @@ export function computeTurnEconomyBreakdown(params: {
 
     const regBonus = regionalSummary.hexBonusesByKey[key];
 
+    const hasWaterNeighbor =
+      terrainInfo.terrainType === 'water' ||
+      AXIAL_DIRECTIONS.some((dir) => {
+        const nq = tile.q + dir.q;
+        const nr = tile.r + dir.r;
+        return (
+          getHexTerrainAndResource(nq, nr, worldState.hexes[hexKey(nq, nr)])
+            .terrainType === 'water'
+        );
+      });
+
     workOrders.push({
       key,
       assetName,
-      labelPt: bDef.labelPt,
+      labelPt: stats.labelPt,
       role: bDef.role,
-      workersRequired: bDef.workersRequired,
+      workersRequired: stats.workersRequired,
     });
 
     completedBuildings.push({
       key,
       tile,
       assetName,
+      level,
+      maxLevel: stats.maxLevel,
+      stats,
       bDef,
+      hasWaterNeighbor,
+      upgradeInProgress: upgradeInfo,
       locationFactor: loc.factor,
       locationNotesPt: loc.notesPt,
       logisticsFactor: logistics.factor,
@@ -713,9 +788,19 @@ export function computeTurnEconomyBreakdown(params: {
     workOrders,
   });
 
+  const computeResilientMultiplier = (
+    rawMult: number,
+    resilience: number,
+    extraMitigation = 0
+  ): number => {
+    if (rawMult >= 1) return rawMult;
+    const totalResilience = Math.min(0.75, resilience + extraMitigation);
+    return 1 - (1 - rawMult) * (1 - totalResilience);
+  };
+
   // 2. First pass: calculate ore extraction and food baseline before checking input conversions and starvation
   let extractedOreThisTurn = baseOreProd;
-  let preStarveFoodProd = baseFoodProd;
+  let preStarveFoodProd = baseFoodProd * seasonFoodMult * weatherFoodMult;
 
   for (const item of completedBuildings) {
     const assign = workerAlloc.assignmentsByKey[item.key];
@@ -727,16 +812,34 @@ export function computeTurnEconomyBreakdown(params: {
       workerRatio *
       effectFactor;
 
-    if (item.bDef.production.ore > 0) {
+    if (item.stats.production.ore > 0) {
       extractedOreThisTurn +=
-        item.bDef.production.ore *
+        item.stats.production.ore *
         rawScale *
         mods.stoneOreMultiplier *
         mods.oreBonusMultiplier;
     }
-    if (item.bDef.production.food > 0) {
+    if (item.stats.production.food > 0) {
+      const waterMitigation =
+        weather.id === 'drought_weather' && item.hasWaterNeighbor ? 0.35 : 0;
+      const techMitigation = unlockedTechs.includes('agriculture') ? 0.1 : 0;
+      const effSeasonFood = computeResilientMultiplier(
+        seasonFoodMult,
+        item.stats.seasonalResilience,
+        techMitigation
+      );
+      const effWeatherFood = computeResilientMultiplier(
+        weatherFoodMult,
+        item.stats.seasonalResilience,
+        waterMitigation
+      );
       preStarveFoodProd +=
-        item.bDef.production.food * rawScale * mods.foodMultiplier * effectFoodMult;
+        item.stats.production.food *
+        rawScale *
+        mods.foodMultiplier *
+        effectFoodMult *
+        effSeasonFood *
+        effWeatherFood;
     }
   }
 
@@ -749,6 +852,8 @@ export function computeTurnEconomyBreakdown(params: {
     foodProduced: Math.round(preStarveFoodProd),
     foodDeficitTurns,
     activeEffects,
+    foodDemandMult: seasonFoodDemandMult,
+    seasonalPopGrowthBonusMod: seasonPopGrowthMod,
   });
   const starvationFactor = popDynamicsPreview.starvationFactor;
 
@@ -788,7 +893,7 @@ export function computeTurnEconomyBreakdown(params: {
   for (const item of completedBuildings) {
     const assign = workerAlloc.assignmentsByKey[item.key];
     const workersAssigned = assign ? assign.assigned : 0;
-    const workersRequired = assign ? assign.required : item.bDef.workersRequired;
+    const workersRequired = assign ? assign.required : item.stats.workersRequired;
     const workerRatio = assign ? assign.ratio : 1;
 
     const reqOreInput = item.bDef.inputConsumption?.ore ?? 0;
@@ -803,22 +908,72 @@ export function computeTurnEconomyBreakdown(params: {
       starvationFactor *
       effectFactor;
 
+    const waterMitigation =
+      weather.id === 'drought_weather' && item.hasWaterNeighbor ? 0.35 : 0;
+    const techAgriMitigation = unlockedTechs.includes('agriculture') ? 0.1 : 0;
+    const effSeasonFood = computeResilientMultiplier(
+      seasonFoodMult,
+      item.stats.seasonalResilience,
+      techAgriMitigation
+    );
+    const effWeatherFood = computeResilientMultiplier(
+      weatherFoodMult,
+      item.stats.seasonalResilience,
+      waterMitigation
+    );
+    const effSeasonWood = computeResilientMultiplier(
+      seasonWoodMult,
+      item.stats.seasonalResilience
+    );
+    const effWeatherWood = computeResilientMultiplier(
+      weatherWoodMult,
+      item.stats.seasonalResilience
+    );
+    const effSeasonGold =
+      item.bDef.role === 'commerce'
+        ? computeResilientMultiplier(seasonTradeMult, item.stats.seasonalResilience)
+        : 1;
+    const effWeatherGold = computeResilientMultiplier(
+      weatherGoldMult,
+      item.stats.seasonalResilience
+    );
+
     const actualProduction: BuildingProduction = {
       gold:
         Math.round(
-          item.bDef.production.gold * mods.goldMultiplier * effectGoldMult * combinedFactor
+          item.stats.production.gold *
+            mods.goldMultiplier *
+            effectGoldMult *
+            effSeasonGold *
+            effWeatherGold *
+            combinedFactor
         ) + (workerRatio > 0 ? item.districtGoldFlat : 0),
-      wood: Math.round(item.bDef.production.wood * combinedFactor),
-      stone: Math.round(item.bDef.production.stone * mods.stoneOreMultiplier * combinedFactor),
-      food: Math.round(item.bDef.production.food * mods.foodMultiplier * effectFoodMult * combinedFactor),
-      ore: Math.round(
-        item.bDef.production.ore * mods.stoneOreMultiplier * mods.oreBonusMultiplier * combinedFactor
+      wood: Math.round(
+        item.stats.production.wood * effSeasonWood * effWeatherWood * combinedFactor
       ),
-      metal: Math.round(item.bDef.production.metal * combinedFactor),
-      science: Math.round(item.bDef.production.science * combinedFactor),
+      stone: Math.round(
+        item.stats.production.stone * mods.stoneOreMultiplier * combinedFactor
+      ),
+      food: Math.round(
+        item.stats.production.food *
+          mods.foodMultiplier *
+          effectFoodMult *
+          effSeasonFood *
+          effWeatherFood *
+          combinedFactor
+      ),
+      ore: Math.round(
+        item.stats.production.ore *
+          mods.stoneOreMultiplier *
+          mods.oreBonusMultiplier *
+          combinedFactor
+      ),
+      metal: Math.round(item.stats.production.metal * combinedFactor),
+      science: Math.round(item.stats.production.science * combinedFactor),
     };
 
-    const oreUsed = reqOreInput > 0 ? Math.round(reqOreInput * workerRatio * inputRatio * 10) / 10 : 0;
+    const oreUsed =
+      reqOreInput > 0 ? Math.round(reqOreInput * workerRatio * inputRatio * 10) / 10 : 0;
     totalOreConsumed += oreUsed;
 
     buildingGoldGross += actualProduction.gold;
@@ -828,6 +983,31 @@ export function computeTurnEconomyBreakdown(params: {
     buildingOreProd += actualProduction.ore;
     buildingMetalProd += actualProduction.metal;
     buildingScienceProd += actualProduction.science;
+
+    // Seasonal note for contextual UI
+    let seasonalNotePt: string | null = null;
+    if (seasonProfile) {
+      if (item.stats.production.food > 0) {
+        const netFoodFactor = effSeasonFood * effWeatherFood;
+        if (Math.abs(netFoodFactor - 1) >= 0.04) {
+          const pct = Math.round((netFoodFactor - 1) * 100);
+          seasonalNotePt =
+            pct >= 0
+              ? `${seasonProfile.labelPt}: +${pct}% Alimento`
+              : `${seasonProfile.labelPt}: ${pct}% Alimento${
+                  item.stats.seasonalResilience > 0
+                    ? ` (Nv.${item.level} protege ${Math.round(item.stats.seasonalResilience * 100)}%)`
+                    : ''
+                }`;
+        }
+      } else if (item.stats.production.wood > 0 && Math.abs(effSeasonWood * effWeatherWood - 1) >= 0.04) {
+        const pct = Math.round((effSeasonWood * effWeatherWood - 1) * 100);
+        seasonalNotePt = `${seasonProfile.labelPt}: ${pct >= 0 ? '+' : ''}${pct}% Madeira`;
+      } else if (item.bDef.role === 'commerce' && Math.abs(effSeasonGold * effWeatherGold - 1) >= 0.04) {
+        const pct = Math.round((effSeasonGold * effWeatherGold - 1) * 100);
+        seasonalNotePt = `${seasonProfile.labelPt}: ${pct >= 0 ? '+' : ''}${pct}% Comércio`;
+      }
+    }
 
     // Determine clear status & causal reason
     let status: BuildingOperationStatus = 'operating';
@@ -860,6 +1040,11 @@ export function computeTurnEconomyBreakdown(params: {
       reasonPt = 'Evento ativo reduz produtividade';
     }
 
+    if (item.upgradeInProgress && status === 'operating') {
+      statusLabelPt = `Melhorando p/ Nv.${item.upgradeInProgress.targetLevel}`;
+      reasonPt = `Obra de evolução (${item.upgradeInProgress.turnsRemaining}/${item.upgradeInProgress.totalTurns}t)`;
+    }
+
     if (status === 'operating') operationCounts.operating += 1;
     else if (status === 'partial') operationCounts.partial += 1;
     else if (status === 'idle') operationCounts.idle += 1;
@@ -871,10 +1056,14 @@ export function computeTurnEconomyBreakdown(params: {
     buildingsByKey[item.key] = {
       key: item.key,
       assetName: item.assetName,
-      labelPt: item.bDef.labelPt,
+      labelPt: item.stats.labelPt,
+      level: item.level,
+      maxLevel: item.maxLevel,
       status,
       statusLabelPt,
       reasonPt,
+      seasonalNotePt,
+      upgradeInProgress: item.upgradeInProgress,
       workersAssigned,
       workersRequired,
       locationEfficiencyPct: Math.round(item.locationFactor * 100),
@@ -886,7 +1075,7 @@ export function computeTurnEconomyBreakdown(params: {
       hasRoad: item.hasRoad,
       roadLevel: item.roadLevel,
       roadBonusNotesPt: item.roadBonusNotesPt,
-      potentialProduction: { ...item.bDef.production },
+      potentialProduction: { ...item.stats.production },
       actualProduction,
       inputConsumed: reqOreInput > 0 ? { ore: Math.round(oreUsed) } : {},
     };
@@ -900,23 +1089,36 @@ export function computeTurnEconomyBreakdown(params: {
     Math.round(
       (baseGoldGross * mods.goldMultiplier +
         tradePactGoldBonus +
-        networkTradeGold +
-        corridorTradeGold) *
-        effectGoldMult
+        (networkTradeGold + corridorTradeGold) * seasonTradeMult) *
+        effectGoldMult *
+        weatherGoldMult
     ) + buildingGoldGross;
-  const totalMaint = buildingMaint + milPower.unitMaintenanceGold + roadMaint;
+  const totalMaint = Math.round(
+    (buildingMaint + milPower.unitMaintenanceGold + roadMaint) * seasonUpkeepMult
+  );
 
-  const finalWood = Math.round(baseWoodProd) + buildingWoodProd;
-  const finalStone = Math.round(baseStoneProd * mods.stoneOreMultiplier) + buildingStoneProd;
+  const finalWood =
+    Math.round(baseWoodProd * seasonWoodMult * weatherWoodMult) + buildingWoodProd;
+  const finalStone =
+    Math.round(baseStoneProd * mods.stoneOreMultiplier) + buildingStoneProd;
   const finalFoodProd =
-    Math.round(baseFoodProd * mods.foodMultiplier * effectFoodMult) + buildingFoodProd;
+    Math.round(
+      baseFoodProd *
+        mods.foodMultiplier *
+        effectFoodMult *
+        seasonFoodMult *
+        weatherFoodMult
+    ) + buildingFoodProd;
   const finalOreProd =
     Math.round(baseOreProd * mods.stoneOreMultiplier * mods.oreBonusMultiplier) +
     buildingOreProd;
   const roundedOreConsumed = Math.round(totalOreConsumed);
   const finalOreNet = finalOreProd - roundedOreConsumed;
   const finalMetalProd = buildingMetalProd;
-  const finalScience = Math.max(1, Math.round(baseScienceProd) + buildingScienceProd + effectScienceBonus);
+  const finalScience = Math.max(
+    1,
+    Math.round(baseScienceProd) + buildingScienceProd + effectScienceBonus
+  );
 
   // Final population dynamics check using exact foodProduced
   const popDynamics = evaluatePopulationDynamics({
@@ -927,9 +1129,17 @@ export function computeTurnEconomyBreakdown(params: {
     foodProduced: finalFoodProd,
     foodDeficitTurns,
     activeEffects,
+    foodDemandMult: seasonFoodDemandMult,
+    seasonalPopGrowthBonusMod: seasonPopGrowthMod,
   });
 
   const foodNet = finalFoodProd - popDynamics.foodConsumption;
+
+  const seasonalSummaryPt = seasonProfile
+    ? `${seasonProfile.labelPt}: ${seasonProfile.descriptionPt}${
+        weather.id !== 'clear' ? ` Clima: ${weather.labelPt}.` : ''
+      }`
+    : null;
 
   return {
     goldGross: finalGoldGross,
@@ -980,6 +1190,10 @@ export function computeTurnEconomyBreakdown(params: {
     regionalSummary,
     buildingsByKey,
     attentionHexKeys,
+    season: season ?? null,
+    weather,
+    foodDemandMult: seasonFoodDemandMult,
+    seasonalSummaryPt,
     operationCounts,
   };
 }

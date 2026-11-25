@@ -1,5 +1,12 @@
 import type { HexAssetEntry } from './godot-docs';
 import { getBuildingDefinition } from './buildings-catalog';
+import { toRomanLevel } from './building-upgrade-engine';
+import { computeCalendarSnapshot } from './calendar-engine';
+import { getDayPhaseForTurn } from './day-night-engine';
+import {
+  advanceClimateWeather,
+  createInitialClimateWeather,
+} from './season-engine';
 import {
   computeTurnEconomyBreakdown,
   type KingdomResources,
@@ -36,9 +43,11 @@ export interface TurnAdvanceResult {
   nextState: KingdomState;
   completedTech: TechDefinition | null;
   completedBuildings: string[];
+  completedUpgrades: string[];
   incorporatedKeys: string[];
   foundedCities: string[];
   leveledUpCities: string[];
+  seasonChangedToPt: string | null;
   newEvent: ActiveKingdomEvent | null;
   conqueredByAiKeys: string[];
   headlinePt: string;
@@ -53,10 +62,10 @@ function safeClampStock(current: number, delta: number, cap: number): number {
 
 /**
  * Deterministic 10-step causal turn resolution pipeline:
- * 1. Complete constructions & territorial incorporations that reach 0 turns remaining
- * 2. Calculate production, location efficiency, worker allocation, and ore-to-metal conversion
- * 3. Consume food & track safety-margin foodDeficitTurns
- * 4. Apply gold net (gross - building & military maintenance)
+ * 1. Advance calendar, day/night phase, climate weather & complete constructions/upgrades/expansions
+ * 2. Calculate production, location efficiency, worker allocation, and ore-to-metal conversion with seasonal/tier effects
+ * 3. Consume food (with seasonal demand) & track safety-margin foodDeficitTurns
+ * 4. Apply gold net (gross - building, road & military maintenance)
  * 5. Update population growth or decline (bounded by housing capacity & MIN_KINGDOM_POPULATION)
  * 6. Advance active scientific research
  * 7. Update resource stockpiles safely within storage caps
@@ -69,28 +78,74 @@ export function processKingdomTurn(
   assets: HexAssetEntry[]
 ): TurnAdvanceResult {
   const nextTurn = working.turn + 1;
+  const prevCalendar = working.calendar ?? computeCalendarSnapshot(working.turn);
+  const nextCalendar = computeCalendarSnapshot(nextTurn);
+  const nextDayPhase = getDayPhaseForTurn(nextTurn);
+  const seasonChangedToPt =
+    prevCalendar.season !== nextCalendar.season ? nextCalendar.seasonLabelPt : null;
 
-  // Step 1a: Progress active multi-turn constructions first so completed buildings activate immediately
+  const weatherStep = advanceClimateWeather({
+    nextTurn,
+    season: nextCalendar.season,
+    prevWeather: working.climateWeather ?? createInitialClimateWeather(),
+    worldSeed: working.worldSeed ?? working.worldState.seed,
+  });
+
+  // Step 1a: Progress active multi-turn constructions & building upgrades
   const completedBuildings: string[] = [];
+  const completedUpgrades: string[] = [];
   const nextConstructions: ActiveConstruction[] = [];
+  const nextHexes = { ...working.worldState.hexes };
+  let hexesMutated = false;
+
   for (const c of working.constructions) {
     const rem = c.turnsRemaining - 1;
     if (rem <= 0) {
-      completedBuildings.push(getBuildingDefinition(c.assetName).labelPt);
+      if (c.kind === 'upgrade' && typeof c.targetLevel === 'number') {
+        const key = hexKey(c.q, c.r);
+        const existing = nextHexes[key];
+        if (existing) {
+          nextHexes[key] = {
+            ...existing,
+            level: c.targetLevel,
+            ...(existing.meta
+              ? { meta: { ...existing.meta, level: c.targetLevel } }
+              : {}),
+          };
+          hexesMutated = true;
+        }
+        const label = `${getBuildingDefinition(c.assetName).labelPt} Nv.${toRomanLevel(c.targetLevel)}`;
+        completedUpgrades.push(label);
+        completedBuildings.push(label);
+      } else {
+        completedBuildings.push(getBuildingDefinition(c.assetName).labelPt);
+      }
     } else {
       nextConstructions.push({ ...c, turnsRemaining: rem });
     }
   }
+
   const underKeysAfterBuild = new Set(
-    nextConstructions.map((c) => hexKey(c.q, c.r))
+    nextConstructions.filter((c) => c.kind !== 'upgrade').map((c) => hexKey(c.q, c.r))
   );
+  const upgradingByKeyAfterBuild: Record<
+    string,
+    { targetLevel: number; turnsRemaining: number; totalTurns: number }
+  > = {};
+  for (const c of nextConstructions) {
+    if (c.kind === 'upgrade' && typeof c.targetLevel === 'number') {
+      upgradingByKeyAfterBuild[hexKey(c.q, c.r)] = {
+        targetLevel: c.targetLevel,
+        turnsRemaining: c.turnsRemaining,
+        totalTurns: c.totalTurns,
+      };
+    }
+  }
 
   // Step 1b: Progress active multi-turn territorial incorporations
   const incorporatedKeys: string[] = [];
   const nextExpansions: ActiveExpansion[] = [];
   let worldAfterExpansions = working.worldState;
-  const nextHexes = { ...working.worldState.hexes };
-  let hexesMutated = false;
 
   for (const exp of working.expansions ?? []) {
     const rem = exp.turnsRemaining - 1;
@@ -159,7 +214,7 @@ export function processKingdomTurn(
     worldSeed: working.worldSeed ?? working.worldState.seed,
   });
 
-  // Step 2 & 3 & 4: Compute production, input conversions, food balance, road upkeep, and maintenance
+  // Step 2 & 3 & 4: Compute production, input conversions, food balance, road upkeep, and seasonal/tier effects
   const tradePactBonus = getTradePactBonusGold(working.factions);
   const econ = computeTurnEconomyBreakdown({
     worldState: worldAfterExpansions,
@@ -180,6 +235,9 @@ export function processKingdomTurn(
     cities: citySync.cities,
     playerCapital: working.playerCapital,
     worldSeed: working.worldSeed ?? working.worldState.seed,
+    season: nextCalendar.season,
+    weather: weatherStep.weather,
+    upgradingConstructionsByKey: upgradingByKeyAfterBuild,
   });
 
   // Step 4: Treasury update
@@ -271,10 +329,18 @@ export function processKingdomTurn(
 
   // Concise causal turn headline
   const summaryParts: string[] = [
-    `Turno ${nextTurn}`,
+    `Turno ${nextTurn} · ${nextCalendar.seasonLabelPt}`,
     `${econ.goldNet >= 0 ? '+' : ''}$${econ.goldNet}`,
   ];
-  if (completedBuildings.length > 0) {
+  if (seasonChangedToPt) {
+    summaryParts.push(`Nova estação: ${seasonChangedToPt}`);
+  }
+  if (weatherStep.changed && weatherStep.weather.id !== 'clear') {
+    summaryParts.push(`Clima: ${weatherStep.weather.labelPt}`);
+  }
+  if (completedUpgrades.length > 0) {
+    summaryParts.push(`Evoluiu: ${completedUpgrades.join(', ')}`);
+  } else if (completedBuildings.length > 0) {
     summaryParts.push(`Pronto: ${completedBuildings.join(', ')}`);
   }
   if (foundedCities.length > 0) {
@@ -316,6 +382,9 @@ export function processKingdomTurn(
   return {
     nextState: {
       turn: nextTurn,
+      calendar: nextCalendar,
+      dayPhase: nextDayPhase,
+      climateWeather: weatherStep.weather,
       worldSeed: working.worldSeed ?? working.worldState.seed,
       playerCapital: working.playerCapital,
       worldState: aiResult.worldState,
@@ -336,11 +405,14 @@ export function processKingdomTurn(
     },
     completedTech: researchStep.completedTech,
     completedBuildings,
+    completedUpgrades,
     incorporatedKeys,
     foundedCities,
     leveledUpCities,
+    seasonChangedToPt,
     newEvent,
     conqueredByAiKeys: aiResult.conqueredKeys,
     headlinePt,
   };
 }
+

@@ -360,10 +360,10 @@ test('economy invariants hold across organic expansion, multi-turn simulation, d
     state = dem.nextState;
   }
 
-  // Save/Load v7 round-trip + v4/v5/v6 compatibility
+  // Save/Load v8 round-trip + v4/v5/v6/v7 compatibility
   const saved = serializeKingdomState(state);
   const parsed = JSON.parse(saved);
-  assert.equal(parsed.version, 7);
+  assert.equal(parsed.version, 8);
 
   const loaded = deserializeKingdomState(saved, HEX_ASSETS.length);
   assert.ok(loaded !== null);
