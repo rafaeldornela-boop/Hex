@@ -1,4 +1,4 @@
-import type { EventDefinition } from './events-catalog-a0';
+/** Compatibility re-export — full catalog lives in events-catalog-data*.ts */
 export type {
   KingdomEventKind,
   EventCategory,
@@ -12,11 +12,6 @@ export type {
   EventConsequence,
   EventChoiceDefinition,
   EventDefinition,
-} from './events-catalog-a0';
-import { EVENT_CATALOG_A0 } from './events-catalog-a0';
-import { EVENT_CATALOG_A1 } from './events-catalog-a1';
-
-export const EVENT_CATALOG_A: readonly EventDefinition[] = [
-  ...EVENT_CATALOG_A0,
-  ...EVENT_CATALOG_A1,
-];
+} from './events-catalog-types';
+import type { EventDefinition } from './events-catalog-types';
+export const EVENT_CATALOG_A: readonly EventDefinition[] = [];
