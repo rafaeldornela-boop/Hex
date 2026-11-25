@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import {
   AlertTriangle,
+  Building2,
   Check,
   Coins,
   Flag,
@@ -10,6 +11,7 @@ import {
   Hammer,
   Handshake,
   Lock,
+  Route,
   Scale,
   Shield,
   Sparkles,
@@ -338,7 +340,10 @@ export default function KingdomModal({
                 </div>
 
                 <p className="text-[11px] font-semibold text-[#5c5140] tabular-nums">
-                  Base +{territorySummary.baseCapacity} · População +{territorySummary.populationBonus} · Infraestrutura +{territorySummary.infrastructureBonus} · Tecnologia +{territorySummary.techBonus}
+                  Base +{territorySummary.baseCapacity} · População +{territorySummary.populationBonus} · Infraestrutura +{territorySummary.infrastructureBonus}
+                  {territorySummary.cityBonus > 0 ? ` · Cidades +${territorySummary.cityBonus}` : ''}
+                  {territorySummary.roadBonus > 0 ? ` · Estradas +${territorySummary.roadBonus}` : ''}
+                  {` · Tecnologia +${territorySummary.techBonus}`}
                 </p>
 
                 {(kingdomState.expansions ?? []).length > 0 && (
@@ -362,6 +367,97 @@ export default function KingdomModal({
                     })}
                   </div>
                 )}
+              </section>
+
+              {/* Organic Cities, Regional Districts & Road Network */}
+              <section
+                data-testid="cities-network-card"
+                className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-display text-sm font-bold text-[#1f1a12] flex items-center gap-1.5">
+                    <Building2 className="w-4 h-4 text-amber-700" aria-hidden="true" />
+                    Cidades, Distritos e Rede Viária
+                  </h3>
+                  <span className="text-xs font-bold text-[#3c3426] tabular-nums">
+                    {(kingdomState.cities ?? []).length}{' '}
+                    {(kingdomState.cities ?? []).length === 1 ? 'cidade' : 'cidades'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs tabular-nums">
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Estradas</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-[#1f1a12]">
+                      {economy.roadConnectivity?.totalRoadTiles ?? 0}
+                    </p>
+                  </div>
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Rede / Corredores</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-emerald-800">
+                      +{formatCash(economy.networkTradeGold + economy.corridorTradeGold)}/t
+                    </p>
+                  </div>
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Manut. Viária</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-[#1f1a12]">
+                      -{formatCash(economy.roadMaintenanceGold)}/t
+                    </p>
+                  </div>
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Distritos</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-sky-800">
+                      {economy.regionalSummary?.allDistricts.length ?? 0}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  {(kingdomState.cities ?? []).map((city) => (
+                    <div
+                      key={city.id}
+                      className="bg-[#f7f2e6] border border-[#e0d6c3] rounded-lg p-2.5 space-y-1.5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-display text-xs font-bold text-[#1f1a12]">
+                          {city.name} · {city.stageLabelPt} (Estágio {city.level}/5)
+                        </span>
+                        <span className="text-[11px] font-semibold text-[#5c5140] tabular-nums">
+                          Pop. ~{city.localPopulation} · {city.stabilityLabelPt}
+                          {city.nextLevelScore !== null
+                            ? ` · Evol. ${city.developmentScore}/${city.nextLevelScore}`
+                            : ' · Máx.'}
+                        </span>
+                      </div>
+
+                      {city.specializations.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {city.specializations.map((spec) => (
+                            <span
+                              key={spec.id}
+                              className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 text-[10px] font-bold"
+                            >
+                              {spec.labelPt}
+                            </span>
+                          ))}
+                          {city.connectedCityIds.length > 0 && (
+                            <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                              Conectada a {city.connectedCityIds.length}{' '}
+                              {city.connectedCityIds.length === 1 ? 'cidade' : 'cidades'}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {city.districts.length > 0 && (
+                        <p className="text-[11px] text-[#3c3426]">
+                          Distritos:{' '}
+                          {city.districts.map((d) => `${d.labelPt} (${d.summaryPt})`).join(' · ')}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </section>
 
               {/* Active Multi-Turn Effects */}
@@ -447,7 +543,10 @@ export default function KingdomModal({
                       <p className="text-[11px] text-[#6e604a]">
                         Bruto {formatCash(economy.goldGross)} · Manutenção -{formatCash(economy.goldMaintenance)}
                         {economy.goldTradePactBonus > 0
-                          ? ` · Comércio +${formatCash(economy.goldTradePactBonus)}`
+                          ? ` · Acordos +${formatCash(economy.goldTradePactBonus)}`
+                          : ''}
+                        {economy.networkTradeGold + economy.corridorTradeGold > 0
+                          ? ` · Rede Viária +${formatCash(economy.networkTradeGold + economy.corridorTradeGold)}`
                           : ''}
                       </p>
                     </div>
@@ -561,9 +660,45 @@ export default function KingdomModal({
                     Bônus Comercial: +{market.tradeBonusPercent}%
                   </p>
                   <p className="text-[11px] text-[#5c5140]">
-                    Mercados/Portos ativos: {market.marketCount}
+                    Mercados/Portos: {market.marketCount} · Cidades na rede: {market.connectedCitiesCount}
                   </p>
                 </div>
+              </section>
+
+              <section
+                data-testid="trade-corridors-card"
+                className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 space-y-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-display text-sm font-bold text-[#1f1a12] flex items-center gap-1.5">
+                    <Route className="w-4 h-4 text-amber-700" aria-hidden="true" />
+                    Corredores Comerciais entre Cidades
+                  </h3>
+                  <span className="text-xs font-bold text-emerald-800 tabular-nums">
+                    {market.corridorCount} {market.corridorCount === 1 ? 'corredor' : 'corredores'}
+                  </span>
+                </div>
+                {(economy.regionalSummary?.tradeCorridors ?? []).length > 0 ? (
+                  <div className="space-y-1.5 text-xs">
+                    {(economy.regionalSummary?.tradeCorridors ?? []).map((corr) => (
+                      <div
+                        key={corr.id}
+                        className="flex items-center justify-between gap-2 bg-[#f7f2e6] rounded-lg px-3 py-1.5"
+                      >
+                        <span className="font-semibold text-[#1f1a12]">
+                          {corr.cityAName} ↔ {corr.cityBName} ({corr.labelPt})
+                        </span>
+                        <span className="font-bold text-emerald-800 tabular-nums">
+                          +{formatCash(corr.goldBonus)}/t
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-[#5c5140]">
+                    Funde uma segunda cidade (Vila, Mansão ou Castelo) e ligue as cidades por estradas para abrir corredores comerciais de alto valor.
+                  </p>
+                )}
               </section>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

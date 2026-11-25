@@ -74,6 +74,20 @@ import {
   type MarketSummary,
   type TradableResource,
 } from './trade-engine';
+import {
+  canBuildOrUpgradeRoad,
+  computeRoadConnectivity,
+  normalizeRoadMap,
+  type RoadConnectivitySummary,
+  type RoadLevel,
+  type RoadMap,
+} from './road-engine';
+import {
+  ensureStarterCapitalCity,
+  normalizeCities,
+  syncAndEvolveCities,
+  type CityEntity,
+} from './city-engine';
 
 export interface ActiveConstruction {
   q: number;
@@ -99,6 +113,8 @@ export interface KingdomState {
   factions: FactionState[];
   constructions: ActiveConstruction[];
   expansions: ActiveExpansion[];
+  roads: RoadMap;
+  cities: CityEntity[];
   activeEffects: ActiveWorldEffect[];
   activeEvent: ActiveKingdomEvent | null;
   eventHistory: EventHistoryEntry[];
@@ -130,6 +146,23 @@ export function createStarterKingdomState(
   seed: number = DEFAULT_WORLD_SEED
 ): KingdomState {
   const generated = generateProceduralKingdomWorld(assets, seed);
+  const initialResearch = createInitialResearchState();
+  const initialCities = syncAndEvolveCities({
+    worldState: generated.worldState,
+    roads: {},
+    existingCities: ensureStarterCapitalCity({
+      playerCapital: generated.playerCapital,
+      worldState: generated.worldState,
+      worldSeed: generated.seed,
+      existingCities: [],
+    }),
+    playerCapital: generated.playerCapital,
+    population: 18,
+    unlockedTechs: initialResearch.unlocked,
+    assets,
+    turn: 1,
+    worldSeed: generated.seed,
+  }).cities;
 
   return {
     turn: 1,
@@ -139,11 +172,13 @@ export function createStarterKingdomState(
     resources: createInitialResources(),
     population: 18,
     foodDeficitTurns: 0,
-    research: createInitialResearchState(),
+    research: initialResearch,
     units: generated.units,
     factions: generated.factions,
     constructions: [],
     expansions: [],
+    roads: {},
+    cities: initialCities,
     activeEffects: [],
     activeEvent: null,
     eventHistory: [],
@@ -163,6 +198,8 @@ export function createSandboxKingdomState(): KingdomState {
     factions: createInitialFactions(),
     constructions: [],
     expansions: [],
+    roads: {},
+    cities: [],
     activeEffects: [],
     activeEvent: null,
     eventHistory: [],
@@ -194,6 +231,38 @@ export function getKingdomEconomy(
     eventGoldMultiplier: state.activeEvent?.goldMultiplierMod ?? 1,
     eventFoodMultiplier: state.activeEvent?.foodMultiplierMod ?? 1,
     foodDeficitTurns: state.foodDeficitTurns ?? 0,
+    roads: state.roads ?? {},
+    cities: state.cities ?? [],
+    playerCapital: state.playerCapital,
+    worldSeed: state.worldSeed ?? state.worldState.seed,
+  });
+}
+
+export function getKingdomRoadSummary(
+  state: KingdomState,
+  assets: HexAssetEntry[]
+): RoadConnectivitySummary {
+  const activeCities =
+    state.cities && state.cities.length > 0
+      ? state.cities
+      : ensureStarterCapitalCity({
+          playerCapital: state.playerCapital,
+          worldState: state.worldState,
+          worldSeed: state.worldSeed ?? state.worldState.seed,
+          existingCities: [],
+        });
+
+  return computeRoadConnectivity({
+    worldState: state.worldState,
+    roads: state.roads ?? {},
+    cityCenters: activeCities.map((c) => ({
+      id: c.id,
+      center: c.center,
+      level: c.level,
+    })),
+    assets,
+    owner: 'player',
+    underConstructionKeys: getUnderConstructionKeys(state),
   });
 }
 
@@ -211,6 +280,8 @@ export function getKingdomMarket(
     activeEffects: state.activeEffects,
     assets,
     underConstructionKeys: getUnderConstructionKeys(state),
+    roadConnectivity: economy.roadConnectivity,
+    regionalSummary: economy.regionalSummary,
   });
 }
 
@@ -245,6 +316,7 @@ export function getKingdomTerritoryCapacity(
   state: KingdomState,
   assets: HexAssetEntry[]
 ): TerritorialCapacitySummary {
+  const roadConnectivity = getKingdomRoadSummary(state, assets);
   return computeTerritorialCapacity({
     worldState: state.worldState,
     population: state.population,
@@ -254,6 +326,9 @@ export function getKingdomTerritoryCapacity(
     underConstructionKeys: getUnderConstructionKeys(state),
     activeExpansions: state.expansions ?? [],
     playerCapital: state.playerCapital,
+    roads: state.roads ?? {},
+    roadConnectivity,
+    cities: state.cities ?? [],
   });
 }
 
@@ -276,6 +351,9 @@ export function evaluateExpansionInKingdom(
     underConstructionKeys: getUnderConstructionKeys(state),
     activeExpansions: state.expansions ?? [],
     playerCapital: state.playerCapital,
+    roads: state.roads ?? {},
+    roadConnectivity: econ.roadConnectivity,
+    cities: state.cities ?? [],
   });
 }
 
@@ -485,6 +563,143 @@ export function buildInKingdom(
   };
 }
 
+export function buildOrUpgradeRoadInKingdom(
+  state: KingdomState,
+  q: number,
+  r: number,
+  assets: HexAssetEntry[]
+): {
+  nextState: KingdomState;
+  built: boolean;
+  targetLevel: RoadLevel | null;
+  isUpgrade: boolean;
+  messagePt: string | null;
+} {
+  const check = canBuildOrUpgradeRoad({
+    worldState: state.worldState,
+    roads: state.roads ?? {},
+    q,
+    r,
+    cash: state.worldState.cash,
+    resources: state.resources,
+    unlockedTechs: state.research.unlocked,
+    assets,
+    underConstructionKeys: getUnderConstructionKeys(state),
+    actorId: 'player',
+  });
+
+  if (!check.allowed || !check.targetLevel || !check.definition) {
+    return {
+      nextState: state,
+      built: false,
+      targetLevel: check.targetLevel,
+      isUpgrade: check.isUpgrade,
+      messagePt: check.reasonPt,
+    };
+  }
+
+  const key = hexKey(q, r);
+  const cost = check.definition.cost;
+  const nextRoads: RoadMap = {
+    ...(state.roads ?? {}),
+    [key]: {
+      q,
+      r,
+      level: check.targetLevel,
+      owner: 'player',
+    },
+  };
+
+  const citySync = syncAndEvolveCities({
+    worldState: state.worldState,
+    roads: nextRoads,
+    existingCities: state.cities ?? [],
+    playerCapital: state.playerCapital,
+    population: state.population,
+    unlockedTechs: state.research.unlocked,
+    assets,
+    underConstructionKeys: getUnderConstructionKeys(state),
+    hasFoodDeficit: (state.foodDeficitTurns ?? 0) > 0,
+    turn: state.turn,
+    worldSeed: state.worldSeed ?? state.worldState.seed,
+  });
+
+  const actionLabel = check.isUpgrade ? 'Estrada melhorada' : 'Via construída';
+  const connectedCityCount =
+    citySync.connectivity.tileMetricsByKey[key]?.connectedCityCount ?? 0;
+  const linkSuffix =
+    connectedCityCount >= 2 ? ' · Conexão entre cidades ativa!' : '';
+
+  return {
+    nextState: {
+      ...state,
+      worldState: {
+        ...state.worldState,
+        cash: state.worldState.cash - cost.gold,
+      },
+      resources: {
+        ...state.resources,
+        wood: state.resources.wood - cost.wood,
+        stone: state.resources.stone - cost.stone,
+        metal: state.resources.metal - cost.metal,
+      },
+      roads: nextRoads,
+      cities: citySync.cities,
+    },
+    built: true,
+    targetLevel: check.targetLevel,
+    isUpgrade: check.isUpgrade,
+    messagePt: `${actionLabel}: ${check.definition.namePt}${linkSuffix}`,
+  };
+}
+
+export function demolishRoadInKingdom(
+  state: KingdomState,
+  q: number,
+  r: number,
+  assets: HexAssetEntry[]
+): {
+  nextState: KingdomState;
+  removed: boolean;
+  messagePt: string;
+} {
+  const key = hexKey(q, r);
+  const existing = (state.roads ?? {})[key];
+  if (!existing || existing.owner !== 'player') {
+    return {
+      nextState: state,
+      removed: false,
+      messagePt: 'Não há estrada neste território.',
+    };
+  }
+  const nextRoads: RoadMap = { ...(state.roads ?? {}) };
+  delete nextRoads[key];
+
+  const citySync = syncAndEvolveCities({
+    worldState: state.worldState,
+    roads: nextRoads,
+    existingCities: state.cities ?? [],
+    playerCapital: state.playerCapital,
+    population: state.population,
+    unlockedTechs: state.research.unlocked,
+    assets,
+    underConstructionKeys: getUnderConstructionKeys(state),
+    hasFoodDeficit: (state.foodDeficitTurns ?? 0) > 0,
+    turn: state.turn,
+    worldSeed: state.worldSeed ?? state.worldState.seed,
+  });
+
+  return {
+    nextState: {
+      ...state,
+      roads: nextRoads,
+      cities: citySync.cities,
+    },
+    removed: true,
+    messagePt: 'Estrada removida.',
+  };
+}
+
 export function demolishInKingdom(
   state: KingdomState,
   q: number,
@@ -495,6 +710,10 @@ export function demolishInKingdom(
   removed: boolean;
   messagePt: string | null;
 } {
+  const key = hexKey(q, r);
+  const prevTile = state.worldState.hexes[key];
+  const prevAssetName = prevTile ? assets[prevTile.structureIndex]?.name ?? '' : '';
+
   const res = demolishHexInState(state.worldState, q, r, assets, 'player');
   if (!res.removed) {
     return {
@@ -507,11 +726,46 @@ export function demolishInKingdom(
     };
   }
 
+  // Roads on land are preserved; a road on a water bridge must be cleared when the bridge is demolished.
+  let nextRoads = state.roads ?? {};
+  const terrainAfter = res.nextState.hexes[key]
+    ? getHexTerrainAndResource(q, r, res.nextState.hexes[key]).terrainType
+    : 'plains';
+  if ((prevAssetName === 'bridge' || terrainAfter === 'water') && nextRoads[key]) {
+    nextRoads = { ...nextRoads };
+    delete nextRoads[key];
+  }
+
+  const nextConstructions = state.constructions.filter((c) => !(c.q === q && c.r === r));
+  const isCapital =
+    state.playerCapital &&
+    state.playerCapital.q === q &&
+    state.playerCapital.r === r;
+  const remainingCities = isCapital
+    ? state.cities ?? []
+    : (state.cities ?? []).filter((c) => !(c.center.q === q && c.center.r === r));
+
+  const citySync = syncAndEvolveCities({
+    worldState: res.nextState,
+    roads: nextRoads,
+    existingCities: remainingCities,
+    playerCapital: state.playerCapital,
+    population: state.population,
+    unlockedTechs: state.research.unlocked,
+    assets,
+    underConstructionKeys: new Set(nextConstructions.map((c) => hexKey(c.q, c.r))),
+    hasFoodDeficit: (state.foodDeficitTurns ?? 0) > 0,
+    turn: state.turn,
+    worldSeed: state.worldSeed ?? res.nextState.seed,
+  });
+
   return {
     nextState: {
       ...state,
       worldState: res.nextState,
-      constructions: state.constructions.filter((c) => !(c.q === q && c.r === r)),
+      constructions: nextConstructions,
+      roads: nextRoads,
+      cities: citySync.cities,
     },
     removed: true,
     messagePt: 'Construção demolida — terreno livre preservado.',
@@ -543,6 +797,9 @@ export function startExpansionInKingdom(
     owner: 'player',
     underConstructionKeys: getUnderConstructionKeys(state),
     playerCapital: state.playerCapital,
+    roads: state.roads ?? {},
+    roadConnectivity: econ.roadConnectivity,
+    cities: state.cities ?? [],
   });
 
   if (!res.started) {
@@ -831,6 +1088,7 @@ export function commandUnitInKingdom(
     .filter((u) => u.hp > 0);
 
   let nextWorld = state.worldState;
+  let nextRoads = state.roads ?? {};
   if (combat.capturedHex && targetTile) {
     nextWorld = {
       ...state.worldState,
@@ -843,6 +1101,10 @@ export function commandUnitInKingdom(
         },
       },
     };
+    if (nextRoads[targetKey] && nextRoads[targetKey].owner !== 'player') {
+      nextRoads = { ...nextRoads };
+      delete nextRoads[targetKey];
+    }
   }
 
   const nextFactions = state.factions.map((f) =>
@@ -860,6 +1122,7 @@ export function commandUnitInKingdom(
       units: nextUnits,
       factions: nextFactions,
       expansions: nextExpansions,
+      roads: nextRoads,
     },
     acted: true,
     capturedKey: combat.capturedHex ? targetKey : undefined,
@@ -1173,6 +1436,8 @@ export function advanceKingdomTurn(
   completedTech: TechDefinition | null;
   completedBuildings: string[];
   incorporatedKeys: string[];
+  foundedCities: string[];
+  leveledUpCities: string[];
   newEvent: ActiveKingdomEvent | null;
   conqueredByAiKeys: string[];
   headlinePt: string;
@@ -1189,7 +1454,7 @@ export function advanceKingdomTurn(
 
 export function serializeKingdomState(state: KingdomState): string {
   return JSON.stringify({
-    version: 6,
+    version: 7,
     turn: state.turn,
     worldSeed: state.worldSeed ?? state.worldState.seed,
     playerCapital: state.playerCapital,
@@ -1206,6 +1471,8 @@ export function serializeKingdomState(state: KingdomState): string {
     factions: state.factions,
     constructions: state.constructions,
     expansions: state.expansions ?? [],
+    roads: state.roads ?? {},
+    cities: state.cities ?? [],
     activeEffects: state.activeEffects,
     activeEvent: state.activeEvent,
     eventHistory: state.eventHistory,
@@ -1310,6 +1577,14 @@ export function deserializeKingdomState(
         ? Math.round(parsed.worldSeed)
         : worldState.seed;
 
+    const roads = normalizeRoadMap(parsed.roads, worldState);
+    const cities = normalizeCities(
+      parsed.cities,
+      worldState,
+      playerCapital,
+      worldSeed ?? 42026
+    );
+
     return {
       turn: typeof parsed.turn === 'number' && parsed.turn >= 1 ? parsed.turn : 1,
       ...(typeof worldSeed === 'number' ? { worldSeed } : {}),
@@ -1332,6 +1607,8 @@ export function deserializeKingdomState(
       factions,
       constructions,
       expansions,
+      roads,
+      cities,
       activeEffects,
       activeEvent: parsed.activeEvent ?? null,
       eventHistory: Array.isArray(parsed.eventHistory) ? parsed.eventHistory : [],

@@ -8,6 +8,7 @@ import {
   hexKey,
   placeHexInState,
   serializeWorldState,
+  type HexWorldState,
 } from './hex-engine';
 import { HEX_ASSETS } from './repo-data';
 import {
@@ -18,7 +19,30 @@ import {
   getTerrainForHex,
   type TerrainType,
 } from './terrain-engine';
-import { conquerHexInState } from './territory-engine';
+
+function claimHexInWorld(
+  state: HexWorldState,
+  q: number,
+  r: number
+): HexWorldState {
+  const key = hexKey(q, r);
+  const existing = state.hexes[key];
+  assert.ok(existing, `Expected tile at (${q}, ${r})`);
+  const terrainInfo = getHexTerrainAndResource(q, r, existing);
+  return {
+    ...state,
+    hexes: {
+      ...state.hexes,
+      [key]: {
+        ...existing,
+        owner: 'player',
+        terrainType: terrainInfo.terrainType,
+        resourceType: terrainInfo.resourceType,
+        resourceAmount: terrainInfo.resourceAmount,
+      },
+    },
+  };
+}
 
 test('getTerrainForHex is deterministic per axial (q, r) and covers all 5 terrain types', () => {
   const seen = new Set<TerrainType>();
@@ -59,7 +83,7 @@ test('getResourceForTerrain maps every terrain to its expected basic resource', 
   });
 });
 
-test('only player-owned territories contribute resources and conquest adds hex resources', () => {
+test('only player-owned territories contribute resources and incorporating tiles adds hex resources', () => {
   const starter = createStarterWorldState(HEX_ASSETS);
   const initialRes = calculatePlayerResources(starter);
 
@@ -70,26 +94,23 @@ test('only player-owned territories contribute resources and conquest adds hex r
   assert.equal(initialRes.ore, 0);
   assert.equal(initialRes.water, 0);
 
-  // Conquer adjacent Forest (1, 1) -> wood +10
-  const afterForest = conquerHexInState(starter, 1, 1, HEX_ASSETS);
-  assert.equal(afterForest.conquered, true);
-  assert.equal(afterForest.nextState.hexes[hexKey(1, 1)].terrainType, 'forest');
-  assert.equal(afterForest.nextState.hexes[hexKey(1, 1)].resourceType, 'wood');
-  const resAfterForest = calculatePlayerResources(afterForest.nextState);
+  // Incorporate adjacent Forest (1, 1) -> wood +10
+  const afterForest = claimHexInWorld(starter, 1, 1);
+  assert.equal(afterForest.hexes[hexKey(1, 1)].terrainType, 'forest');
+  assert.equal(afterForest.hexes[hexKey(1, 1)].resourceType, 'wood');
+  const resAfterForest = calculatePlayerResources(afterForest);
   assert.equal(resAfterForest.wood, 10);
   assert.equal(resAfterForest.ore, 0);
 
-  // Conquer adjacent Mountain (0, 2) -> ore +10
-  const afterMountain = conquerHexInState(afterForest.nextState, 0, 2, HEX_ASSETS);
-  assert.equal(afterMountain.conquered, true);
-  const resAfterMountain = calculatePlayerResources(afterMountain.nextState);
+  // Incorporate adjacent Mountain (0, 2) -> ore +10
+  const afterMountain = claimHexInWorld(afterForest, 0, 2);
+  const resAfterMountain = calculatePlayerResources(afterMountain);
   assert.equal(resAfterMountain.wood, 10);
   assert.equal(resAfterMountain.ore, 10);
 
-  // Conquer adjacent Water (0, -2) (adjacent to (0,-1)) -> water +10
-  const afterWater = conquerHexInState(afterMountain.nextState, 0, -2, HEX_ASSETS);
-  assert.equal(afterWater.conquered, true);
-  const resAfterWater = calculatePlayerResources(afterWater.nextState);
+  // Incorporate adjacent Water (0, -2) -> water +10
+  const afterWater = claimHexInWorld(afterMountain, 0, -2);
+  const resAfterWater = calculatePlayerResources(afterWater);
   assert.equal(resAfterWater.water, 10);
 });
 
@@ -116,12 +137,12 @@ test('building terrain restrictions block incompatible placements and preserve t
   assert.equal(canBuildStructureOnTerrain('building-house', 'plains'), true);
   assert.equal(canBuildStructureOnTerrain('building-house', 'forest'), true);
 
-  // State enforcement: conquer ring-2 tiles first so ownership check passes and terrain checks apply
+  // State enforcement: grant ownership on ring-2 tiles first so ownership check passes and terrain checks apply
   let state = createStarterWorldState(HEX_ASSETS);
-  state = conquerHexInState(state, 1, 1, HEX_ASSETS).nextState; // forest
-  state = conquerHexInState(state, 0, 2, HEX_ASSETS).nextState; // mountain
-  state = conquerHexInState(state, 2, -1, HEX_ASSETS).nextState; // bridge to (2,-2)
-  state = conquerHexInState(state, 2, -2, HEX_ASSETS).nextState; // fertile
+  state = claimHexInWorld(state, 1, 1); // forest
+  state = claimHexInWorld(state, 0, 2); // mountain
+  state = claimHexInWorld(state, 2, -1); // bridge
+  state = claimHexInWorld(state, 2, -2); // fertile
 
   // Try building Farm on owned Forest (1,1) -> must block for incompatible terrain
   const farmOnForest = placeHexInState(state, 1, 1, farmIdx, DEFAULT_ROTATION_DEG, HEX_ASSETS);
@@ -171,8 +192,8 @@ test('building terrain restrictions block incompatible placements and preserve t
 
 test('serialization round-trip preserves terrainType, resourceType, and resourceAmount', () => {
   const starter = createStarterWorldState(HEX_ASSETS);
-  const conquered = conquerHexInState(starter, 0, 2, HEX_ASSETS).nextState;
-  const json = serializeWorldState(conquered);
+  const owned = claimHexInWorld(starter, 0, 2);
+  const json = serializeWorldState(owned);
   const restored = deserializeWorldState(json, HEX_ASSETS.length);
   assert.ok(restored !== null);
 

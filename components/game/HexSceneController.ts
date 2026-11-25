@@ -35,14 +35,22 @@ import {
 } from '@/lib/terrain-engine';
 import { isBuildingAllowedOnTerrain } from '@/lib/build-rules';
 import type { UnitEntity } from '@/lib/military-engine';
+import {
+  ROAD_CATALOG,
+  type RoadConnectivitySummary,
+  type RoadLevel,
+  type RoadMap,
+} from '@/lib/road-engine';
+import type { CityEntity } from '@/lib/city-engine';
 import { HEX_ASSETS } from '@/lib/repo-data';
 
 export type GameModeState = 'title' | 'playing' | 'paused';
-export type BuilderToolMode = 'expand' | 'build' | 'demolish' | 'command';
+export type BuilderToolMode = 'expand' | 'build' | 'road' | 'demolish' | 'command';
 
 export interface HexSceneCallbacks {
   onHoverChange: (coord: AxialCoord | null, existingTile: PlacedHex | null) => void;
   onPlaceAt: (q: number, r: number) => void;
+  onRoadAt: (q: number, r: number) => void;
   onDemolishAt: (q: number, r: number) => void;
   onTouchTapAt: (q: number, r: number) => void;
   onSelectHexAt: (q: number, r: number) => void;
@@ -485,6 +493,10 @@ export class HexSceneController {
   private attentionOverlayMesh: THREE.Mesh;
   private lastAttentionSignature = '';
   private rareMarkersGroup = new THREE.Group();
+  private roadsMesh: THREE.Mesh;
+  private tradeCorridorsMesh: THREE.Mesh;
+  private citiesGroup = new THREE.Group();
+  private lastRoadCitySignature = '';
   private unitsGroup = new THREE.Group();
   private unitTargetOverlayMesh: THREE.Mesh;
   private conquestRingGeo: THREE.BufferGeometry;
@@ -832,6 +844,41 @@ export class HexSceneController {
     this.scene.add(this.unitTargetOverlayMesh);
 
     this.scene.add(this.rareMarkersGroup);
+
+    const roadsGeo = new THREE.BufferGeometry();
+    roadsGeo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+    roadsGeo.setAttribute('color', new THREE.Float32BufferAttribute([], 3));
+    this.roadsMesh = new THREE.Mesh(
+      roadsGeo,
+      new THREE.MeshStandardMaterial({
+        vertexColors: true,
+        roughness: 0.78,
+        metalness: 0.04,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+      })
+    );
+    this.roadsMesh.frustumCulled = false;
+    this.roadsMesh.receiveShadow = this.quality.shadowsEnabled;
+    this.scene.add(this.roadsMesh);
+
+    const corridorMat = new THREE.MeshBasicMaterial({
+      color: 0xfbbf24,
+      transparent: true,
+      opacity: 0.72,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    this.tradeCorridorsMesh = new THREE.Mesh(new THREE.BufferGeometry(), corridorMat);
+    this.tradeCorridorsMesh.frustumCulled = false;
+    this.scene.add(this.tradeCorridorsMesh);
+
+    this.scene.add(this.citiesGroup);
     this.scene.add(this.unitsGroup);
 
     this.conquestRingGeo = createHexRingGeometry(
@@ -1108,6 +1155,8 @@ export class HexSceneController {
       if (!this.hoveredCoord) return;
       if (this.toolMode === 'expand' || this.toolMode === 'command') {
         this.callbacks.onSelectHexAt(this.hoveredCoord.q, this.hoveredCoord.r);
+      } else if (this.toolMode === 'road') {
+        this.callbacks.onRoadAt(this.hoveredCoord.q, this.hoveredCoord.r);
       } else if (this.toolMode === 'demolish') {
         this.callbacks.onDemolishAt(this.hoveredCoord.q, this.hoveredCoord.r);
       } else {
@@ -1329,6 +1378,17 @@ export class HexSceneController {
       } else {
         this.selectorRingMat.color.setHex(0x64748b); // muted slate: outside frontier/reach
       }
+    } else if (this.toolMode === 'road') {
+      const targetKey = hexKey(activeCoord.q, activeCoord.r);
+      const existing = this.currentWorldState.hexes[targetKey];
+      const ownedByPlayer = existing?.owner === 'player';
+      const terrainInfo = getHexTerrainAndResource(activeCoord.q, activeCoord.r, existing);
+      const assetName = existing ? (HEX_ASSETS[existing.structureIndex]?.name ?? '') : '';
+      const isBridge = assetName === 'bridge';
+      const passable = terrainInfo.terrainType !== 'water' || isBridge;
+      this.selectorRingMat.color.setHex(
+        ownedByPlayer && passable ? 0x059669 : 0xdc2626
+      );
     } else if (this.toolMode === 'demolish') {
       const existing = this.currentWorldState.hexes[hexKey(activeCoord.q, activeCoord.r)];
       const canDemolish =
@@ -1762,6 +1822,328 @@ export class HexSceneController {
       this.rareMarkersGroup.add(marker);
     }
     gemGeo.dispose();
+  }
+
+  public syncRoadsAndCities(params: {
+    roads: RoadMap;
+    cities: CityEntity[];
+    connectivity?: RoadConnectivitySummary;
+    worldState: HexWorldState;
+    underConstructionKeys?: Set<string>;
+  }) {
+    const { roads, cities, connectivity, worldState, underConstructionKeys } = params;
+
+    const roadSig = Object.values(roads)
+      .map((r) => `${r.q},${r.r}:${r.level}:${r.owner}`)
+      .sort()
+      .join('|');
+    const citySig = cities
+      .map((c) => `${c.id}:${c.level}:${c.connectedCityIds.length}`)
+      .sort()
+      .join('|');
+    const bridgeSig = Object.values(worldState.hexes)
+      .filter((t) => HEX_ASSETS[t.structureIndex]?.name === 'bridge')
+      .map((t) => `${t.q},${t.r}:${underConstructionKeys?.has(hexKey(t.q, t.r)) ? 'u' : 'c'}`)
+      .sort()
+      .join('|');
+    const sig = `${roadSig}#${citySig}#${bridgeSig}`;
+    if (sig === this.lastRoadCitySignature) return;
+    this.lastRoadCitySignature = sig;
+
+    const cityByKey = new Map<string, CityEntity>();
+    for (const c of cities) {
+      cityByKey.set(hexKey(c.center.q, c.center.r), c);
+    }
+
+    // Collect road-capable nodes (roads + completed bridges + cities)
+    const roadNodes = new Map<
+      string,
+      { q: number; r: number; level: RoadLevel; isExplicitRoad: boolean; isBridge: boolean }
+    >();
+    for (const [key, rTile] of Object.entries(roads)) {
+      const worldTile = worldState.hexes[key];
+      if (!worldTile || worldTile.owner !== rTile.owner) continue;
+      roadNodes.set(key, {
+        q: rTile.q,
+        r: rTile.r,
+        level: rTile.level,
+        isExplicitRoad: true,
+        isBridge: false,
+      });
+    }
+    for (const tile of Object.values(worldState.hexes)) {
+      if (tile.owner !== 'player') continue;
+      const k = hexKey(tile.q, tile.r);
+      const assetName = HEX_ASSETS[tile.structureIndex]?.name ?? '';
+      const isCompletedBridge =
+        assetName === 'bridge' && !underConstructionKeys?.has(k);
+      if (isCompletedBridge && !roadNodes.has(k)) {
+        roadNodes.set(k, {
+          q: tile.q,
+          r: tile.r,
+          level: 2,
+          isExplicitRoad: false,
+          isBridge: true,
+        });
+      }
+      const cityHere = cityByKey.get(k);
+      if (cityHere && !roadNodes.has(k)) {
+        roadNodes.set(k, {
+          q: tile.q,
+          r: tile.r,
+          level: Math.max(2, Math.min(5, cityHere.level)) as RoadLevel,
+          isExplicitRoad: false,
+          isBridge: false,
+        });
+      }
+    }
+
+    // Multi-city trade corridor node set
+    const corridorKeys = new Set<string>();
+    if (connectivity) {
+      for (const net of connectivity.networks) {
+        if (net.connectedCityIds.length >= 2) {
+          for (const k of net.hexKeys) {
+            corridorKeys.add(k);
+          }
+        }
+      }
+    }
+
+    const roadPositions: number[] = [];
+    const roadColors: number[] = [];
+    const corridorPositions: number[] = [];
+
+    const pushColorQuad = (
+      x0: number,
+      z0: number,
+      x1: number,
+      z1: number,
+      x2: number,
+      z2: number,
+      x3: number,
+      z3: number,
+      y: number,
+      colorHex: string
+    ) => {
+      _colorTmp.set(colorHex);
+      roadPositions.push(
+        x0, y, z0,
+        x1, y, z1,
+        x2, y, z2,
+        x0, y, z0,
+        x2, y, z2,
+        x3, y, z3
+      );
+      for (let i = 0; i < 6; i++) {
+        roadColors.push(_colorTmp.r, _colorTmp.g, _colorTmp.b);
+      }
+    };
+
+    const yRoad = TILE_SURFACE_Y + 0.016;
+    const yCurb = TILE_SURFACE_Y + 0.013;
+    const yCorridor = TILE_SURFACE_Y + 0.019;
+
+    for (const [k, node] of roadNodes.entries()) {
+      const center = axialToWorld(node.q, node.r);
+      const def = ROAD_CATALOG[node.level];
+      const halfW = (0.072 + node.level * 0.018) * HEX_WORLD_SCALE;
+      const curbW = halfW + 0.018 * HEX_WORLD_SCALE;
+
+      let neighborLinks = 0;
+      for (const dir of AXIAL_DIRECTIONS) {
+        const nq = node.q + dir.q;
+        const nr = node.r + dir.r;
+        const nk = hexKey(nq, nr);
+        const neighbor = roadNodes.get(nk);
+        if (!neighbor) continue;
+        // Connect only when at least one endpoint is an explicit road or bridge (avoid linking 2 adjacent non-road cities without road)
+        if (!node.isExplicitRoad && !node.isBridge && !neighbor.isExplicitRoad && !neighbor.isBridge) {
+          continue;
+        }
+        neighborLinks += 1;
+
+        const nCenter = axialToWorld(nq, nr);
+        const dx = nCenter.x - center.x;
+        const dz = nCenter.z - center.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist <= 0.0001) continue;
+        const ux = dx / dist;
+        const uz = dz / dist;
+        const px = -uz;
+        const pz = ux;
+
+        const segLen = dist * 0.52;
+        const ex = center.x + ux * segLen;
+        const ez = center.z + uz * segLen;
+
+        // Dark backing curb + top road ribbon
+        pushColorQuad(
+          center.x - px * curbW, center.z - pz * curbW,
+          ex - px * curbW, ez - pz * curbW,
+          ex + px * curbW, ez + pz * curbW,
+          center.x + px * curbW, center.z + pz * curbW,
+          yCurb,
+          '#3c3426'
+        );
+        pushColorQuad(
+          center.x - px * halfW, center.z - pz * halfW,
+          ex - px * halfW, ez - pz * halfW,
+          ex + px * halfW, ez + pz * halfW,
+          center.x + px * halfW, center.z + pz * halfW,
+          yRoad,
+          def.colorHex
+        );
+
+        // Golden center thread on multi-city trade corridors
+        if (corridorKeys.has(k) && corridorKeys.has(nk)) {
+          const cw = Math.max(0.025 * HEX_WORLD_SCALE, halfW * 0.32);
+          corridorPositions.push(
+            center.x - px * cw, yCorridor, center.z - pz * cw,
+            ex - px * cw, yCorridor, ez - pz * cw,
+            ex + px * cw, yCorridor, ez + pz * cw,
+            center.x - px * cw, yCorridor, center.z - pz * cw,
+            ex + px * cw, yCorridor, ez + pz * cw,
+            center.x + px * cw, yCorridor, center.z + pz * cw
+          );
+        }
+      }
+
+      // Draw central hub medallion for explicit roads so isolated or branching roads are clearly visible
+      if (node.isExplicitRoad) {
+        const hubR = halfW * (neighborLinks > 0 ? 1.25 : 1.8);
+        const hubCurbR = hubR + 0.018 * HEX_WORLD_SCALE;
+        pushColorQuad(
+          center.x - hubCurbR, center.z - hubCurbR,
+          center.x + hubCurbR, center.z - hubCurbR,
+          center.x + hubCurbR, center.z + hubCurbR,
+          center.x - hubCurbR, center.z + hubCurbR,
+          yCurb,
+          '#3c3426'
+        );
+        pushColorQuad(
+          center.x - hubR, center.z - hubR,
+          center.x + hubR, center.z - hubR,
+          center.x + hubR, center.z + hubR,
+          center.x - hubR, center.z + hubR,
+          yRoad,
+          def.colorHex
+        );
+      }
+    }
+
+    const oldRoadsGeo = this.roadsMesh.geometry;
+    const nextRoadsGeo = new THREE.BufferGeometry();
+    nextRoadsGeo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(roadPositions, 3)
+    );
+    nextRoadsGeo.setAttribute(
+      'color',
+      new THREE.Float32BufferAttribute(roadColors, 3)
+    );
+    nextRoadsGeo.computeVertexNormals();
+    this.roadsMesh.geometry = nextRoadsGeo;
+    oldRoadsGeo.dispose();
+
+    const oldCorridorGeo = this.tradeCorridorsMesh.geometry;
+    const nextCorridorGeo = new THREE.BufferGeometry();
+    nextCorridorGeo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(corridorPositions, 3)
+    );
+    this.tradeCorridorsMesh.geometry = nextCorridorGeo;
+    oldCorridorGeo.dispose();
+
+    // Rebuild organic city plazas + banner spires scaled by city stage (1..5)
+    while (this.citiesGroup.children.length > 0) {
+      const child = this.citiesGroup.children[0];
+      this.citiesGroup.remove(child);
+      child.traverse((obj) => {
+        const m = obj as THREE.Mesh;
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) {
+          if (Array.isArray(m.material)) m.material.forEach((mm) => mm.dispose());
+          else m.material.dispose();
+        }
+      });
+    }
+
+    for (const city of cities) {
+      const pos = axialToWorld(city.center.q, city.center.r);
+      const group = new THREE.Group();
+      group.position.set(pos.x, 0, pos.z);
+
+      const outerR = HEX_OUTER_RADIUS * (0.56 + city.level * 0.042);
+      const innerR = outerR - HEX_OUTER_RADIUS * 0.11;
+      const ringColor =
+        city.level >= 5
+          ? 0xf59e0b
+          : city.level >= 4
+            ? 0xfbbf24
+            : city.level >= 3
+              ? 0xe2e8f0
+              : 0xd6c7ad;
+
+      const plazaRing = new THREE.Mesh(
+        createHexRingGeometry(outerR, innerR),
+        new THREE.MeshBasicMaterial({
+          color: ringColor,
+          transparent: true,
+          opacity: 0.9,
+          side: THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: -1,
+          polygonOffsetUnits: -1,
+        })
+      );
+      plazaRing.position.y = TILE_SURFACE_Y + 0.014;
+      group.add(plazaRing);
+
+      // Offset heraldic banner spire on edge corner so it frames the central building without clipping
+      const poleHeight = (0.28 + city.level * 0.08) * HEX_WORLD_SCALE;
+      const poleMat = new THREE.MeshStandardMaterial({
+        color: 0x3c3426,
+        roughness: 0.6,
+        metalness: 0.2,
+      });
+      const bannerColor = city.connectedCityIds.length > 0 ? 0xf59e0b : 0x059669;
+      const bannerMat = new THREE.MeshStandardMaterial({
+        color: bannerColor,
+        emissive: bannerColor,
+        emissiveIntensity: 0.18,
+        roughness: 0.45,
+        metalness: 0.15,
+        flatShading: true,
+      });
+
+      const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(
+          0.018 * HEX_WORLD_SCALE,
+          0.024 * HEX_WORLD_SCALE,
+          poleHeight,
+          6
+        ),
+        poleMat
+      );
+      const bx = 0.34 * HEX_WORLD_SCALE;
+      const bz = 0.24 * HEX_WORLD_SCALE;
+      pole.position.set(bx, TILE_SURFACE_Y + poleHeight * 0.5, bz);
+      pole.castShadow = this.quality.shadowsEnabled;
+
+      const pennant = new THREE.Mesh(
+        new THREE.ConeGeometry(0.065 * HEX_WORLD_SCALE, 0.14 * HEX_WORLD_SCALE, 4),
+        bannerMat
+      );
+      pennant.position.set(bx, TILE_SURFACE_Y + poleHeight + 0.04 * HEX_WORLD_SCALE, bz);
+      group.add(pole, pennant);
+
+      this.citiesGroup.add(group);
+    }
+
+    if (!this.disposed) {
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 
   public syncUnits(

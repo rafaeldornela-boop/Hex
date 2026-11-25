@@ -38,8 +38,16 @@ import {
 import type { TechId } from '@/lib/tech-engine';
 import type { TradableResource } from '@/lib/trade-engine';
 import {
+  canBuildOrUpgradeRoad,
+  getRoadAt,
+  type RoadLevelDefinition,
+  type RoadTile,
+} from '@/lib/road-engine';
+import { getCityAtCoord, type CityEntity } from '@/lib/city-engine';
+import {
   advanceKingdomTurn,
   buildInKingdom,
+  buildOrUpgradeRoadInKingdom,
   commandUnitInKingdom,
   createSandboxKingdomState,
   createStarterKingdomState,
@@ -51,6 +59,7 @@ import {
   getKingdomEconomy,
   getKingdomMarket,
   getKingdomProgression,
+  getKingdomRoadSummary,
   getKingdomTerritoryCapacity,
   getUnderConstructionKeys,
   performDiplomacyAction,
@@ -218,6 +227,21 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     []
   );
 
+  const syncSceneRoadsAndCities = useCallback(
+    (nextKingdom: KingdomState, underKeys?: Set<string>) => {
+      const under = underKeys ?? getUnderConstructionKeys(nextKingdom);
+      const connectivity = getKingdomRoadSummary(nextKingdom, HEX_ASSETS);
+      controllerRef.current?.syncRoadsAndCities({
+        roads: nextKingdom.roads ?? {},
+        cities: nextKingdom.cities ?? [],
+        connectivity,
+        worldState: nextKingdom.worldState,
+        underConstructionKeys: under,
+      });
+    },
+    []
+  );
+
   const setSelectedHexSynced = useCallback((coord: AxialCoord | null) => {
     selectedHexRef.current = coord;
     setSelectedHex(coord);
@@ -254,16 +278,46 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
       gameAudio.playPlace();
+      const under = getUnderConstructionKeys(res.nextState);
       controllerRef.current?.syncWorldState(
         res.nextState.worldState,
         [hexKey(q, r)],
         undefined,
-        getUnderConstructionKeys(res.nextState)
+        under
       );
+      syncSceneRoadsAndCities(res.nextState, under);
       if (res.messagePt) showToast(res.messagePt);
     },
-    [showToast]
+    [showToast, syncSceneRoadsAndCities]
   );
+
+  const handleRoadAt = useCallback(
+    (q: number, r: number) => {
+      const res = buildOrUpgradeRoadInKingdom(
+        kingdomStateRef.current,
+        q,
+        r,
+        HEX_ASSETS
+      );
+      if (!res.built) {
+        gameAudio.playError();
+        if (res.messagePt) showToast(res.messagePt);
+        return;
+      }
+      kingdomStateRef.current = res.nextState;
+      setKingdomState(res.nextState);
+      gameAudio.playPlace();
+      syncSceneRoadsAndCities(res.nextState);
+      if (res.messagePt) showToast(res.messagePt);
+    },
+    [showToast, syncSceneRoadsAndCities]
+  );
+
+  const handleBuildRoadSelected = useCallback(() => {
+    const coord = selectedHexRef.current;
+    if (!coord) return;
+    handleRoadAt(coord.q, coord.r);
+  }, [handleRoadAt]);
 
   const handleDemolishAt = useCallback(
     (q: number, r: number) => {
@@ -276,15 +330,17 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
       gameAudio.playDemolish();
+      const under = getUnderConstructionKeys(res.nextState);
       controllerRef.current?.syncWorldState(
         res.nextState.worldState,
         [hexKey(q, r)],
         undefined,
-        getUnderConstructionKeys(res.nextState)
+        under
       );
+      syncSceneRoadsAndCities(res.nextState, under);
       if (res.messagePt) showToast(res.messagePt);
     },
-    [showToast]
+    [showToast, syncSceneRoadsAndCities]
   );
 
   const handleStartExpansionAt = useCallback(
@@ -334,12 +390,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         setSelectedHexSynced({ q, r });
         if (cmdRes.capturedKey) {
           gameAudio.playConquest();
+          const under = getUnderConstructionKeys(cmdRes.nextState);
           controllerRef.current?.syncWorldState(
             cmdRes.nextState.worldState,
             undefined,
             [cmdRes.capturedKey],
-            getUnderConstructionKeys(cmdRes.nextState)
+            under
           );
+          syncSceneRoadsAndCities(cmdRes.nextState, under);
         } else {
           gameAudio.playCycle();
         }
@@ -350,7 +408,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setSelectedHexSynced({ q, r });
       gameAudio.playCycle();
     },
-    [clearCommandMode, setSelectedHexSynced, showToast]
+    [clearCommandMode, setSelectedHexSynced, showToast, syncSceneRoadsAndCities]
   );
 
   const handleTouchTapAt = useCallback(
@@ -375,6 +433,17 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         return;
       }
 
+      if (toolModeRef.current === 'road') {
+        const prev = selectedHexRef.current;
+        if (prev && prev.q === q && prev.r === r) {
+          handleRoadAt(q, r);
+          return;
+        }
+        setSelectedHexSynced({ q, r });
+        gameAudio.playCycle();
+        return;
+      }
+
       const prev = selectedHexRef.current;
       if (prev && prev.q === q && prev.r === r) {
         handlePlaceAt(q, r);
@@ -384,7 +453,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setSelectedHexSynced({ q, r });
       gameAudio.playCycle();
     },
-    [handleDemolishAt, handlePlaceAt, handleSelectHexAt, setSelectedHexSynced]
+    [handleDemolishAt, handlePlaceAt, handleRoadAt, handleSelectHexAt, setSelectedHexSynced]
   );
 
   const handleConfirmSelectedHex = useCallback(() => {
@@ -392,13 +461,15 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     if (!coord) return;
     if (toolModeRef.current === 'expand') {
       handleStartExpansionAt(coord.q, coord.r);
+    } else if (toolModeRef.current === 'road') {
+      handleRoadAt(coord.q, coord.r);
     } else if (toolModeRef.current === 'demolish') {
       handleDemolishAt(coord.q, coord.r);
       setSelectedHexSynced(null);
     } else if (toolModeRef.current === 'build') {
       handlePlaceAt(coord.q, coord.r);
     }
-  }, [handleStartExpansionAt, handleDemolishAt, handlePlaceAt, setSelectedHexSynced]);
+  }, [handleStartExpansionAt, handleRoadAt, handleDemolishAt, handlePlaceAt, setSelectedHexSynced]);
 
   const handleDemolishSelectedHex = useCallback(() => {
     const coord = selectedHexRef.current;
@@ -421,7 +492,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setSelectedHexSynced(null);
       didCancel = true;
     }
-    if (toolModeRef.current === 'demolish') {
+    if (toolModeRef.current === 'demolish' || toolModeRef.current === 'road') {
       toolModeRef.current = 'expand';
       setToolMode('expand');
       controllerRef.current?.setToolMode('expand');
@@ -526,15 +597,17 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setToolMode('expand');
       controllerRef.current?.setToolMode('expand');
       gameAudio.playPlace();
+      const under = getUnderConstructionKeys(res.nextState);
       controllerRef.current?.syncWorldState(
         res.nextState.worldState,
         [hexKey(coord.q, coord.r)],
         undefined,
-        getUnderConstructionKeys(res.nextState)
+        under
       );
+      syncSceneRoadsAndCities(res.nextState, under);
       if (res.messagePt) showToast(res.messagePt);
     },
-    [handleSetToolMode, showToast]
+    [handleSetToolMode, showToast, syncSceneRoadsAndCities]
   );
 
   const handleAdvanceTurn = useCallback(() => {
@@ -547,24 +620,28 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       syncSceneUnits(res.nextState, null);
     }
     const waveKeys = [...res.incorporatedKeys, ...res.conqueredByAiKeys];
+    const under = getUnderConstructionKeys(res.nextState);
     controllerRef.current?.syncWorldState(
       res.nextState.worldState,
       undefined,
       waveKeys.length > 0 ? waveKeys : undefined,
-      getUnderConstructionKeys(res.nextState)
+      under
     );
+    syncSceneRoadsAndCities(res.nextState, under);
     if (
       res.completedTech ||
       res.newEvent ||
       res.completedBuildings.length > 0 ||
-      res.incorporatedKeys.length > 0
+      res.incorporatedKeys.length > 0 ||
+      res.foundedCities.length > 0 ||
+      res.leveledUpCities.length > 0
     ) {
       gameAudio.playConquest();
     } else {
       gameAudio.playSaveChime();
     }
     showToast(res.headlinePt);
-  }, [clearCommandMode, showToast, syncSceneUnits]);
+  }, [clearCommandMode, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
 
   // Optional auto-turn timer
   useEffect(() => {
@@ -737,12 +814,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       setSelectedHexSynced(null);
       clearCommandMode(loaded);
       controllerRef.current?.setHomeCoord(loaded.playerCapital ?? { q: 0, r: 0 }, true);
+      const under = getUnderConstructionKeys(loaded);
       controllerRef.current?.syncWorldState(
         loaded.worldState,
         undefined,
         undefined,
-        getUnderConstructionKeys(loaded)
+        under
       );
+      syncSceneRoadsAndCities(loaded, under);
       syncSceneUnits(loaded, null);
       controllerRef.current?.centerCamera();
       gameAudio.playSaveChime();
@@ -750,7 +829,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     } catch {
       showToast('Erro ao carregar reino');
     }
-  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneUnits]);
+  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
 
   const handleStartGame = useCallback(() => {
     document.body.dataset.state = 'playing';
@@ -785,17 +864,19 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     setSelectedHexSynced(null);
     clearCommandMode(starter);
     controllerRef.current?.setHomeCoord(starter.playerCapital ?? { q: 0, r: 0 }, true);
+    const under = getUnderConstructionKeys(starter);
     controllerRef.current?.syncWorldState(
       starter.worldState,
       undefined,
       undefined,
-      getUnderConstructionKeys(starter)
+      under
     );
+    syncSceneRoadsAndCities(starter, under);
     syncSceneUnits(starter, null);
     controllerRef.current?.centerCamera();
     setGameState('playing');
     showToast('Reino inicial restaurado');
-  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneUnits]);
+  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
 
   const handleNewProceduralWorld = useCallback(() => {
     const newSeed = createRandomWorldSeed();
@@ -805,17 +886,19 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     setSelectedHexSynced(null);
     clearCommandMode(starter);
     controllerRef.current?.setHomeCoord(starter.playerCapital ?? { q: 0, r: 0 }, true);
+    const under = getUnderConstructionKeys(starter);
     controllerRef.current?.syncWorldState(
       starter.worldState,
       undefined,
       undefined,
-      getUnderConstructionKeys(starter)
+      under
     );
+    syncSceneRoadsAndCities(starter, under);
     syncSceneUnits(starter, null);
     controllerRef.current?.centerCamera();
     setGameState('playing');
     showToast(`Novo mundo gerado (#${newSeed})`);
-  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneUnits]);
+  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
 
   const handleClearMap = useCallback(() => {
     const empty = createSandboxKingdomState();
@@ -824,17 +907,19 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     setSelectedHexSynced(null);
     clearCommandMode(empty);
     controllerRef.current?.setHomeCoord({ q: 0, r: 0 }, true);
+    const under = getUnderConstructionKeys(empty);
     controllerRef.current?.syncWorldState(
       empty.worldState,
       undefined,
       undefined,
-      getUnderConstructionKeys(empty)
+      under
     );
+    syncSceneRoadsAndCities(empty, under);
     syncSceneUnits(empty, null);
     controllerRef.current?.centerCamera();
     setGameState('playing');
     showToast('Mapa limpo — modo livre');
-  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneUnits]);
+  }, [clearCommandMode, setSelectedHexSynced, showToast, syncSceneRoadsAndCities, syncSceneUnits]);
 
   const handleToggleMute = useCallback(() => {
     setMuted((prev) => {
@@ -877,6 +962,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     const controller = new HexSceneController(mountEl, {
       onHoverChange: () => {},
       onPlaceAt: handlePlaceAt,
+      onRoadAt: handleRoadAt,
       onDemolishAt: handleDemolishAt,
       onTouchTapAt: handleTouchTapAt,
       onSelectHexAt: handleSelectHexAt,
@@ -890,12 +976,20 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     controller.setGameState(gameStateRef.current);
     controller.setToolMode(toolModeRef.current);
     controller.setSelectedPiece(selectedIndexRef.current, rotationDegRef.current);
+    const under = getUnderConstructionKeys(kingdomStateRef.current);
     controller.syncWorldState(
       kingdomStateRef.current.worldState,
       undefined,
       undefined,
-      getUnderConstructionKeys(kingdomStateRef.current)
+      under
     );
+    controller.syncRoadsAndCities({
+      roads: kingdomStateRef.current.roads ?? {},
+      cities: kingdomStateRef.current.cities ?? [],
+      connectivity: getKingdomRoadSummary(kingdomStateRef.current, HEX_ASSETS),
+      worldState: kingdomStateRef.current.worldState,
+      underConstructionKeys: under,
+    });
     controller.syncUnits(kingdomStateRef.current.units, null, []);
 
     return () => {
@@ -907,6 +1001,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     };
   }, [
     handlePlaceAt,
+    handleRoadAt,
     handleDemolishAt,
     handleTouchTapAt,
     handleSelectHexAt,
@@ -1025,6 +1120,8 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   const expansionOverlayData = useMemo(() => {
     const underKeys = getUnderConstructionKeys(kingdomState);
     const activeExp = kingdomState.expansions ?? [];
+    const roads = kingdomState.roads ?? {};
+    const cities = kingdomState.cities ?? [];
     const expandable = getExpandableFrontierCoords({
       worldState,
       activeExpansions: activeExp,
@@ -1035,6 +1132,9 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       owner: 'player',
       underConstructionKeys: underKeys,
       playerCapital: kingdomState.playerCapital,
+      roads,
+      roadConnectivity: economy.roadConnectivity,
+      cities,
     });
     const expandableKeys = new Set(expandable.map((c) => hexKey(c.q, c.r)));
     const expandingKeys = new Set(
@@ -1049,6 +1149,9 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       owner: 'player',
       underConstructionKeys: underKeys,
       playerCapital: kingdomState.playerCapital,
+      roads,
+      roadConnectivity: economy.roadConnectivity,
+      cities,
     });
     const influenceKeys = new Set<string>();
     for (const c of coverage) {
@@ -1058,7 +1161,12 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       }
     }
     return { expandableKeys, expandingKeys, influenceKeys };
-  }, [economy.population.availableWorkers, kingdomState, worldState]);
+  }, [
+    economy.population.availableWorkers,
+    economy.roadConnectivity,
+    kingdomState,
+    worldState,
+  ]);
 
   useEffect(() => {
     controllerRef.current?.setAttentionKeys(economy.attentionHexKeys);
@@ -1207,6 +1315,36 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     return computeEffectiveBuildCost(asset.name, kingdomState.research.unlocked);
   }, [kingdomState.research.unlocked, selectedIndex]);
 
+  const selectedCity = useMemo<CityEntity | null>(() => {
+    if (!selectedHex) return null;
+    return getCityAtCoord(kingdomState.cities, selectedHex.q, selectedHex.r);
+  }, [kingdomState.cities, selectedHex]);
+
+  const selectedRoad = useMemo<RoadTile | null>(() => {
+    if (!selectedHex) return null;
+    return getRoadAt(kingdomState.roads, selectedHex.q, selectedHex.r);
+  }, [kingdomState.roads, selectedHex]);
+
+  const selectedRoadCheck = useMemo<{
+    allowed: boolean;
+    isUpgrade: boolean;
+    definition: RoadLevelDefinition | null;
+    reasonPt: string | null;
+  } | null>(() => {
+    if (!selectedHex) return null;
+    return canBuildOrUpgradeRoad({
+      worldState,
+      roads: kingdomState.roads,
+      q: selectedHex.q,
+      r: selectedHex.r,
+      cash: worldState.cash,
+      resources: kingdomState.resources,
+      unlockedTechs: kingdomState.research.unlocked,
+      assets: HEX_ASSETS,
+      underConstructionKeys: getUnderConstructionKeys(kingdomState),
+    });
+  }, [kingdomState, selectedHex, worldState]);
+
   return (
     <div className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-[#9bd2ee] hex-game-viewport">
       {/* Isolated WebGL canvas mount container */}
@@ -1226,6 +1364,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         territorySummary={territorySummary}
         resources={kingdomState.resources}
         economy={economy}
+        cities={kingdomState.cities ?? []}
         stage={progression.stage}
         unlockedTechs={kingdomState.research.unlocked}
         activeEvent={kingdomState.activeEvent}
@@ -1246,6 +1385,9 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         selectedHexUnit={selectedHexUnit}
         selectedHexFaction={selectedHexFaction}
         selectedBuildingReport={selectedBuildingReport}
+        selectedCity={selectedCity}
+        selectedRoad={selectedRoad}
+        selectedRoadCheck={selectedRoadCheck}
         contextualBuild={contextualBuild}
         canBuildActiveOnSelected={canBuildActiveOnSelected}
         activeBuildEffectiveCost={activeBuildEffectiveCost}
@@ -1270,6 +1412,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         onRotatePiece={handleRotatePiece}
         onSetToolMode={handleSetToolMode}
         onConfirmSelectedHex={handleConfirmSelectedHex}
+        onBuildRoadSelected={handleBuildRoadSelected}
         onDemolishSelectedHex={handleDemolishSelectedHex}
         onRecruitUnit={handleRecruitUnit}
         onStartUnitCommand={handleStartUnitCommand}

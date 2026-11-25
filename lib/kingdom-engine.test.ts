@@ -3,26 +3,30 @@ import assert from 'node:assert/strict';
 import { HEX_ASSETS } from './repo-data';
 import { hasHexConstruction, hexKey, type AxialCoord } from './hex-engine';
 import { countFactionTerritory } from './faction-engine';
-import { AXIAL_DIRECTIONS, getConquerableFrontierCoords } from './territory-engine';
+import {
+  AXIAL_DIRECTIONS,
+  getExpandableFrontierCoords,
+} from './territory-engine';
 import { getStrategicRegionInfo } from './terrain-engine';
 import { getAvailableTechs } from './tech-engine';
 import {
   advanceKingdomTurn,
   buildInKingdom,
-  calculateStrategicConquestCost,
   commandUnitInKingdom,
-  conquerInKingdom,
   createStarterKingdomState,
   demolishInKingdom,
   deserializeKingdomState,
+  evaluateExpansionInKingdom,
   getKingdomEconomy,
   getKingdomMarket,
   getKingdomProgression,
+  getKingdomTerritoryCapacity,
   performDiplomacyAction,
   recruitUnitInKingdom,
   resolveKingdomEvent,
   serializeKingdomState,
   setActiveResearchInKingdom,
+  startExpansionInKingdom,
   tradeResourceInKingdom,
   type KingdomState,
 } from './kingdom-engine';
@@ -33,16 +37,28 @@ function idxOf(name: string): number {
   return idx;
 }
 
-function findNeutralFrontierWithTerrain(
+function findExpandableFrontierCoord(
   state: KingdomState,
-  terrain: 'plains' | 'forest' | 'fertile' | 'mountain'
+  preferredTerrain?: 'plains' | 'forest' | 'fertile' | 'mountain'
 ): AxialCoord {
-  const frontier = getConquerableFrontierCoords(state.worldState);
-  for (const coord of frontier) {
-    const tile = state.worldState.hexes[hexKey(coord.q, coord.r)];
-    if (tile?.terrainType === terrain) return coord;
+  const econ = getKingdomEconomy(state, HEX_ASSETS);
+  const frontier = getExpandableFrontierCoords({
+    worldState: state.worldState,
+    activeExpansions: state.expansions,
+    population: state.population,
+    unlockedTechs: state.research.unlocked,
+    availableWorkers: econ.population.availableWorkers,
+    assets: HEX_ASSETS,
+    playerCapital: state.playerCapital,
+  });
+  if (preferredTerrain) {
+    for (const coord of frontier) {
+      const tile = state.worldState.hexes[hexKey(coord.q, coord.r)];
+      if (tile?.terrainType === preferredTerrain) return coord;
+    }
   }
-  throw new Error(`No adjacent ${terrain} frontier tile found`);
+  if (frontier.length > 0) return frontier[0];
+  throw new Error('No expandable frontier tile found');
 }
 
 function getFreeOwnedCoord(state: KingdomState): AxialCoord {
@@ -74,6 +90,7 @@ test('createStarterKingdomState seeds 32x32 world, player core, 2 rival factions
   assert.equal(countFactionTerritory(state.worldState, 'iron_clan'), 4);
   assert.equal(countFactionTerritory(state.worldState, 'azure_league'), 4);
   assert.equal(state.units.length, 2);
+  assert.equal(state.expansions.length, 0);
   assert.equal(state.factions[0].population, 12);
   assert.ok(state.factions[0].resources.wood > 0);
 
@@ -85,18 +102,25 @@ test('createStarterKingdomState seeds 32x32 world, player core, 2 rival factions
   assert.ok(econ.foodNet > 0);
   assert.ok(econ.scienceNet >= 3);
 
+  const capSummary = getKingdomTerritoryCapacity(state, HEX_ASSETS);
+  assert.equal(capSummary.controlled, 7);
+  assert.equal(capSummary.capacity, 14);
+  assert.equal(capSummary.remaining, 7);
+  assert.equal(capSummary.maxAnchorReach, 2);
+
   const prog = getKingdomProgression(state, HEX_ASSETS);
   assert.equal(prog.stage.stageIndex, 1);
   assert.equal(prog.stage.labelPt, 'Acampamento Real');
 });
 
-test('strategic regions give deterministic rare resources and conquest modifiers', () => {
+test('strategic regions give deterministic rare resources and expansion influence modifiers', () => {
   const state = createStarterKingdomState(HEX_ASSETS);
   const cap = state.playerCapital!;
   const coreTile = state.worldState.hexes[hexKey(cap.q, cap.r)];
   const core = getStrategicRegionInfo(cap.q, cap.r, coreTile);
   assert.equal(core.rareFeature, 'none');
-  assert.equal(core.conquestCostMultiplier, 1);
+  assert.equal(core.expansionInfluenceMod, 0);
+  assert.equal(core.expansionExtraTurns, 0);
 
   const rareTile = Object.values(state.worldState.hexes).find(
     (t) => t.rareFeature && t.rareFeature !== 'none'
@@ -104,15 +128,12 @@ test('strategic regions give deterministic rare resources and conquest modifiers
   assert.ok(rareTile, 'Procedural world must generate strategic rare nodes');
   const rareInfo = getStrategicRegionInfo(rareTile.q, rareTile.r, rareTile);
   assert.notEqual(rareInfo.rareFeature, 'none');
-  assert.ok(rareInfo.labelPt.length > 0);
+  assert.ok(rareInfo.labelPt && rareInfo.labelPt.length > 0);
+  assert.ok(rareInfo.expansionInfluenceMod >= 2);
+  assert.ok(rareInfo.expansionExtraTurns >= 1);
 
-  const ironCost = calculateStrategicConquestCost(
-    state,
-    rareTile.q,
-    rareTile.r,
-    HEX_ASSETS
-  );
-  assert.ok(ironCost >= 500);
+  const check = evaluateExpansionInKingdom(state, rareTile.q, rareTile.r, HEX_ASSETS);
+  assert.ok(check.influence.requiredInfluence >= 6);
 });
 
 test('buildInKingdom blocks natural terrain assets, enforces multi-turn queue, tech lock, worker availability, and demolish preserves tile', () => {
@@ -143,15 +164,27 @@ test('buildInKingdom blocks natural terrain assets, enforces multi-turn queue, t
   assert.equal(barracksBlocked.built, false);
   assert.match(barracksBlocked.messagePt ?? '', /Requer pesquisa/);
 
-  // Ensure a forest tile is owned in frontier
+  // Organically incorporate a frontier tile (forest preferred) across turns without paying gold
   let forestCoord: AxialCoord;
+  let hadForest = true;
   try {
-    forestCoord = findNeutralFrontierWithTerrain(state, 'forest');
-    state = conquerInKingdom(state, forestCoord.q, forestCoord.r, HEX_ASSETS).nextState;
+    forestCoord = findExpandableFrontierCoord(state, 'forest');
   } catch {
-    const anyNeutral = findNeutralFrontierWithTerrain(state, 'plains');
-    forestCoord = { ...anyNeutral };
-    state = conquerInKingdom(state, forestCoord.q, forestCoord.r, HEX_ASSETS).nextState;
+    hadForest = false;
+    forestCoord = findExpandableFrontierCoord(state);
+  }
+  const cashBeforeExpand = state.worldState.cash;
+  const startedExpand = startExpansionInKingdom(state, forestCoord.q, forestCoord.r, HEX_ASSETS);
+  assert.equal(startedExpand.started, true);
+  state = startedExpand.nextState;
+  assert.equal(state.worldState.cash, cashBeforeExpand);
+
+  for (let i = 0; i < startedExpand.expansion!.totalTurns; i++) {
+    state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
+  }
+  assert.equal(state.worldState.hexes[hexKey(forestCoord.q, forestCoord.r)]?.owner, 'player');
+
+  if (!hadForest) {
     state = {
       ...state,
       worldState: {
@@ -241,7 +274,7 @@ test('buildInKingdom blocks natural terrain assets, enforces multi-turn queue, t
   assert.equal(dem.nextState.worldState.hexes[hexKey(forestCoord.q, forestCoord.r)]?.terrainType, 'forest');
 });
 
-test('research progression, multi-turn event effects, trade market, and rival AI growth work cleanly', () => {
+test('research progression, multi-turn event effects, trade market, and rival AI organic growth work cleanly', () => {
   let state = createStarterKingdomState(HEX_ASSETS);
   const avail = getAvailableTechs(state.research);
   assert.ok(avail.some((t) => t.id === 'agriculture'));
@@ -283,11 +316,11 @@ test('research progression, multi-turn event effects, trade market, and rival AI
   assert.ok(state.research.unlocked.includes('mining'), 'Mining unlocks once University is complete');
   assert.equal(state.activeEffects[0].turnsRemaining, 2);
 
-  // Check rival AI factions grew their territory over 4 turns
+  // Check rival AI factions grew their territory organically over 4 turns
   const totalAiTiles =
     countFactionTerritory(state.worldState, 'iron_clan') +
     countFactionTerritory(state.worldState, 'azure_league');
-  assert.ok(totalAiTiles >= 10, 'AI factions should expand strategically');
+  assert.ok(totalAiTiles >= 10, 'AI factions should expand organically');
 
   // Test dynamic Trade Market buy & sell (including Metal)
   const market = getKingdomMarket(state, HEX_ASSETS);
@@ -327,7 +360,6 @@ test('military recruitment, movement, and combat capture of enemy territory', ()
   state = rec.nextState;
   assert.equal(state.units.filter((u) => u.owner === 'player').length, 1);
 
-  // Helper BFS from unit position to nearest enemy tile (handles dynamic AI unit/border shifts)
   const findStepTowardEnemy = (
     curState: KingdomState,
     from: AxialCoord
@@ -358,7 +390,6 @@ test('military recruitment, movement, and combat capture of enemy territory', ()
     throw new Error('Expected reachable enemy territory on land');
   };
 
-  // Walk step 1 and verify double move is blocked on same turn
   let prev = cap;
   const firstHop = findStepTowardEnemy(state, prev);
   const step1 = commandUnitInKingdom(state, prev, firstHop.step, HEX_ASSETS);
@@ -393,13 +424,21 @@ test('military recruitment, movement, and combat capture of enemy territory', ()
   assert.equal(capturedEnemyTile, true, 'Knight should reach and capture enemy territory');
 });
 
-test('serializeKingdomState and deserializeKingdomState round-trip v4 procedural state and support v1 fallback', () => {
+test('serializeKingdomState and deserializeKingdomState round-trip v7 state with active expansions, roads, cities and support v1/v6 fallback', () => {
   let starter = createStarterKingdomState(HEX_ASSETS, 987654);
   starter = setActiveResearchInKingdom(starter, 'mining').nextState;
   const freeCoord = getFreeOwnedCoord(starter);
   starter = buildInKingdom(starter, freeCoord.q, freeCoord.r, idxOf('building-house'), 90, HEX_ASSETS).nextState;
 
+  const frontier = findExpandableFrontierCoord(starter);
+  const expanded = startExpansionInKingdom(starter, frontier.q, frontier.r, HEX_ASSETS);
+  assert.equal(expanded.started, true);
+  starter = expanded.nextState;
+
   const json = serializeKingdomState(starter);
+  const parsed = JSON.parse(savedJsonOrThrow(json));
+  assert.equal(parsed.version, 7);
+
   const loaded = deserializeKingdomState(json, HEX_ASSETS.length);
   assert.ok(loaded !== null);
   assert.equal(loaded.worldSeed, 987654);
@@ -410,8 +449,21 @@ test('serializeKingdomState and deserializeKingdomState round-trip v4 procedural
   assert.equal(loaded.research.activeTechId, 'mining');
   assert.equal(loaded.constructions.length, 1);
   assert.equal(loaded.constructions[0].turnsRemaining, 1);
+  assert.equal(loaded.expansions.length, 1);
+  assert.equal(loaded.expansions[0].q, frontier.q);
+  assert.equal(loaded.expansions[0].r, frontier.r);
   assert.equal(loaded.factions.length, 2);
   assert.equal(loaded.units.length, 2);
+  assert.ok(loaded.cities.length >= 1);
+
+  // v6 payload backward-compatibility (no roads/cities fields)
+  const v6Payload = { ...parsed, version: 6 };
+  delete v6Payload.roads;
+  delete v6Payload.cities;
+  const loadedV6 = deserializeKingdomState(JSON.stringify(v6Payload), HEX_ASSETS.length);
+  assert.ok(loadedV6 !== null);
+  assert.deepEqual(loadedV6.roads, {});
+  assert.ok(loadedV6.cities.length >= 1);
 
   // v1 payload backward-compatibility
   const v1 = JSON.stringify({
@@ -424,5 +476,12 @@ test('serializeKingdomState and deserializeKingdomState round-trip v4 procedural
   assert.equal(loadedV1.worldState.cash, 8500);
   assert.equal(loadedV1.turn, 1);
   assert.equal(loadedV1.constructions.length, 0);
+  assert.equal(loadedV1.expansions.length, 0);
+  assert.deepEqual(loadedV1.roads, {});
+  assert.ok(loadedV1.cities.length >= 1);
 });
 
+function savedJsonOrThrow(raw: string): string {
+  assert.ok(raw.length > 0);
+  return raw;
+}

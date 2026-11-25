@@ -3,6 +3,8 @@ import type { KingdomResources, TurnProductionBreakdown } from './economy-engine
 import type { ActiveWorldEffect } from './events-engine';
 import type { FactionState } from './faction-engine';
 import { hexKey, type HexWorldState } from './hex-engine';
+import type { RegionalWorldSummary } from './regional-engine';
+import type { RoadConnectivitySummary } from './road-engine';
 import type { TechId } from './tech-engine';
 
 export type TradableResource = 'wood' | 'stone' | 'food' | 'ore' | 'metal';
@@ -24,6 +26,8 @@ export interface MarketSummary {
   quotes: ResourceMarketQuote[];
   marketCount: number;
   tradeBonusPercent: number;
+  connectedCitiesCount: number;
+  corridorCount: number;
 }
 
 const BASE_PRICES: Record<TradableResource, { labelPt: string; base: number }> = {
@@ -60,6 +64,8 @@ export function computeMarketSummary(params: {
   activeEffects: ActiveWorldEffect[];
   assets: HexAssetEntry[];
   underConstructionKeys?: Set<string>;
+  roadConnectivity?: RoadConnectivitySummary;
+  regionalSummary?: RegionalWorldSummary;
 }): MarketSummary {
   const {
     worldState,
@@ -70,14 +76,27 @@ export function computeMarketSummary(params: {
     activeEffects,
     assets,
     underConstructionKeys,
+    roadConnectivity = economy.roadConnectivity,
+    regionalSummary = economy.regionalSummary,
   } = params;
 
   const marketCount = countTradeStructures(worldState, assets, underConstructionKeys);
   const hasTradeTech = unlockedTechs.includes('trade');
   const activePacts = factions.filter((f) => f.relation === 'trade_pact').length;
+  const connectedCityPairs =
+    roadConnectivity?.networks.reduce(
+      (sum, net) => sum + Math.max(0, net.connectedCityIds.length - 1),
+      0
+    ) ?? 0;
+  const connectedCitiesCount = connectedCityPairs > 0 ? connectedCityPairs + 1 : 0;
+  const corridorCount = regionalSummary?.tradeCorridors.length ?? 0;
+  const roadNetworkBonusPct = Math.min(10, connectedCityPairs * 4 + corridorCount * 3);
 
-  // Trade bonus lowers buy prices and raises sell prices cleanly (up to +30%)
-  const bonusPct = Math.min(30, marketCount * 6 + (hasTradeTech ? 10 : 0) + activePacts * 5);
+  // Trade bonus lowers buy prices and raises sell prices cleanly (up to +38%)
+  const bonusPct = Math.min(
+    38,
+    marketCount * 6 + (hasTradeTech ? 10 : 0) + activePacts * 5 + roadNetworkBonusPct
+  );
   const buyDiscount = 1 - bonusPct / 150;
   const sellBonus = 1 + bonusPct / 100;
 
@@ -148,5 +167,7 @@ export function computeMarketSummary(params: {
     quotes,
     marketCount,
     tradeBonusPercent: bonusPct,
+    connectedCitiesCount,
+    corridorCount,
   };
 }

@@ -5,7 +5,7 @@ import {
   type InputResourceKey,
   type ResourceCost,
 } from './buildings-catalog';
-import { hexKey, type HexOwner, type HexWorldState, type PlacedHex } from './hex-engine';
+import { hexKey, type AxialCoord, type HexOwner, type HexWorldState, type PlacedHex } from './hex-engine';
 import {
   BASE_HOUSING_CAPACITY,
   allocateWorkersToBuildings,
@@ -20,6 +20,18 @@ import { AXIAL_DIRECTIONS } from './territory-engine';
 import { getTechModifiers, type TechId } from './tech-engine';
 import { computeFactionMilitaryPower, type UnitEntity } from './military-engine';
 import type { ActiveWorldEffect } from './events-engine';
+import {
+  computeRoadConnectivity,
+  type RoadConnectivitySummary,
+  type RoadMap,
+} from './road-engine';
+import { computeBuildingLogistics } from './logistics-engine';
+import {
+  evaluateRegionalWorld,
+  type RegionalHexBonus,
+  type RegionalWorldSummary,
+} from './regional-engine';
+import { ensureStarterCapitalCity, type CityEntity } from './city-engine';
 
 export interface KingdomResources {
   wood: number;
@@ -56,6 +68,12 @@ export interface BuildingOperationReport {
   locationEfficiencyPct: number;
   effectiveEfficiencyPct: number;
   locationBonusNotesPt: string[];
+  logisticsEfficiencyPct: number;
+  logisticsStatusPt: string;
+  districtLabelPt: string | null;
+  hasRoad: boolean;
+  roadLevel: number;
+  roadBonusNotesPt: string[];
   potentialProduction: BuildingProduction;
   actualProduction: BuildingProduction;
   inputConsumed: Partial<Record<InputResourceKey, number>>;
@@ -82,6 +100,9 @@ export interface TurnProductionBreakdown {
   goldGross: number;
   goldMaintenance: number;
   goldTradePactBonus: number;
+  roadMaintenanceGold: number;
+  networkTradeGold: number;
+  corridorTradeGold: number;
   goldNet: number;
   woodNet: number;
   stoneNet: number;
@@ -98,6 +119,9 @@ export interface TurnProductionBreakdown {
   storageCaps: ResourceStorageCaps;
   population: PopulationSummary;
   underConstructionCount: number;
+  citySummaryCount: number;
+  roadConnectivity: RoadConnectivitySummary;
+  regionalSummary: RegionalWorldSummary;
   buildingsByKey: Record<string, BuildingOperationReport>;
   attentionHexKeys: string[];
   operationCounts: {
@@ -183,7 +207,11 @@ export function computeBuildingLocationEfficiency(
   tile: PlacedHex,
   assetName: string,
   assets: HexAssetEntry[],
-  underConstructionKeys?: Set<string>
+  underConstructionKeys?: Set<string>,
+  roads?: RoadMap,
+  roadConnectivity?: RoadConnectivitySummary,
+  cityCenters?: AxialCoord[],
+  regionalBonuses?: Record<string, RegionalHexBonus>
 ): { factor: number; notesPt: string[] } {
   let factor = 1.0;
   const notesPt: string[] = [];
@@ -349,8 +377,52 @@ export function computeBuildingLocationEfficiency(
       break;
   }
 
+  // Adjacency 2.0: Road & city-network synergy
+  const tileKey = hexKey(tile.q, tile.r);
+  const road = roads?.[tileKey];
+  if (road && road.owner === (tile.owner ?? 'player')) {
+    const roadMetric = roadConnectivity?.tileMetricsByKey[tileKey];
+    const roadSynergy =
+      assetName === 'building-market' ||
+      assetName === 'building-port' ||
+      assetName === 'building-mine' ||
+      assetName === 'building-smelter' ||
+      assetName === 'dirt-lumber'
+        ? Math.min(0.12, road.level * 0.03)
+        : Math.min(0.08, road.level * 0.02);
+    factor += roadSynergy;
+    notesPt.push(
+      roadMetric?.connectedToCity
+        ? `Acesso viário à cidade (+${Math.round(roadSynergy * 100)}%)`
+        : `Estrada local (+${Math.round(roadSynergy * 100)}%)`
+    );
+  }
+
+  if (cityCenters && cityCenters.length > 0) {
+    const nearCity = cityCenters.some(
+      (c) => Math.max(Math.abs(tile.q - c.q), Math.abs(tile.r - c.r), Math.abs(tile.q + tile.r - c.q - c.r)) <= 1
+    );
+    if (
+      nearCity &&
+      (assetName === 'building-market' ||
+        assetName === 'building-house' ||
+        assetName === 'building-village' ||
+        assetName === 'building-wizard-tower')
+    ) {
+      factor += 0.05;
+      notesPt.push('Núcleo urbano (+5%)');
+    }
+  }
+
+  const regBonus = regionalBonuses?.[tileKey];
+  if (regBonus) {
+    notesPt.push(
+      `${regBonus.districtLabelPt} (+${Math.round((regBonus.multiplier - 1) * 100)}%)`
+    );
+  }
+
   return {
-    factor: Math.max(0.75, Math.min(1.45, Number(factor.toFixed(2)))),
+    factor: Math.max(0.75, Math.min(1.55, Number(factor.toFixed(2)))),
     notesPt,
   };
 }
@@ -382,6 +454,10 @@ export function computeTurnEconomyBreakdown(params: {
   eventGoldMultiplier?: number;
   eventFoodMultiplier?: number;
   foodDeficitTurns?: number;
+  roads?: RoadMap;
+  cities?: CityEntity[];
+  playerCapital?: AxialCoord;
+  worldSeed?: number;
 }): TurnProductionBreakdown {
   const {
     worldState,
@@ -398,9 +474,55 @@ export function computeTurnEconomyBreakdown(params: {
     eventGoldMultiplier = 1,
     eventFoodMultiplier = 1,
     foodDeficitTurns = 0,
+    roads = {},
+    cities,
+    playerCapital,
+    worldSeed,
   } = params;
 
   const mods = getTechModifiers(unlockedTechs);
+
+  const activeCities =
+    owner === 'player'
+      ? cities && cities.length > 0
+        ? cities
+        : ensureStarterCapitalCity({
+            playerCapital,
+            worldState,
+            worldSeed,
+            existingCities: [],
+          })
+      : [];
+
+  const cityCenters = activeCities.map((c) => c.center);
+
+  const roadConnectivity = computeRoadConnectivity({
+    worldState,
+    roads,
+    cityCenters: activeCities.map((c) => ({
+      id: c.id,
+      center: c.center,
+      level: c.level,
+    })),
+    assets,
+    owner,
+    underConstructionKeys,
+  });
+
+  const regionalSummary = evaluateRegionalWorld({
+    worldState,
+    cities: activeCities.map((c) => ({
+      id: c.id,
+      name: c.name,
+      center: c.center,
+      owner: c.owner,
+    })),
+    roads,
+    connectivity: roadConnectivity,
+    assets,
+    underConstructionKeys,
+    owner,
+  });
 
   let effectGoldMult = eventGoldMultiplier;
   let effectFoodMult = eventFoodMultiplier;
@@ -442,6 +564,15 @@ export function computeTurnEconomyBreakdown(params: {
     bDef: ReturnType<typeof getBuildingDefinition>;
     locationFactor: number;
     locationNotesPt: string[];
+    logisticsFactor: number;
+    logisticsEfficiencyPct: number;
+    logisticsStatusPt: string;
+    districtLabelPt: string | null;
+    districtMultiplier: number;
+    districtGoldFlat: number;
+    hasRoad: boolean;
+    roadLevel: number;
+    roadBonusNotesPt: string[];
   }> = [];
   const buildingsByKey: Record<string, BuildingOperationReport> = {};
 
@@ -465,6 +596,10 @@ export function computeTurnEconomyBreakdown(params: {
     baseOreProd += strategic.bonusOrePerTurn;
     baseScienceProd += strategic.bonusSciencePerTurn;
 
+    const roadHere = roads[key];
+    const hasRoadHere = Boolean(roadHere && roadHere.owner === owner);
+    const roadLevelHere = hasRoadHere && roadHere ? roadHere.level : 0;
+
     if (isUnderConstruction) {
       underConstructionCount += 1;
       const bDef = getBuildingDefinition(assetName);
@@ -480,6 +615,12 @@ export function computeTurnEconomyBreakdown(params: {
         locationEfficiencyPct: 100,
         effectiveEfficiencyPct: 0,
         locationBonusNotesPt: [],
+        logisticsEfficiencyPct: 100,
+        logisticsStatusPt: 'Em construção',
+        districtLabelPt: null,
+        hasRoad: hasRoadHere,
+        roadLevel: roadLevelHere,
+        roadBonusNotesPt: [],
         potentialProduction: { ...bDef.production },
         actualProduction: { ...ZERO_PROD },
         inputConsumed: {},
@@ -507,8 +648,22 @@ export function computeTurnEconomyBreakdown(params: {
       tile,
       assetName,
       assets,
-      underConstructionKeys
+      underConstructionKeys,
+      roads,
+      roadConnectivity,
+      cityCenters,
+      regionalSummary.hexBonusesByKey
     );
+
+    const logistics = computeBuildingLogistics({
+      q: tile.q,
+      r: tile.r,
+      cityCenters,
+      roads,
+      connectivity: roadConnectivity,
+    });
+
+    const regBonus = regionalSummary.hexBonusesByKey[key];
 
     workOrders.push({
       key,
@@ -525,6 +680,15 @@ export function computeTurnEconomyBreakdown(params: {
       bDef,
       locationFactor: loc.factor,
       locationNotesPt: loc.notesPt,
+      logisticsFactor: logistics.factor,
+      logisticsEfficiencyPct: logistics.efficiencyPct,
+      logisticsStatusPt: logistics.labelPt,
+      districtLabelPt: regBonus?.districtLabelPt ?? null,
+      districtMultiplier: regBonus?.multiplier ?? 1,
+      districtGoldFlat: regBonus?.bonusGoldFlat ?? 0,
+      hasRoad: logistics.hasRoad,
+      roadLevel: logistics.roadLevel,
+      roadBonusNotesPt: logistics.notesPt,
     });
   }
 
@@ -556,7 +720,12 @@ export function computeTurnEconomyBreakdown(params: {
   for (const item of completedBuildings) {
     const assign = workerAlloc.assignmentsByKey[item.key];
     const workerRatio = assign ? assign.ratio : 1;
-    const rawScale = item.locationFactor * workerRatio * effectFactor;
+    const rawScale =
+      item.locationFactor *
+      item.logisticsFactor *
+      item.districtMultiplier *
+      workerRatio *
+      effectFactor;
 
     if (item.bDef.production.ore > 0) {
       extractedOreThisTurn +=
@@ -626,10 +795,19 @@ export function computeTurnEconomyBreakdown(params: {
     const inputRatio = reqOreInput > 0 ? oreInputRatio : 1;
 
     const combinedFactor =
-      item.locationFactor * workerRatio * inputRatio * starvationFactor * effectFactor;
+      item.locationFactor *
+      item.logisticsFactor *
+      item.districtMultiplier *
+      workerRatio *
+      inputRatio *
+      starvationFactor *
+      effectFactor;
 
     const actualProduction: BuildingProduction = {
-      gold: Math.round(item.bDef.production.gold * mods.goldMultiplier * effectGoldMult * combinedFactor),
+      gold:
+        Math.round(
+          item.bDef.production.gold * mods.goldMultiplier * effectGoldMult * combinedFactor
+        ) + (workerRatio > 0 ? item.districtGoldFlat : 0),
       wood: Math.round(item.bDef.production.wood * combinedFactor),
       stone: Math.round(item.bDef.production.stone * mods.stoneOreMultiplier * combinedFactor),
       food: Math.round(item.bDef.production.food * mods.foodMultiplier * effectFoodMult * combinedFactor),
@@ -702,16 +880,31 @@ export function computeTurnEconomyBreakdown(params: {
       locationEfficiencyPct: Math.round(item.locationFactor * 100),
       effectiveEfficiencyPct: Math.round(combinedFactor * 100),
       locationBonusNotesPt: item.locationNotesPt,
+      logisticsEfficiencyPct: item.logisticsEfficiencyPct,
+      logisticsStatusPt: item.logisticsStatusPt,
+      districtLabelPt: item.districtLabelPt,
+      hasRoad: item.hasRoad,
+      roadLevel: item.roadLevel,
+      roadBonusNotesPt: item.roadBonusNotesPt,
       potentialProduction: { ...item.bDef.production },
       actualProduction,
       inputConsumed: reqOreInput > 0 ? { ore: Math.round(oreUsed) } : {},
     };
   }
 
+  const roadMaint = owner === 'player' ? roadConnectivity.roadMaintenanceGold : 0;
+  const networkTradeGold = owner === 'player' ? roadConnectivity.networkTradeGold : 0;
+  const corridorTradeGold = owner === 'player' ? regionalSummary.corridorTradeGold : 0;
+
   const finalGoldGross =
-    Math.round((baseGoldGross * mods.goldMultiplier + tradePactGoldBonus) * effectGoldMult) +
-    buildingGoldGross;
-  const totalMaint = buildingMaint + milPower.unitMaintenanceGold;
+    Math.round(
+      (baseGoldGross * mods.goldMultiplier +
+        tradePactGoldBonus +
+        networkTradeGold +
+        corridorTradeGold) *
+        effectGoldMult
+    ) + buildingGoldGross;
+  const totalMaint = buildingMaint + milPower.unitMaintenanceGold + roadMaint;
 
   const finalWood = Math.round(baseWoodProd) + buildingWoodProd;
   const finalStone = Math.round(baseStoneProd * mods.stoneOreMultiplier) + buildingStoneProd;
@@ -742,6 +935,9 @@ export function computeTurnEconomyBreakdown(params: {
     goldGross: finalGoldGross,
     goldMaintenance: totalMaint,
     goldTradePactBonus: tradePactGoldBonus,
+    roadMaintenanceGold: roadMaint,
+    networkTradeGold,
+    corridorTradeGold,
     goldNet: finalGoldGross - totalMaint,
     woodNet: finalWood,
     stoneNet: finalStone,
@@ -779,6 +975,9 @@ export function computeTurnEconomyBreakdown(params: {
       efficiencyReasonPt: popDynamics.efficiencyReasonPt,
     },
     underConstructionCount,
+    citySummaryCount: activeCities.length,
+    roadConnectivity,
+    regionalSummary,
     buildingsByKey,
     attentionHexKeys,
     operationCounts,

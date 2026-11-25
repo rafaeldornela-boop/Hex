@@ -14,6 +14,11 @@ import {
   type TerrainType,
 } from './terrain-engine';
 import { TECH_BY_ID, getTechModifiers, type TechId } from './tech-engine';
+import {
+  ROAD_CATALOG,
+  type RoadConnectivitySummary,
+  type RoadMap,
+} from './road-engine';
 
 export type { HexOwner } from './hex-engine';
 
@@ -159,6 +164,8 @@ export interface TerritorialCapacitySummary {
   populationBonus: number;
   infrastructureBonus: number;
   techBonus: number;
+  cityBonus: number;
+  roadBonus: number;
   maxAnchorReach: number;
   anchorCoords: AxialCoord[];
 }
@@ -194,6 +201,9 @@ export function computeTerritorialCapacity(params: {
   underConstructionKeys?: Set<string>;
   activeExpansions?: ActiveExpansion[];
   playerCapital?: AxialCoord;
+  roads?: RoadMap;
+  roadConnectivity?: RoadConnectivitySummary;
+  cities?: Array<{ center: AxialCoord; level: number }>;
 }): TerritorialCapacitySummary {
   const {
     worldState,
@@ -204,13 +214,18 @@ export function computeTerritorialCapacity(params: {
     underConstructionKeys,
     activeExpansions = [],
     playerCapital,
+    roads,
+    roadConnectivity,
+    cities = [],
   } = params;
 
   const baseCapacity = 4;
   const populationBonus = Math.floor(Math.max(0, population) / 4);
   const techMods = getTechModifiers(unlockedTechs);
   const techBonus = techMods.territorialCapacityBonus;
-  const maxAnchorReach = 2 + techMods.anchorReachBonus;
+  const roadReachBonus =
+    owner === 'player' ? roadConnectivity?.roadTerritoryReachBonus ?? 0 : 0;
+  const maxAnchorReach = 2 + techMods.anchorReachBonus + roadReachBonus;
 
   let controlled = 0;
   let infrastructureBonus = 0;
@@ -222,12 +237,24 @@ export function computeTerritorialCapacity(params: {
     controlled++;
 
     const key = hexKey(tile.q, tile.r);
+    const roadMetric =
+      owner === 'player' ? roadConnectivity?.tileMetricsByKey[key] : undefined;
+    const hasConnectedRoad =
+      owner === 'player' &&
+      Boolean(roads?.[key]) &&
+      Boolean(roadMetric?.connectedToCity);
+
+    if (hasConnectedRoad && !anchorSeen.has(key)) {
+      anchorSeen.add(key);
+      anchorCoords.push({ q: tile.q, r: tile.r });
+    }
+
     if (underConstructionKeys?.has(key)) continue;
 
     const assetName = assets[tile.structureIndex]?.name ?? '';
     infrastructureBonus += INFRASTRUCTURE_CAPACITY_BONUS[assetName] ?? 0;
 
-    if (ANCHOR_BUILDING_ASSETS.has(assetName)) {
+    if (ANCHOR_BUILDING_ASSETS.has(assetName) && !anchorSeen.has(key)) {
       anchorSeen.add(key);
       anchorCoords.push({ q: tile.q, r: tile.r });
     }
@@ -250,8 +277,28 @@ export function computeTerritorialCapacity(params: {
     }
   }
 
+  let cityBonus = 0;
+  let roadBonus = 0;
+  if (owner === 'player') {
+    for (const c of cities) {
+      if (c.level >= 5) cityBonus += 3;
+      else if (c.level === 4) cityBonus += 2;
+      else if (c.level === 3) cityBonus += 1;
+    }
+    if (roadConnectivity) {
+      for (const net of roadConnectivity.networks) {
+        if (net.connectedCityIds.length >= 2) {
+          roadBonus += 2;
+        } else if (net.connectedCityIds.length >= 1 && net.length >= 4) {
+          roadBonus += 1;
+        }
+      }
+    }
+  }
+
   const inProgress = activeExpansions.filter((e) => e.owner === owner).length;
-  const capacity = baseCapacity + populationBonus + infrastructureBonus + techBonus;
+  const capacity =
+    baseCapacity + populationBonus + infrastructureBonus + techBonus + cityBonus + roadBonus;
   const used = controlled + inProgress;
   const remaining = Math.max(0, capacity - used);
 
@@ -265,6 +312,8 @@ export function computeTerritorialCapacity(params: {
     populationBonus,
     infrastructureBonus,
     techBonus,
+    cityBonus,
+    roadBonus,
     maxAnchorReach,
     anchorCoords,
   };
@@ -357,6 +406,8 @@ export function computeHexInfluence(params: {
   anchorCoords?: AxialCoord[];
   maxAnchorReach?: number;
   playerCapital?: AxialCoord;
+  roads?: RoadMap;
+  roadConnectivity?: RoadConnectivitySummary;
 }): HexInfluenceInfo {
   const {
     worldState,
@@ -368,11 +419,15 @@ export function computeHexInfluence(params: {
     owner = 'player',
     underConstructionKeys,
     playerCapital,
+    roads,
+    roadConnectivity,
   } = params;
 
   const techMods = getTechModifiers(unlockedTechs);
+  const roadReachBonus =
+    owner === 'player' ? roadConnectivity?.roadTerritoryReachBonus ?? 0 : 0;
   const resolvedMaxReach =
-    params.maxAnchorReach ?? 2 + techMods.anchorReachBonus;
+    params.maxAnchorReach ?? 2 + techMods.anchorReachBonus + roadReachBonus;
 
   let anchors = params.anchorCoords;
   if (!anchors) {
@@ -384,6 +439,8 @@ export function computeHexInfluence(params: {
       owner,
       underConstructionKeys,
       playerCapital,
+      roads,
+      roadConnectivity,
     });
     anchors = capSummary.anchorCoords;
   }
@@ -405,6 +462,17 @@ export function computeHexInfluence(params: {
     if (d === 0 || d > 4) continue;
 
     const tileKey = hexKey(tile.q, tile.r);
+    if (owner === 'player' && roads && d <= 2) {
+      const road = roads[tileKey];
+      if (road && road.owner === 'player') {
+        const roadDef = ROAD_CATALOG[road.level];
+        const connectedBoost = roadConnectivity?.tileMetricsByKey[tileKey]?.connectedToCity
+          ? 1.0
+          : 0.5;
+        rawScore += (roadDef.influenceBonus * connectedBoost) / d;
+      }
+    }
+
     if (underConstructionKeys?.has(tileKey)) continue;
 
     const assetName = assets[tile.structureIndex]?.name ?? '';
@@ -494,6 +562,9 @@ export function evaluateExpansion(params: {
   underConstructionKeys?: Set<string>;
   activeExpansions?: ActiveExpansion[];
   playerCapital?: AxialCoord;
+  roads?: RoadMap;
+  roadConnectivity?: RoadConnectivitySummary;
+  cities?: Array<{ center: AxialCoord; level: number }>;
 }): ExpansionCheckResult {
   const {
     worldState,
@@ -507,6 +578,9 @@ export function evaluateExpansion(params: {
     underConstructionKeys,
     activeExpansions = [],
     playerCapital,
+    roads,
+    roadConnectivity,
+    cities,
   } = params;
 
   const key = hexKey(q, r);
@@ -522,6 +596,9 @@ export function evaluateExpansion(params: {
     underConstructionKeys,
     activeExpansions,
     playerCapital,
+    roads,
+    roadConnectivity,
+    cities,
   });
 
   const influence = computeHexInfluence({
@@ -536,6 +613,8 @@ export function evaluateExpansion(params: {
     anchorCoords: capacitySummary.anchorCoords,
     maxAnchorReach: capacitySummary.maxAnchorReach,
     playerCapital,
+    roads,
+    roadConnectivity,
   });
 
   const adjacent = isAdjacentToTerritory(worldState, q, r, actorId);
@@ -643,6 +722,9 @@ export function startExpansion(params: {
   owner?: HexOwner;
   underConstructionKeys?: Set<string>;
   playerCapital?: AxialCoord;
+  roads?: RoadMap;
+  roadConnectivity?: RoadConnectivitySummary;
+  cities?: Array<{ center: AxialCoord; level: number }>;
 }): StartExpansionResult {
   const {
     activeExpansions,
@@ -701,6 +783,9 @@ export function getExpandableFrontierCoords(params: {
   owner?: HexOwner;
   underConstructionKeys?: Set<string>;
   playerCapital?: AxialCoord;
+  roads?: RoadMap;
+  roadConnectivity?: RoadConnectivitySummary;
+  cities?: Array<{ center: AxialCoord; level: number }>;
 }): AxialCoord[] {
   const {
     worldState,
@@ -712,6 +797,9 @@ export function getExpandableFrontierCoords(params: {
     owner = 'player',
     underConstructionKeys,
     playerCapital,
+    roads,
+    roadConnectivity,
+    cities,
   } = params;
 
   const seen = new Set<string>();
@@ -738,6 +826,9 @@ export function getExpandableFrontierCoords(params: {
         underConstructionKeys,
         activeExpansions,
         playerCapital,
+        roads,
+        roadConnectivity,
+        cities,
       });
 
       if (check.canExpand) {
@@ -762,6 +853,9 @@ export function getInfluenceCoverageCoords(params: {
   owner?: HexOwner;
   underConstructionKeys?: Set<string>;
   playerCapital?: AxialCoord;
+  roads?: RoadMap;
+  roadConnectivity?: RoadConnectivitySummary;
+  cities?: Array<{ center: AxialCoord; level: number }>;
 }): AxialCoord[] {
   const {
     worldState,
@@ -772,6 +866,9 @@ export function getInfluenceCoverageCoords(params: {
     owner = 'player',
     underConstructionKeys,
     playerCapital,
+    roads,
+    roadConnectivity,
+    cities,
   } = params;
 
   const capSummary = computeTerritorialCapacity({
@@ -783,6 +880,9 @@ export function getInfluenceCoverageCoords(params: {
     underConstructionKeys,
     activeExpansions,
     playerCapital,
+    roads,
+    roadConnectivity,
+    cities,
   });
 
   const expandingKeys = new Set(activeExpansions.map((e) => hexKey(e.q, e.r)));
@@ -820,6 +920,8 @@ export function getInfluenceCoverageCoords(params: {
           anchorCoords: capSummary.anchorCoords,
           maxAnchorReach: capSummary.maxAnchorReach,
           playerCapital,
+          roads,
+          roadConnectivity,
         });
 
         if (inf.withinReach && inf.score >= 4) {

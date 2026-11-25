@@ -25,12 +25,20 @@ import {
   advanceResearchProgress,
   type TechDefinition,
 } from './tech-engine';
+import {
+  CITY_STAGE_META,
+  syncAndEvolveCities,
+  type CityEntity,
+} from './city-engine';
+import type { RoadMap } from './road-engine';
 
 export interface TurnAdvanceResult {
   nextState: KingdomState;
   completedTech: TechDefinition | null;
   completedBuildings: string[];
   incorporatedKeys: string[];
+  foundedCities: string[];
+  leveledUpCities: string[];
   newEvent: ActiveKingdomEvent | null;
   conqueredByAiKeys: string[];
   headlinePt: string;
@@ -134,7 +142,24 @@ export function processKingdomTurn(
     .filter((e) => e.owner === 'player')
     .reduce((sum, e) => sum + e.workersCommitted, 0);
 
-  // Step 2 & 3 & 4: Compute production, input conversions, food balance, and maintenance
+  const workingRoads: RoadMap = working.roads ?? {};
+
+  // Step 1c: Organically found and evolve cities based on completed buildings, roads, districts, and connections
+  const citySync = syncAndEvolveCities({
+    worldState: worldAfterExpansions,
+    roads: workingRoads,
+    existingCities: working.cities ?? [],
+    playerCapital: working.playerCapital,
+    population: working.population,
+    unlockedTechs: working.research.unlocked,
+    assets,
+    underConstructionKeys: underKeysAfterBuild,
+    hasFoodDeficit: (working.foodDeficitTurns ?? 0) > 0,
+    turn: nextTurn,
+    worldSeed: working.worldSeed ?? working.worldState.seed,
+  });
+
+  // Step 2 & 3 & 4: Compute production, input conversions, food balance, road upkeep, and maintenance
   const tradePactBonus = getTradePactBonusGold(working.factions);
   const econ = computeTurnEconomyBreakdown({
     worldState: worldAfterExpansions,
@@ -151,6 +176,10 @@ export function processKingdomTurn(
     eventGoldMultiplier: working.activeEvent?.goldMultiplierMod ?? 1,
     eventFoodMultiplier: working.activeEvent?.foodMultiplierMod ?? 1,
     foodDeficitTurns: working.foodDeficitTurns ?? 0,
+    roads: workingRoads,
+    cities: citySync.cities,
+    playerCapital: working.playerCapital,
+    worldSeed: working.worldSeed ?? working.worldState.seed,
   });
 
   // Step 4: Treasury update
@@ -209,6 +238,29 @@ export function processKingdomTurn(
     underConstructionKeys: underKeysAfterBuild,
   });
 
+  // Strip player roads & lost city centers if rival factions captured tiles
+  let nextRoads: RoadMap = workingRoads;
+  if (aiResult.conqueredKeys.length > 0) {
+    const conqueredSet = new Set(aiResult.conqueredKeys);
+    const filtered: RoadMap = {};
+    for (const [k, road] of Object.entries(workingRoads)) {
+      if (!conqueredSet.has(k)) {
+        filtered[k] = road;
+      }
+    }
+    nextRoads = filtered;
+  }
+
+  const finalCities: CityEntity[] = citySync.cities.filter((c) => {
+    const tile = aiResult.worldState.hexes[hexKey(c.center.q, c.center.r)];
+    return tile && tile.owner === c.owner;
+  });
+
+  const foundedCities = citySync.newlyFoundedCities.map((c) => c.name);
+  const leveledUpCities = citySync.leveledUpCities.map(
+    (entry) => `${entry.city.name} (${CITY_STAGE_META[entry.toLevel].labelPt})`
+  );
+
   const playerBorderHex = Object.values(aiResult.worldState.hexes).find(
     (t) => t.owner === 'player'
   );
@@ -224,6 +276,12 @@ export function processKingdomTurn(
   ];
   if (completedBuildings.length > 0) {
     summaryParts.push(`Pronto: ${completedBuildings.join(', ')}`);
+  }
+  if (foundedCities.length > 0) {
+    summaryParts.push(`Nova cidade: ${foundedCities.join(', ')}`);
+  }
+  if (leveledUpCities.length > 0) {
+    summaryParts.push(`Cresceu: ${leveledUpCities.join(', ')}`);
   }
   if (incorporatedKeys.length > 0) {
     summaryParts.push(
@@ -269,6 +327,8 @@ export function processKingdomTurn(
       factions: aiResult.factions,
       constructions: nextConstructions,
       expansions: nextExpansions,
+      roads: nextRoads,
+      cities: finalCities,
       activeEffects: nextEffects,
       activeEvent: newEvent,
       eventHistory: working.eventHistory,
@@ -277,6 +337,8 @@ export function processKingdomTurn(
     completedTech: researchStep.completedTech,
     completedBuildings,
     incorporatedKeys,
+    foundedCities,
+    leveledUpCities,
     newEvent,
     conqueredByAiKeys: aiResult.conqueredKeys,
     headlinePt,

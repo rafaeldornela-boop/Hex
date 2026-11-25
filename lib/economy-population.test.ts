@@ -5,13 +5,14 @@ import { DEFAULT_ROTATION_DEG, hasHexConstruction, hexKey, type AxialCoord } fro
 import {
   advanceKingdomTurn,
   buildInKingdom,
-  conquerInKingdom,
   createSandboxKingdomState,
   createStarterKingdomState,
   demolishInKingdom,
   deserializeKingdomState,
+  evaluateExpansionInKingdom,
   getKingdomEconomy,
   serializeKingdomState,
+  startExpansionInKingdom,
   type KingdomState,
 } from './kingdom-engine';
 import { computeBuildingLocationEfficiency } from './economy-engine';
@@ -177,7 +178,7 @@ test('food deficit follows 1-turn grace period then declines population cleanly 
   let state = buildSandboxWithTiles([
     makeTile(0, 0, 'plains', 'building-castle'),
     makeTile(1, 0, 'plains', 'building-house'),
-    makeTile(-1, 0, 'fertile'), // ready to build farm later
+    makeTile(-1, 0, 'fertile'),
   ]);
   state = {
     ...state,
@@ -292,25 +293,43 @@ test('Fundição consumes ore to smelt metal and stalls cleanly on ore shortage'
   assert.equal(econNoOre.metalProduced, 0);
 });
 
-test('economy invariants hold across multi-turn simulation, demolition, and v4/v5 save/load', () => {
+test('economy invariants hold across organic expansion, multi-turn simulation, demolition, and v4/v5/v6 save/load', () => {
   let state = createStarterKingdomState(HEX_ASSETS, 42026);
   const cap = state.playerCapital!;
 
-  // Conquer an adjacent forest tile and build a Serraria
+  // Start organic incorporation on an eligible adjacent forest tile (zero gold spent)
   let forestCoord: AxialCoord | null = null;
   for (const tile of Object.values(state.worldState.hexes)) {
     if (tile.owner !== 'neutral' || tile.terrainType !== 'forest') continue;
     const adj = AXIAL_DIRECTIONS.some(
       (d) => state.worldState.hexes[hexKey(tile.q + d.q, tile.r + d.r)]?.owner === 'player'
     );
-    if (adj) {
+    if (adj && evaluateExpansionInKingdom(state, tile.q, tile.r, HEX_ASSETS).canExpand) {
       forestCoord = { q: tile.q, r: tile.r };
       break;
     }
   }
+
   if (forestCoord) {
-    state = conquerInKingdom(state, forestCoord.q, forestCoord.r, HEX_ASSETS).nextState;
-    state = buildInKingdom(state, forestCoord.q, forestCoord.r, idxOf('dirt-lumber'), 90, HEX_ASSETS).nextState;
+    const cashBeforeExpand = state.worldState.cash;
+    const started = startExpansionInKingdom(state, forestCoord.q, forestCoord.r, HEX_ASSETS);
+    assert.equal(started.started, true);
+    state = started.nextState;
+    assert.equal(state.worldState.cash, cashBeforeExpand);
+
+    const econDuringExpand = getKingdomEconomy(state, HEX_ASSETS);
+    assert.ok(econDuringExpand.population.expansionWorkersUsed >= 1);
+
+    const turnsNeeded = started.expansion!.totalTurns;
+    for (let t = 0; t < turnsNeeded; t++) {
+      state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
+    }
+    assert.equal(state.worldState.hexes[hexKey(forestCoord.q, forestCoord.r)]?.owner, 'player');
+    assert.equal(getKingdomEconomy(state, HEX_ASSETS).population.expansionWorkersUsed, 0);
+
+    const built = buildInKingdom(state, forestCoord.q, forestCoord.r, idxOf('dirt-lumber'), 90, HEX_ASSETS);
+    assert.equal(built.built, true);
+    state = built.nextState;
   }
 
   for (let i = 0; i < 6; i++) {
@@ -341,20 +360,22 @@ test('economy invariants hold across multi-turn simulation, demolition, and v4/v
     state = dem.nextState;
   }
 
-  // Save/Load v5 round-trip + v4 compatibility
+  // Save/Load v7 round-trip + v4/v5/v6 compatibility
   const saved = serializeKingdomState(state);
   const parsed = JSON.parse(saved);
-  assert.equal(parsed.version, 5);
+  assert.equal(parsed.version, 7);
 
   const loaded = deserializeKingdomState(saved, HEX_ASSETS.length);
   assert.ok(loaded !== null);
   assert.equal(loaded.resources.metal, state.resources.metal);
   assert.equal(loaded.foodDeficitTurns, state.foodDeficitTurns);
   assert.deepEqual(loaded.playerCapital, cap);
+  assert.ok(Array.isArray(loaded.expansions));
 
   const v4Legacy = JSON.stringify({
     ...parsed,
     version: 4,
+    expansions: undefined,
     resources: {
       wood: 30,
       stone: 20,
@@ -368,4 +389,5 @@ test('economy invariants hold across multi-turn simulation, demolition, and v4/v
   assert.ok(loadedV4 !== null);
   assert.equal(loadedV4.resources.metal, 10);
   assert.equal(loadedV4.foodDeficitTurns, 0);
+  assert.equal(loadedV4.expansions.length, 0);
 });

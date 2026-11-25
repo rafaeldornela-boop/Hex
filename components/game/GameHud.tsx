@@ -3,6 +3,7 @@
 import { memo, useMemo } from 'react';
 import {
   AlertTriangle,
+  Building2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -25,6 +26,7 @@ import {
   Play,
   RotateCcw,
   RotateCw,
+  Route,
   Save,
   Sparkles,
   Swords,
@@ -69,9 +71,22 @@ import type { FactionState } from '@/lib/faction-engine';
 import type { ActiveConstruction } from '@/lib/kingdom-engine';
 import { UNIT_CATALOG, type UnitEntity, type UnitType } from '@/lib/military-engine';
 import { TECH_BY_ID, type TechId } from '@/lib/tech-engine';
+import {
+  ROAD_CATALOG,
+  type RoadLevelDefinition,
+  type RoadTile,
+} from '@/lib/road-engine';
+import type { CityEntity } from '@/lib/city-engine';
 import { formatHexDisplayName } from '@/lib/world-domain';
 import type { BuilderToolMode, GameModeState } from './HexSceneController';
 import type { KingdomModalTab } from './KingdomModal';
+
+export interface RoadBuildCheckView {
+  allowed: boolean;
+  isUpgrade: boolean;
+  definition: RoadLevelDefinition | null;
+  reasonPt: string | null;
+}
 
 export interface GameHudProps {
   gameState: GameModeState;
@@ -82,6 +97,7 @@ export interface GameHudProps {
   territorySummary: TerritorialCapacitySummary;
   resources: KingdomResources;
   economy: TurnProductionBreakdown;
+  cities: CityEntity[];
   stage: KingdomStageInfo;
   unlockedTechs: TechId[];
   activeEvent: ActiveKingdomEvent | null;
@@ -102,6 +118,9 @@ export interface GameHudProps {
   selectedHexUnit: UnitEntity | null;
   selectedHexFaction: FactionState | null;
   selectedBuildingReport: BuildingOperationReport | null;
+  selectedCity: CityEntity | null;
+  selectedRoad: RoadTile | null;
+  selectedRoadCheck: RoadBuildCheckView | null;
   contextualBuild: HexBuildEvaluation | null;
   canBuildActiveOnSelected: boolean;
   activeBuildEffectiveCost: ResourceCost | null;
@@ -126,6 +145,7 @@ export interface GameHudProps {
   onRotatePiece: () => void;
   onSetToolMode: (mode: BuilderToolMode) => void;
   onConfirmSelectedHex: () => void;
+  onBuildRoadSelected: () => void;
   onDemolishSelectedHex: () => void;
   onRecruitUnit: (unitType: UnitType) => void;
   onStartUnitCommand: () => void;
@@ -220,6 +240,7 @@ const GameHud = memo(function GameHud({
   territorySummary,
   resources,
   economy,
+  cities,
   stage,
   unlockedTechs,
   activeEvent,
@@ -240,6 +261,9 @@ const GameHud = memo(function GameHud({
   selectedHexUnit,
   selectedHexFaction,
   selectedBuildingReport,
+  selectedCity,
+  selectedRoad,
+  selectedRoadCheck,
   contextualBuild,
   canBuildActiveOnSelected: _canBuildActiveOnSelected,
   activeBuildEffectiveCost,
@@ -264,6 +288,7 @@ const GameHud = memo(function GameHud({
   onRotatePiece,
   onSetToolMode,
   onConfirmSelectedHex,
+  onBuildRoadSelected,
   onDemolishSelectedHex,
   onRecruitUnit,
   onStartUnitCommand,
@@ -290,7 +315,20 @@ const GameHud = memo(function GameHud({
     !unlockedTechs.includes(activePieceDef.requiredTech);
 
   const hasCancellableState =
-    selectedHex !== null || toolMode === 'demolish' || toolMode === 'command' || buildSheetOpen;
+    selectedHex !== null ||
+    toolMode === 'demolish' ||
+    toolMode === 'road' ||
+    toolMode === 'command' ||
+    buildSheetOpen;
+
+  const roadButtonLabel = useMemo(() => {
+    if (selectedRoad && selectedRoad.level >= 5) {
+      return 'Via Comercial (Máx.)';
+    }
+    const def = selectedRoadCheck?.definition;
+    if (!def) return 'Estrada';
+    return `${selectedRoadCheck.isUpgrade ? 'Melhorar' : 'Estrada'}: ${def.shortNamePt} (${formatCompactCost(def.cost, def.cost.gold)})`;
+  }, [selectedRoad, selectedRoadCheck]);
 
   const selectedBuildingDef = selectedTileAssetName
     ? getBuildingDefinition(selectedTileAssetName)
@@ -467,7 +505,7 @@ const GameHud = memo(function GameHud({
                 <div className="hidden sm:flex items-center gap-1.5">
                   <div>
                     <p className="text-[9px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
-                      {stage.labelPt}
+                      {stage.labelPt} · {cities.length} {cities.length === 1 ? 'cid' : 'cids'}
                     </p>
                     <p
                       data-testid="hud-turn"
@@ -758,7 +796,48 @@ const GameHud = memo(function GameHud({
                           {selectedBuildingReport.statusLabelPt}
                         </span>
                       )}
+                      {selectedRoad && (
+                        <span
+                          data-testid="mobile-road-badge"
+                          className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-[#efe8d8] text-[#3c3426] border border-[#c8ba9f]"
+                        >
+                          {ROAD_CATALOG[selectedRoad.level].namePt}
+                        </span>
+                      )}
+                      {selectedBuildingReport?.districtLabelPt && !selectedHexConstruction && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-sky-100 text-sky-900">
+                          {selectedBuildingReport.districtLabelPt}
+                        </span>
+                      )}
                     </div>
+
+                    {selectedCity && (
+                      <div
+                        data-testid="mobile-city-info"
+                        className="mt-1 bg-[#f7f2e6] border border-[#d9ceb8] rounded-lg px-2 py-1 text-[11px]"
+                      >
+                        <p className="font-bold text-[#1f1a12] flex items-center gap-1 truncate">
+                          <Building2 className="w-3.5 h-3.5 text-amber-700 shrink-0" aria-hidden="true" />
+                          <span>
+                            {selectedCity.name} · {selectedCity.stageLabelPt} ({selectedCity.level}/5)
+                          </span>
+                        </p>
+                        <p className="text-[10px] font-semibold text-[#5c5140] tabular-nums truncate">
+                          Pop. local ~{selectedCity.localPopulation} ·{' '}
+                          {selectedCity.connectedCityIds.length > 0
+                            ? `${selectedCity.connectedCityIds.length} conexão(ões)`
+                            : selectedCity.stabilityLabelPt}
+                          {selectedCity.nextLevelScore !== null
+                            ? ` · Evol. ${selectedCity.developmentScore}/${selectedCity.nextLevelScore}`
+                            : ' · Estágio Máx.'}
+                        </p>
+                        {selectedCity.specializations.length > 0 && (
+                          <p className="text-[10px] font-bold text-emerald-800 truncate">
+                            {selectedCity.specializations.map((s) => s.labelPt).join(' · ')}
+                          </p>
+                        )}
+                      </div>
+                    )}
 
                     {selectedHexConstruction ? (
                       <p
@@ -775,20 +854,26 @@ const GameHud = memo(function GameHud({
                             {formatLiveBuildingYield(selectedBuildingReport, selectedBuildingDef)}
                           </p>
                           {(selectedBuildingReport.workersRequired > 0 ||
-                            selectedBuildingReport.locationEfficiencyPct !== 100) && (
+                            selectedBuildingReport.locationEfficiencyPct !== 100 ||
+                            selectedBuildingReport.logisticsEfficiencyPct !== 100) && (
                             <p className="text-[10px] font-semibold text-[#5c5140] tabular-nums">
                               {selectedBuildingReport.workersRequired > 0
                                 ? `Trab.: ${selectedBuildingReport.workersAssigned}/${selectedBuildingReport.workersRequired}`
                                 : ''}
                               {selectedBuildingReport.workersRequired > 0 &&
-                              selectedBuildingReport.locationEfficiencyPct !== 100
+                              (selectedBuildingReport.locationEfficiencyPct !== 100 ||
+                                selectedBuildingReport.logisticsEfficiencyPct !== 100)
                                 ? ' · '
                                 : ''}
                               {selectedBuildingReport.locationEfficiencyPct !== 100
                                 ? `Local: ${selectedBuildingReport.locationEfficiencyPct}%`
                                 : ''}
-                              {selectedBuildingReport.locationBonusNotesPt.length > 0
-                                ? ` (${selectedBuildingReport.locationBonusNotesPt[0]})`
+                              {selectedBuildingReport.locationEfficiencyPct !== 100 &&
+                              selectedBuildingReport.logisticsEfficiencyPct !== 100
+                                ? ' · '
+                                : ''}
+                              {selectedBuildingReport.logisticsEfficiencyPct !== 100
+                                ? `Logística: ${selectedBuildingReport.logisticsEfficiencyPct}% (${selectedBuildingReport.logisticsStatusPt})`
                                 : ''}
                             </p>
                           )}
@@ -920,30 +1005,47 @@ const GameHud = memo(function GameHud({
                   })}
 
                   {selectedExpansion.owner === 'player' ? (
-                    selectedHexHasConstruction ? (
-                      <button
-                        type="button"
-                        data-testid="mobile-demolish-selected"
-                        onClick={onDemolishSelectedHex}
-                        className="flex-1 min-h-[46px] px-3 rounded-xl bg-rose-700 text-white font-display text-xs font-bold border-2 border-rose-950 shadow-[0_2px_0_#4c0519] flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5"
-                      >
-                        <Trash2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-                        Demolir
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        data-testid="mobile-build-here-button"
-                        onClick={() => {
-                          onSetToolMode('build');
-                          onSetBuildSheetOpen(true);
-                        }}
-                        className="flex-1 min-h-[46px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] flex items-center justify-center gap-1.5 cursor-pointer"
-                      >
-                        <Hammer className="w-4 h-4 shrink-0" aria-hidden="true" />
-                        Construir aqui
-                      </button>
-                    )
+                    <>
+                      {selectedHexHasConstruction ? (
+                        <button
+                          type="button"
+                          data-testid="mobile-demolish-selected"
+                          onClick={onDemolishSelectedHex}
+                          className="flex-1 min-h-[46px] px-3 rounded-xl bg-rose-700 text-white font-display text-xs font-bold border-2 border-rose-950 shadow-[0_2px_0_#4c0519] flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5"
+                        >
+                          <Trash2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          Demolir
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          data-testid="mobile-build-here-button"
+                          onClick={() => {
+                            onSetToolMode('build');
+                            onSetBuildSheetOpen(true);
+                          }}
+                          className="flex-1 min-h-[46px] px-3 rounded-xl bg-emerald-700 text-white font-display text-xs font-bold border-2 border-[#1e2d24] shadow-[0_2px_0_#1e2d24] flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <Hammer className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          Construir aqui
+                        </button>
+                      )}
+                      {selectedRoadCheck && (!selectedRoad || selectedRoad.level < 5) && (
+                        <button
+                          type="button"
+                          data-testid="mobile-build-road-selected"
+                          onClick={onBuildRoadSelected}
+                          className={`min-h-[46px] px-3 rounded-xl font-display text-xs font-bold border-2 flex items-center justify-center gap-1.5 cursor-pointer ${
+                            selectedRoadCheck.allowed
+                              ? 'bg-[#2a2319] text-[#fcf9f2] border-[#1f1a12]'
+                              : 'bg-[#efe8d8] text-[#5c5140] border-[#bcae96]'
+                          }`}
+                        >
+                          <Route className="w-4 h-4 shrink-0" aria-hidden="true" />
+                          <span className="truncate max-w-[160px]">{roadButtonLabel}</span>
+                        </button>
+                      )}
+                    </>
                   ) : selectedExpansion.owner !== 'neutral' ? (
                     <button
                       type="button"
@@ -991,6 +1093,14 @@ const GameHud = memo(function GameHud({
               </div>
             )}
 
+            {/* Road Active Indicator Banner */}
+            {toolMode === 'road' && !buildSheetOpen && (
+              <div className="pointer-events-auto flex items-center gap-2 bg-[#2a2319] text-[#fcf9f2] border-2 border-[#3c3426] rounded-xl px-3.5 py-1.5 text-xs font-semibold shadow-sm">
+                <Route className="w-3.5 h-3.5 text-amber-400 shrink-0" aria-hidden="true" />
+                <span>Toque em um hexágono seu para construir ou melhorar estrada</span>
+              </div>
+            )}
+
             {/* Demolish Active Indicator Banner */}
             {toolMode === 'demolish' && !buildSheetOpen && (
               <div className="pointer-events-auto flex items-center gap-2 bg-rose-700 text-white border-2 border-rose-950 rounded-xl px-3.5 py-1.5 text-xs font-semibold shadow-sm">
@@ -1001,20 +1111,20 @@ const GameHud = memo(function GameHud({
 
             {/* Primary Mobile Thumb Dock */}
             {!buildSheetOpen && (
-              <div className="pointer-events-auto w-full max-w-md bg-[#fcf9f2]/96 border-2 border-[#3c3426] rounded-2xl p-1.5 shadow-[0_4px_0_#3c3426] flex items-stretch gap-1.5">
+              <div className="pointer-events-auto w-full max-w-md bg-[#fcf9f2]/96 border-2 border-[#3c3426] rounded-2xl p-1.5 shadow-[0_4px_0_#3c3426] flex items-stretch gap-1">
                 <button
                   type="button"
                   data-testid="mobile-expand-button"
                   onClick={() => onSetToolMode('expand')}
                   aria-pressed={toolMode === 'expand'}
-                  className={`flex-1 min-w-0 min-h-[52px] px-2.5 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${
+                  className={`flex-1 min-w-0 min-h-[52px] px-1.5 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${
                     toolMode === 'expand'
                       ? 'bg-amber-500 border-[#3c3426] text-[#1f1a12] shadow-[0_2px_0_#3c3426]'
                       : 'bg-white border-[#c8ba9f] text-[#2a2319]'
                   }`}
                 >
                   <Flag className="w-4 h-4 shrink-0" aria-hidden="true" />
-                  <span className="text-[11px] font-bold leading-none">Expandir</span>
+                  <span className="text-[10px] font-bold leading-none truncate">Expandir</span>
                 </button>
 
                 <button
@@ -1025,21 +1135,34 @@ const GameHud = memo(function GameHud({
                     onSetBuildSheetOpen(true);
                   }}
                   aria-pressed={toolMode === 'build'}
-                  className={`flex-[1.25] min-w-0 min-h-[52px] px-2.5 rounded-xl border-2 flex items-center justify-center gap-1.5 text-left cursor-pointer transition-colors ${
+                  title={`Construir: ${activePieceLabel}`}
+                  className={`flex-1 min-w-0 min-h-[52px] px-1 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${
                     toolMode === 'build'
                       ? 'bg-emerald-700 border-[#1e2d24] text-white shadow-[0_2px_0_#1e2d24]'
                       : 'bg-white border-[#c8ba9f] text-[#2a2319]'
                   }`}
                 >
                   <Layers className="w-4 h-4 shrink-0" aria-hidden="true" />
-                  <div className="min-w-0">
-                    <span className="block text-[10px] font-bold uppercase tracking-wider opacity-85 leading-none">
-                      Construir
-                    </span>
-                    <span className="block text-[11px] font-bold truncate leading-tight mt-0.5">
-                      {activePieceLabel}
-                    </span>
-                  </div>
+                  <span className="max-w-full text-[10px] font-bold leading-none truncate">
+                    Construir
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="mobile-road-button"
+                  onClick={() =>
+                    onSetToolMode(toolMode === 'road' ? 'expand' : 'road')
+                  }
+                  aria-pressed={toolMode === 'road'}
+                  className={`flex-1 min-w-0 min-h-[52px] px-1.5 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${
+                    toolMode === 'road'
+                      ? 'bg-[#2a2319] border-[#1f1a12] text-[#fcf9f2]'
+                      : 'bg-white border-[#c8ba9f] text-[#2a2319]'
+                  }`}
+                >
+                  <Route className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span className="text-[10px] font-bold leading-none truncate">Estrada</span>
                 </button>
 
                 <button
@@ -1050,14 +1173,14 @@ const GameHud = memo(function GameHud({
                   }
                   aria-label="Alternar modo demolir"
                   aria-pressed={toolMode === 'demolish'}
-                  className={`min-w-[64px] min-h-[52px] px-2 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                  className={`flex-1 min-w-0 min-h-[52px] px-1.5 rounded-xl border-2 flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                     toolMode === 'demolish'
                       ? 'bg-rose-700 border-rose-950 text-white'
                       : 'bg-white border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc]'
                   }`}
                 >
-                  <Trash2 className="w-4 h-4" aria-hidden="true" />
-                  <span className="text-[10px] font-bold leading-none">Demolir</span>
+                  <Trash2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span className="text-[10px] font-bold leading-none truncate">Demolir</span>
                 </button>
 
                 {hasCancellableState ? (
@@ -1066,10 +1189,10 @@ const GameHud = memo(function GameHud({
                     data-testid="mobile-cancel-button"
                     onClick={onCancelAction}
                     aria-label="Cancelar ação atual"
-                    className="min-w-[64px] min-h-[52px] px-2 rounded-xl bg-[#efe8d8] border-2 border-[#3c3426] text-[#1f1a12] active:bg-[#e5dcc7] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+                    className="flex-1 min-w-0 min-h-[52px] px-1.5 rounded-xl bg-[#efe8d8] border-2 border-[#3c3426] text-[#1f1a12] active:bg-[#e5dcc7] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
                   >
-                    <X className="w-4 h-4" aria-hidden="true" />
-                    <span className="text-[10px] font-bold leading-none">Cancelar</span>
+                    <X className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span className="text-[10px] font-bold leading-none truncate">Cancelar</span>
                   </button>
                 ) : toolMode === 'build' ? (
                   <button
@@ -1077,10 +1200,10 @@ const GameHud = memo(function GameHud({
                     data-testid="mobile-rotate-button"
                     onClick={onRotatePiece}
                     aria-label="Girar peça"
-                    className="min-w-[64px] min-h-[52px] px-2 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+                    className="flex-1 min-w-0 min-h-[52px] px-1.5 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
                   >
-                    <RotateCw className="w-4 h-4" aria-hidden="true" />
-                    <span className="text-[10px] font-bold leading-none">Girar</span>
+                    <RotateCw className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span className="text-[10px] font-bold leading-none truncate">Girar</span>
                   </button>
                 ) : (
                   <button
@@ -1088,10 +1211,10 @@ const GameHud = memo(function GameHud({
                     data-testid="mobile-save-button"
                     onClick={onSaveMap}
                     aria-label="Salvar reino"
-                    className="min-w-[64px] min-h-[52px] px-2 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
+                    className="flex-1 min-w-0 min-h-[52px] px-1.5 rounded-xl bg-white border-2 border-[#3c3426] text-[#2a2319] active:bg-[#f2ebdc] flex flex-col items-center justify-center gap-0.5 cursor-pointer"
                   >
-                    <Save className="w-4 h-4" aria-hidden="true" />
-                    <span className="text-[10px] font-bold leading-none">Salvar</span>
+                    <Save className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span className="text-[10px] font-bold leading-none truncate">Salvar</span>
                   </button>
                 )}
               </div>
@@ -1284,6 +1407,19 @@ const GameHud = memo(function GameHud({
                         {selectedBuildingReport.statusLabelPt}
                       </span>
                     )}
+                    {selectedRoad && (
+                      <span
+                        data-testid="desktop-road-badge"
+                        className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-[#efe8d8] text-[#3c3426] border border-[#c8ba9f]"
+                      >
+                        {ROAD_CATALOG[selectedRoad.level].namePt}
+                      </span>
+                    )}
+                    {selectedBuildingReport?.districtLabelPt && !selectedHexConstruction && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-sky-100 text-sky-900">
+                        {selectedBuildingReport.districtLabelPt}
+                      </span>
+                    )}
                     {selectedHexConstruction ? (
                       <span
                         data-testid="desktop-construction-status"
@@ -1302,17 +1438,45 @@ const GameHud = memo(function GameHud({
                     ) : null}
                   </div>
 
+                  {selectedCity && (
+                    <div
+                      data-testid="desktop-city-info"
+                      className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] bg-[#f7f2e6] border border-[#d9ceb8] rounded-lg px-2.5 py-1"
+                    >
+                      <span className="font-bold text-[#1f1a12] inline-flex items-center gap-1">
+                        <Building2 className="w-3.5 h-3.5 text-amber-700 shrink-0" aria-hidden="true" />
+                        {selectedCity.name} · {selectedCity.stageLabelPt} ({selectedCity.level}/5)
+                      </span>
+                      <span className="text-[#5c5140] tabular-nums">
+                        Pop. local ~{selectedCity.localPopulation} ·{' '}
+                        {selectedCity.connectedCityIds.length > 0
+                          ? `${selectedCity.connectedCityIds.length} conexão(ões)`
+                          : selectedCity.stabilityLabelPt}
+                        {selectedCity.nextLevelScore !== null
+                          ? ` · Evol. ${selectedCity.developmentScore}/${selectedCity.nextLevelScore}`
+                          : ' · Estágio Máx.'}
+                      </span>
+                      {selectedCity.specializations.length > 0 && (
+                        <span className="font-bold text-emerald-800">
+                          {selectedCity.specializations.map((s) => s.labelPt).join(' · ')}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   {selectedBuildingReport &&
                     !selectedHexConstruction &&
                     (selectedBuildingReport.workersRequired > 0 ||
                       selectedBuildingReport.locationEfficiencyPct !== 100 ||
+                      selectedBuildingReport.logisticsEfficiencyPct !== 100 ||
                       selectedBuildingReport.reasonPt) && (
                       <p className="text-[11px] font-semibold text-[#5c5140] mt-0.5 tabular-nums">
                         {selectedBuildingReport.workersRequired > 0
                           ? `Trab.: ${selectedBuildingReport.workersAssigned}/${selectedBuildingReport.workersRequired}`
                           : ''}
                         {selectedBuildingReport.workersRequired > 0 &&
-                        selectedBuildingReport.locationEfficiencyPct !== 100
+                        (selectedBuildingReport.locationEfficiencyPct !== 100 ||
+                          selectedBuildingReport.logisticsEfficiencyPct !== 100)
                           ? ' · '
                           : ''}
                         {selectedBuildingReport.locationEfficiencyPct !== 100
@@ -1321,10 +1485,22 @@ const GameHud = memo(function GameHud({
                         {selectedBuildingReport.locationBonusNotesPt.length > 0
                           ? ` (${selectedBuildingReport.locationBonusNotesPt[0]})`
                           : ''}
+                        {selectedBuildingReport.logisticsEfficiencyPct !== 100
+                          ? `${
+                              selectedBuildingReport.workersRequired > 0 ||
+                              selectedBuildingReport.locationEfficiencyPct !== 100
+                                ? ' · '
+                                : ''
+                            }Logística: ${selectedBuildingReport.logisticsEfficiencyPct}% (${selectedBuildingReport.logisticsStatusPt})`
+                          : ''}
+                        {selectedBuildingReport.roadBonusNotesPt.length > 0
+                          ? ` · ${selectedBuildingReport.roadBonusNotesPt[0]}`
+                          : ''}
                         {selectedBuildingReport.reasonPt ? (
                           <span className="text-rose-700 font-bold">
                             {(selectedBuildingReport.workersRequired > 0 ||
-                            selectedBuildingReport.locationEfficiencyPct !== 100
+                            selectedBuildingReport.locationEfficiencyPct !== 100 ||
+                            selectedBuildingReport.logisticsEfficiencyPct !== 100
                               ? ' · '
                               : '') + selectedBuildingReport.reasonPt}
                           </span>
@@ -1393,120 +1569,140 @@ const GameHud = memo(function GameHud({
                   </p>
                 </div>
 
-                {/* Unit Command Button */}
-                {selectedHexUnit &&
-                  selectedHexUnit.owner === 'player' &&
-                  !selectedHexUnit.movedThisTurn && (
+                {/* Desktop Selection Action Strip */}
+                <div className="w-full flex flex-wrap items-center gap-2 pt-0.5">
+                  {/* Unit Command Button */}
+                  {selectedHexUnit &&
+                    selectedHexUnit.owner === 'player' &&
+                    !selectedHexUnit.movedThisTurn && (
+                      <button
+                        type="button"
+                        data-testid="unit-command-button"
+                        onClick={onStartUnitCommand}
+                        className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-[#1e2d24] bg-emerald-700 text-white shadow-[0_2px_0_#1e2d24] hover:bg-emerald-800 whitespace-nowrap cursor-pointer"
+                      >
+                        <Swords className="w-3.5 h-3.5" aria-hidden="true" />
+                        Mover / Atacar
+                      </button>
+                    )}
+
+                  {/* Inline Recruit Buttons */}
+                  {recruitOptions.map((uType) => {
+                    const uDef = UNIT_CATALOG[uType];
+                    const locked =
+                      uDef.requiredTech !== null &&
+                      !unlockedTechs.includes(uDef.requiredTech);
+                    return (
+                      <button
+                        key={uType}
+                        type="button"
+                        data-testid={`recruit-${uType}`}
+                        onClick={() => onRecruitUnit(uType)}
+                        className={`inline-flex items-center gap-1 px-3 h-9 rounded-xl text-xs font-bold border whitespace-nowrap cursor-pointer ${
+                          locked
+                            ? 'bg-[#efe8d8] border-[#c8ba9f] text-[#6e604a]'
+                            : 'bg-white border-[#3c3426] text-[#1f1a12] hover:bg-[#f2ebdc]'
+                        }`}
+                      >
+                        +{uDef.namePt} ({formatCash(uDef.cost.gold)})
+                      </button>
+                    );
+                  })}
+
+                  {selectedExpansion.owner === 'player' && selectedRoadCheck && (!selectedRoad || selectedRoad.level < 5) && (
                     <button
                       type="button"
-                      data-testid="unit-command-button"
-                      onClick={onStartUnitCommand}
+                      data-testid="build-road-selected"
+                      title={selectedRoadCheck.reasonPt ?? roadButtonLabel}
+                      onClick={onBuildRoadSelected}
+                      className={`inline-flex items-center gap-1.5 px-3 h-9 rounded-xl font-display text-xs font-bold border-2 whitespace-nowrap cursor-pointer ${
+                        selectedRoadCheck.allowed
+                          ? 'bg-[#2a2319] text-[#fcf9f2] border-[#1f1a12] hover:bg-[#1f1a12]'
+                          : 'bg-[#efe8d8] text-[#5c5140] border-[#bcae96]'
+                      }`}
+                    >
+                      <Route className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      {roadButtonLabel}
+                    </button>
+                  )}
+
+                  {selectedExpansion.owner === 'player' && selectedHexHasConstruction && (
+                    <button
+                      type="button"
+                      data-testid="desktop-demolish-selected"
+                      onClick={onDemolishSelectedHex}
+                      className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-rose-950 bg-rose-700 text-white shadow-[0_2px_0_#4c0519] hover:bg-rose-800 whitespace-nowrap cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                      Demolir
+                    </button>
+                  )}
+
+                  {selectedExpansion.owner === 'player' && !selectedHexHasConstruction && (
+                    <button
+                      type="button"
+                      data-testid="desktop-build-here-button"
+                      onClick={() => {
+                        if (!dockOpen) onToggleDock();
+                        onSetToolMode('build');
+                      }}
                       className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-[#1e2d24] bg-emerald-700 text-white shadow-[0_2px_0_#1e2d24] hover:bg-emerald-800 whitespace-nowrap cursor-pointer"
                     >
-                      <Swords className="w-3.5 h-3.5" aria-hidden="true" />
-                      Mover / Atacar
+                      <Hammer className="w-3.5 h-3.5" aria-hidden="true" />
+                      Construir aqui
                     </button>
                   )}
 
-                {/* Inline Recruit Buttons */}
-                {recruitOptions.map((uType) => {
-                  const uDef = UNIT_CATALOG[uType];
-                  const locked =
-                    uDef.requiredTech !== null &&
-                    !unlockedTechs.includes(uDef.requiredTech);
-                  return (
-                    <button
-                      key={uType}
-                      type="button"
-                      data-testid={`recruit-${uType}`}
-                      onClick={() => onRecruitUnit(uType)}
-                      className={`inline-flex items-center gap-1 px-3 h-9 rounded-xl text-xs font-bold border whitespace-nowrap cursor-pointer ${
-                        locked
-                          ? 'bg-[#efe8d8] border-[#c8ba9f] text-[#6e604a]'
-                          : 'bg-white border-[#3c3426] text-[#1f1a12] hover:bg-[#f2ebdc]'
-                      }`}
-                    >
-                      +{uDef.namePt} ({formatCash(uDef.cost.gold)})
-                    </button>
-                  );
-                })}
+                  {selectedExpansion.owner !== 'player' &&
+                    selectedExpansion.owner !== 'neutral' && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenKingdomModal('diplomacy')}
+                        className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-[#3c3426] bg-[#efe8d8] text-[#1f1a12] hover:bg-[#e5dcc7] whitespace-nowrap cursor-pointer"
+                      >
+                        <Swords className="w-3.5 h-3.5" aria-hidden="true" />
+                        Diplomacia / Guerra
+                      </button>
+                    )}
 
-                {selectedExpansion.owner === 'player' && selectedHexHasConstruction && (
-                  <button
-                    type="button"
-                    data-testid="desktop-demolish-selected"
-                    onClick={onDemolishSelectedHex}
-                    className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-rose-950 bg-rose-700 text-white shadow-[0_2px_0_#4c0519] hover:bg-rose-800 whitespace-nowrap cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-                    Demolir
-                  </button>
-                )}
-
-                {selectedExpansion.owner === 'player' && !selectedHexHasConstruction && (
-                  <button
-                    type="button"
-                    data-testid="desktop-build-here-button"
-                    onClick={() => {
-                      if (!dockOpen) onToggleDock();
-                      onSetToolMode('build');
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-[#1e2d24] bg-emerald-700 text-white shadow-[0_2px_0_#1e2d24] hover:bg-emerald-800 whitespace-nowrap cursor-pointer"
-                  >
-                    <Hammer className="w-3.5 h-3.5" aria-hidden="true" />
-                    Construir aqui
-                  </button>
-                )}
-
-                {selectedExpansion.owner !== 'player' &&
-                  selectedExpansion.owner !== 'neutral' && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenKingdomModal('diplomacy')}
-                      className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-[#3c3426] bg-[#efe8d8] text-[#1f1a12] hover:bg-[#e5dcc7] whitespace-nowrap cursor-pointer"
-                    >
-                      <Swords className="w-3.5 h-3.5" aria-hidden="true" />
-                      Diplomacia / Guerra
-                    </button>
-                  )}
-
-                {selectedExpansion.owner === 'neutral' && selectedHexActiveExpansion && (
-                  <span
-                    data-testid="desktop-expanding-status"
-                    className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-sky-400 bg-sky-100 text-sky-900 whitespace-nowrap"
-                  >
-                    <Flag className="w-3.5 h-3.5" aria-hidden="true" />
-                    Incorporando ({selectedHexActiveExpansion.turnsRemaining}/
-                    {selectedHexActiveExpansion.totalTurns}t)
-                  </span>
-                )}
-
-                {selectedExpansion.owner === 'neutral' &&
-                  !selectedHexActiveExpansion &&
-                  selectedExpansion.isAdjacent && (
-                    <button
-                      type="button"
-                      data-testid="desktop-conquer-button"
-                      onClick={onConfirmSelectedHex}
-                      className={`inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 whitespace-nowrap cursor-pointer ${
-                        selectedExpansion.canExpand
-                          ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426] hover:bg-amber-400'
-                          : 'bg-[#efe8d8] text-[#6e604a] border-[#bcae96]'
-                      }`}
+                  {selectedExpansion.owner === 'neutral' && selectedHexActiveExpansion && (
+                    <span
+                      data-testid="desktop-expanding-status"
+                      className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-sky-400 bg-sky-100 text-sky-900 whitespace-nowrap"
                     >
                       <Flag className="w-3.5 h-3.5" aria-hidden="true" />
-                      {getExpansionButtonLabel(selectedExpansion)}
-                    </button>
+                      Incorporando ({selectedHexActiveExpansion.turnsRemaining}/
+                      {selectedHexActiveExpansion.totalTurns}t)
+                    </span>
                   )}
 
-                <button
-                  type="button"
-                  onClick={onCancelAction}
-                  aria-label="Fechar seleção"
-                  className="w-8 h-8 rounded-lg bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] hover:bg-[#e5dcc7] flex items-center justify-center cursor-pointer"
-                >
-                  <X className="w-4 h-4" aria-hidden="true" />
-                </button>
+                  {selectedExpansion.owner === 'neutral' &&
+                    !selectedHexActiveExpansion &&
+                    selectedExpansion.isAdjacent && (
+                      <button
+                        type="button"
+                        data-testid="desktop-conquer-button"
+                        onClick={onConfirmSelectedHex}
+                        className={`inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 whitespace-nowrap cursor-pointer ${
+                          selectedExpansion.canExpand
+                            ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426] hover:bg-amber-400'
+                            : 'bg-[#efe8d8] text-[#6e604a] border-[#bcae96]'
+                        }`}
+                      >
+                        <Flag className="w-3.5 h-3.5" aria-hidden="true" />
+                        {getExpansionButtonLabel(selectedExpansion)}
+                      </button>
+                    )}
+
+                  <button
+                    type="button"
+                    onClick={onCancelAction}
+                    aria-label="Fechar seleção"
+                    className="ml-auto w-8 h-8 rounded-lg bg-[#efe8d8] border border-[#c8ba9f] text-[#2a2319] hover:bg-[#e5dcc7] flex items-center justify-center cursor-pointer"
+                  >
+                    <X className="w-4 h-4" aria-hidden="true" />
+                  </button>
+                </div>
               </div>
             )}
 
@@ -1624,6 +1820,26 @@ const GameHud = memo(function GameHud({
                   >
                     <Hammer className="w-3.5 h-3.5" aria-hidden="true" />
                     Construir
+                  </button>
+
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    data-testid="desktop-road-button"
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      onSetToolMode(toolMode === 'road' ? 'expand' : 'road');
+                    }}
+                    aria-pressed={toolMode === 'road'}
+                    title="Modo Estrada: clique em hexágonos seus para construir ou melhorar estradas"
+                    className={`inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border text-xs font-semibold whitespace-nowrap cursor-pointer ${
+                      toolMode === 'road'
+                        ? 'bg-[#2a2319] border-[#1f1a12] text-[#fcf9f2]'
+                        : 'bg-white border-[#bcae96] text-[#2a2319] hover:bg-[#f2ebdc]'
+                    }`}
+                  >
+                    <Route className="w-3.5 h-3.5" aria-hidden="true" />
+                    Estrada
                   </button>
 
                   <button
