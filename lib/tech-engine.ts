@@ -1,3 +1,9 @@
+import {
+  type HexWorldState,
+  type AxialCoord,
+  hexKey,
+} from './hex-engine';
+
 export type TechId =
   | 'agriculture'
   | 'mining'
@@ -6,6 +12,24 @@ export type TechId =
   | 'metallurgy'
   | 'engineering'
   | 'military';
+
+export const TECH_PATHS = {
+  agricultura: ['agriculture'],
+  engenharia: ['construction', 'engineering'],
+  metalurgia: ['mining', 'metallurgy'],
+  comercio: ['trade'],
+  militar: ['military'],
+} as const;
+
+export type TechPathId = keyof typeof TECH_PATHS;
+
+export const TECH_PATH_LABELS_PT: Record<TechPathId, string> = {
+  agricultura: 'Agricultura',
+  engenharia: 'Engenharia',
+  metalurgia: 'Metalurgia',
+  comercio: 'Comércio',
+  militar: 'Militar',
+};
 
 export interface TechDefinition {
   id: TechId;
@@ -17,6 +41,8 @@ export interface TechDefinition {
   unlocksUnits: string[];
   effectsSummaryPt: string;
   tier: 1 | 2 | 3;
+  path: TechPathId;
+  effects: Record<string, number>;
 }
 
 export interface ResearchState {
@@ -36,6 +62,10 @@ export const TECH_TREE: readonly TechDefinition[] = [
     unlocksUnits: [],
     effectsSummaryPt: '+40% Alimento · Libera Moinho',
     tier: 1,
+    path: 'agricultura',
+    effects: {
+      foodMultiplier: 1.4,
+    },
   },
   {
     id: 'mining',
@@ -47,6 +77,10 @@ export const TECH_TREE: readonly TechDefinition[] = [
     unlocksUnits: [],
     effectsSummaryPt: '+40% Pedra e Minério · Libera Mina',
     tier: 1,
+    path: 'metalurgia',
+    effects: {
+      stoneOreMultiplier: 1.4,
+    },
   },
   {
     id: 'construction',
@@ -58,6 +92,14 @@ export const TECH_TREE: readonly TechDefinition[] = [
     unlocksUnits: [],
     effectsSummaryPt: '-15% custo de obras · +50 Armazém · +2 Cap. · +1 Alcance · Libera Vila',
     tier: 2,
+    path: 'engenharia',
+    effects: {
+      buildCostMultiplier: 0.85,
+      territorialCapacityBonus: 2,
+      anchorReachBonus: 1,
+      bonusStorage: 50,
+      explorationRangeBonus: 1,
+    },
   },
   {
     id: 'trade',
@@ -69,6 +111,13 @@ export const TECH_TREE: readonly TechDefinition[] = [
     unlocksUnits: ['warship'],
     effectsSummaryPt: '+35% Ouro · +2 Cap. · +1 Alcance · Libera Porto e Navio',
     tier: 2,
+    path: 'comercio',
+    effects: {
+      goldMultiplier: 1.35,
+      territorialCapacityBonus: 2,
+      anchorReachBonus: 1,
+      explorationRangeBonus: 1,
+    },
   },
   {
     id: 'military',
@@ -80,6 +129,10 @@ export const TECH_TREE: readonly TechDefinition[] = [
     unlocksUnits: ['infantry', 'archer'],
     effectsSummaryPt: 'Libera Quartel, Torre e Tropas',
     tier: 2,
+    path: 'militar',
+    effects: {
+      explorationRangeBonus: 1,
+    },
   },
   {
     id: 'metallurgy',
@@ -91,6 +144,11 @@ export const TECH_TREE: readonly TechDefinition[] = [
     unlocksUnits: ['knight'],
     effectsSummaryPt: '+4 Ataque/Defesa · +30% Minério · Libera Fundição, Bastião e Cavaleiro',
     tier: 3,
+    path: 'metalurgia',
+    effects: {
+      oreBonusMultiplier: 1.3,
+      militaryCombatBonus: 4,
+    },
   },
   {
     id: 'engineering',
@@ -102,6 +160,14 @@ export const TECH_TREE: readonly TechDefinition[] = [
     unlocksUnits: [],
     effectsSummaryPt: '+80 Armazém · -1t incorporação · +4 Cap. · +1 Alcance · Libera Muralhas',
     tier: 3,
+    path: 'engenharia',
+    effects: {
+      territorialCapacityBonus: 4,
+      anchorReachBonus: 1,
+      expansionTurnReduction: 1,
+      bonusStorage: 80,
+      explorationRangeBonus: 1,
+    },
   },
 ] as const;
 
@@ -134,6 +200,59 @@ export function canStartResearch(research: ResearchState, techId: TechId): boole
 
 export function getAvailableTechs(research: ResearchState): TechDefinition[] {
   return TECH_TREE.filter((t) => canStartResearch(research, t.id));
+}
+
+export function getAvailableTechsInPath(
+  research: ResearchState,
+  path: TechPathId
+): TechDefinition[] {
+  return TECH_PATHS[path]
+    .filter((id) => canStartResearch(research, id))
+    .map((id) => TECH_BY_ID[id]);
+}
+
+export function getUnlockedBuildings(unlocked: TechId[]): string[] {
+  const set = new Set<string>();
+  for (const id of unlocked) {
+    const def = TECH_BY_ID[id];
+    if (def?.unlocksBuildings) {
+      for (const b of def.unlocksBuildings) {
+        set.add(b);
+      }
+    }
+  }
+  return Array.from(set);
+}
+
+export function getUnlockedUnits(unlocked: TechId[]): string[] {
+  const set = new Set<string>();
+  for (const id of unlocked) {
+    const def = TECH_BY_ID[id];
+    if (def?.unlocksUnits) {
+      for (const u of def.unlocksUnits) {
+        set.add(u);
+      }
+    }
+  }
+  return Array.from(set);
+}
+
+export function serializeResearchState(research: ResearchState): string {
+  return JSON.stringify(research);
+}
+
+export function deserializeResearchState(raw: string): ResearchState | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.unlocked)) return null;
+    return {
+      unlocked: parsed.unlocked.filter((id: string) => id in TECH_BY_ID),
+      activeTechId: (parsed.activeTechId in TECH_BY_ID ? parsed.activeTechId : null) as TechId | null,
+      progressScience: typeof parsed.progressScience === 'number' ? parsed.progressScience : 0,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function nextRecommendedTech(
@@ -228,6 +347,7 @@ export interface TechModifiers {
   expansionTurnReduction: number;
   bonusStorage: number;
   militaryCombatBonus: number;
+  explorationRangeBonus: number;
 }
 
 export function getTechModifiers(unlocked: TechId[]): TechModifiers {
@@ -249,5 +369,10 @@ export function getTechModifiers(unlocked: TechId[]): TechModifiers {
     expansionTurnReduction: has('engineering') ? 1 : 0,
     bonusStorage: (has('construction') ? 50 : 0) + (has('engineering') ? 80 : 0),
     militaryCombatBonus: has('metallurgy') ? 4 : 0,
+    explorationRangeBonus:
+      (has('construction') ? 1 : 0) +
+      (has('trade') ? 1 : 0) +
+      (has('military') ? 1 : 0) +
+      (has('engineering') ? 1 : 0),
   };
 }
