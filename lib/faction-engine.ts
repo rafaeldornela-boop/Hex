@@ -7,6 +7,7 @@ import {
   createInitialResources,
   type KingdomResources,
 } from './economy-engine';
+import { MIN_KINGDOM_POPULATION } from './population-engine';
 import {
   DEFAULT_ROTATION_DEG,
   hasHexConstruction,
@@ -20,7 +21,11 @@ import {
   getStrategicRegionInfo,
   TERRAIN_METADATA,
 } from './terrain-engine';
-import { AXIAL_DIRECTIONS, calculateConquestCost } from './territory-engine';
+import {
+  AXIAL_DIRECTIONS,
+  computeHexInfluence,
+  computeTerritorialCapacity,
+} from './territory-engine';
 import {
   advanceResearchProgress,
   nextRecommendedTech,
@@ -46,6 +51,7 @@ export interface FactionState {
   cash: number;
   resources: KingdomResources;
   population: number;
+  foodDeficitTurns?: number;
   research: ResearchState;
   relation: FactionRelation;
   truceTurnsRemaining: number;
@@ -62,8 +68,9 @@ export function createInitialFactions(): FactionState[] {
       colorHex: '#dc2626',
       borderHexNum: 0xdc2626,
       cash: 750,
-      resources: { wood: 55, stone: 60, food: 50, ore: 40, science: 0 },
+      resources: { wood: 55, stone: 60, food: 50, ore: 40, metal: 8, science: 0 },
       population: 12,
+      foodDeficitTurns: 0,
       research: {
         unlocked: ['mining', 'military'],
         activeTechId: 'metallurgy',
@@ -81,8 +88,9 @@ export function createInitialFactions(): FactionState[] {
       colorHex: '#2563eb',
       borderHexNum: 0x2563eb,
       cash: 850,
-      resources: { wood: 60, stone: 45, food: 65, ore: 20, science: 0 },
+      resources: { wood: 60, stone: 45, food: 65, ore: 20, metal: 6, science: 0 },
       population: 14,
+      foodDeficitTurns: 0,
       research: {
         unlocked: ['agriculture', 'trade'],
         activeTechId: 'construction',
@@ -129,6 +137,7 @@ export function normalizeFactionState(raw: Partial<FactionState>, idx: number): 
             stone: Number(raw.resources.stone ?? fallback.resources.stone),
             food: Number(raw.resources.food ?? fallback.resources.food),
             ore: Number(raw.resources.ore ?? fallback.resources.ore),
+            metal: Number(raw.resources.metal ?? fallback.resources.metal),
             science: Number(raw.resources.science ?? 0),
           }
         : createInitialResources(),
@@ -136,6 +145,10 @@ export function normalizeFactionState(raw: Partial<FactionState>, idx: number): 
       typeof raw.population === 'number' && raw.population >= 4
         ? Math.round(raw.population)
         : fallback.population,
+    foodDeficitTurns:
+      typeof raw.foodDeficitTurns === 'number' && raw.foodDeficitTurns >= 0
+        ? Math.round(raw.foodDeficitTurns)
+        : 0,
     research,
     relation: raw.relation ?? fallback.relation,
     truceTurnsRemaining:
@@ -269,15 +282,21 @@ function chooseAiBuildingForTile(
   }
 
   if (terrainType === 'forest') return 'dirt-lumber';
-  if (terrainType === 'mountain') return hasTech('mining') ? 'building-mine' : 'building-smelter';
+  if (terrainType === 'mountain') {
+    if (hasTech('mining')) return 'building-mine';
+    return hasTech('metallurgy') && faction.resources.ore >= 10 ? 'building-smelter' : null;
+  }
   if (terrainType === 'fertile') {
-    return faction.personality === 'mercantile' ? 'building-farm' : 'building-farm';
+    return 'building-farm';
   }
   if (terrainType === 'water') {
     return hasTech('trade') ? 'building-port' : 'building-dock';
   }
 
   // Plains strategic choice by personality
+  if (hasTech('metallurgy') && faction.resources.ore >= 12 && availableWorkers >= 2) {
+    return 'building-smelter';
+  }
   if (faction.personality === 'expansionist') {
     if (hasTech('military')) return 'building-tower';
     return 'building-wizard-tower';
@@ -344,6 +363,7 @@ export function advanceFactionsTurn(params: {
       assets: params.assets,
       owner: faction.id,
       tradePactGoldBonus: updatedRelation === 'trade_pact' ? 20 : 0,
+      foodDeficitTurns: faction.foodDeficitTurns ?? 0,
     });
 
     let cash = Math.max(0, faction.cash + Math.max(25, econ.goldNet + 25));
@@ -352,11 +372,12 @@ export function advanceFactionsTurn(params: {
       stone: Math.min(econ.storageCaps.stone, Math.max(0, faction.resources.stone + econ.stoneNet)),
       food: Math.min(econ.storageCaps.food, Math.max(0, faction.resources.food + econ.foodNet)),
       ore: Math.min(econ.storageCaps.ore, Math.max(0, faction.resources.ore + econ.oreNet)),
+      metal: Math.min(econ.storageCaps.metal, Math.max(0, faction.resources.metal + econ.metalNet)),
       science: faction.resources.science + econ.scienceNet,
     };
-    const nextPop = Math.min(
-      econ.population.capacity,
-      faction.population + econ.population.projectedGrowth
+    const nextPop = Math.max(
+      MIN_KINGDOM_POPULATION,
+      Math.min(econ.population.capacity, faction.population + econ.population.projectedGrowth)
     );
 
     // 2. Research progression
@@ -376,8 +397,22 @@ export function advanceFactionsTurn(params: {
       };
     }
 
-    // 3. Strategic neutral expansion every 2 turns (soft cap 12 tiles)
-    if (params.turn % 2 === 0 && ownedTiles.length < 12 && cash >= 450) {
+    // 3. Strategic neutral expansion every 2 turns governed by territorial capacity, reach & free workers (no gold purchase)
+    const factionCap = computeTerritorialCapacity({
+      worldState: nextWorld,
+      population: faction.population,
+      unlockedTechs: nextResearch.unlocked,
+      assets: params.assets,
+      owner: faction.id,
+      underConstructionKeys: params.underConstructionKeys,
+      playerCapital: faction.capitalCoord,
+    });
+
+    if (
+      params.turn % 2 === 0 &&
+      factionCap.remaining > 0 &&
+      econ.population.availableWorkers >= 1
+    ) {
       const candidates: Array<{ coord: AxialCoord; score: number }> = [];
       const boundedWorld = typeof nextWorld.worldCols === 'number';
       for (const tile of ownedTiles) {
@@ -387,8 +422,23 @@ export function advanceFactionsTurn(params: {
           const existing = nextWorld.hexes[hexKey(nq, nr)];
           if (boundedWorld && !existing) continue;
           if (!existing || !existing.owner || existing.owner === 'neutral') {
+            const inf = computeHexInfluence({
+              worldState: nextWorld,
+              q: nq,
+              r: nr,
+              population: faction.population,
+              unlockedTechs: nextResearch.unlocked,
+              assets: params.assets,
+              owner: faction.id,
+              underConstructionKeys: params.underConstructionKeys,
+              anchorCoords: factionCap.anchorCoords,
+              maxAnchorReach: factionCap.maxAnchorReach,
+              playerCapital: faction.capitalCoord,
+            });
+            if (!inf.withinReach) continue;
+
             const strategic = getStrategicRegionInfo(nq, nr, existing);
-            let score = strategic.rareFeature !== 'none' ? 15 : 4;
+            let score = (strategic.rareFeature !== 'none' ? 15 : 4) + inf.score;
             if (faction.personality === 'expansionist' && playerGrowing && playerTiles.length > 0) {
               const nearestPlayer = Math.min(
                 ...playerTiles.map((pt) => hexDistance({ q: nq, r: nr }, pt))
@@ -405,45 +455,41 @@ export function advanceFactionsTurn(params: {
         const pick = candidates[0].coord;
         const key = hexKey(pick.q, pick.r);
         const existing = nextWorld.hexes[key];
-        const cost = calculateConquestCost(pick, existing, params.assets);
-        if (cash >= cost) {
-          cash -= cost;
-          const terrainInfo = getHexTerrainAndResource(pick.q, pick.r, existing);
-          const defaultName = TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
-          const defaultIdx = Math.max(
-            0,
-            params.assets.findIndex((a) => a.name === defaultName)
-          );
-          nextWorld = {
-            ...nextWorld,
-            hexes: {
-              ...nextWorld.hexes,
-              [key]: existing
-                ? {
-                    ...existing,
-                    owner: faction.id,
-                    terrainType: terrainInfo.terrainType,
-                    resourceType: terrainInfo.resourceType,
-                    resourceAmount: terrainInfo.resourceAmount,
-                  }
-                : {
-                    q: pick.q,
-                    r: pick.r,
-                    orientation: DEFAULT_ROTATION_DEG,
-                    structureIndex: defaultIdx,
-                    owner: faction.id,
-                    terrainType: terrainInfo.terrainType,
-                    resourceType: terrainInfo.resourceType,
-                    resourceAmount: terrainInfo.resourceAmount,
-                  },
-            },
-          };
-          conqueredKeys.push(key);
-          newsPt =
-            faction.personality === 'expansionist' && playerGrowing
-              ? `${faction.namePt} expandiu na direção das suas fronteiras.`
-              : `${faction.namePt} expandiu seu território.`;
-        }
+        const terrainInfo = getHexTerrainAndResource(pick.q, pick.r, existing);
+        const defaultName = TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
+        const defaultIdx = Math.max(
+          0,
+          params.assets.findIndex((a) => a.name === defaultName)
+        );
+        nextWorld = {
+          ...nextWorld,
+          hexes: {
+            ...nextWorld.hexes,
+            [key]: existing
+              ? {
+                  ...existing,
+                  owner: faction.id,
+                  terrainType: terrainInfo.terrainType,
+                  resourceType: terrainInfo.resourceType,
+                  resourceAmount: terrainInfo.resourceAmount,
+                }
+              : {
+                  q: pick.q,
+                  r: pick.r,
+                  orientation: DEFAULT_ROTATION_DEG,
+                  structureIndex: defaultIdx,
+                  owner: faction.id,
+                  terrainType: terrainInfo.terrainType,
+                  resourceType: terrainInfo.resourceType,
+                  resourceAmount: terrainInfo.resourceAmount,
+                },
+          },
+        };
+        conqueredKeys.push(key);
+        newsPt =
+          faction.personality === 'expansionist' && playerGrowing
+            ? `${faction.namePt} expandiu na direção das suas fronteiras.`
+            : `${faction.namePt} expandiu seu território.`;
       }
     }
 
@@ -473,6 +519,7 @@ export function advanceFactionsTurn(params: {
             resources.stone -= cost.stone;
             resources.food -= cost.food;
             resources.ore -= cost.ore;
+            resources.metal -= cost.metal;
             nextWorld = {
               ...nextWorld,
               hexes: {
@@ -510,11 +557,17 @@ export function advanceFactionsTurn(params: {
         (t) => t.owner === faction.id && !getUnitAt(nextUnits, t.q, t.r)
       );
 
-      if (spawnTile && cash >= uDef.cost.gold && nextPop - econ.population.usedWorkers >= uDef.populationCost) {
+      if (
+        spawnTile &&
+        cash >= uDef.cost.gold &&
+        resources.metal >= uDef.cost.metal &&
+        nextPop - econ.population.usedWorkers >= uDef.populationCost
+      ) {
         cash -= uDef.cost.gold;
         resources.wood = Math.max(0, resources.wood - uDef.cost.wood);
         resources.food = Math.max(0, resources.food - uDef.cost.food);
         resources.ore = Math.max(0, resources.ore - uDef.cost.ore);
+        resources.metal = Math.max(0, resources.metal - uDef.cost.metal);
         nextUnits = [
           ...nextUnits,
           {
@@ -633,6 +686,7 @@ export function advanceFactionsTurn(params: {
       cash,
       resources,
       population: nextPop,
+      foodDeficitTurns: econ.foodDeficitTurnsNext,
       research: nextResearch,
       unlockedTechs: nextResearch.unlocked,
       relation: updatedRelation,

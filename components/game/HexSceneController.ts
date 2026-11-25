@@ -27,8 +27,6 @@ import {
 } from '@/lib/touch-gestures';
 import {
   AXIAL_DIRECTIONS,
-  evaluateConquest,
-  getConquerableFrontierCoords,
   type HexOwner,
 } from '@/lib/territory-engine';
 import {
@@ -315,16 +313,26 @@ function buildTerritoryPerimeterGeometry(
   return geo;
 }
 
-function buildConquerableFrontierGeometry(state: HexWorldState): THREE.BufferGeometry {
+function buildCoordRingOverlayGeometry(
+  state: HexWorldState,
+  keys: Iterable<string>,
+  outerR: number,
+  innerR: number,
+  tileYOffset: number,
+  emptyY: number
+): THREE.BufferGeometry {
   const positions: number[] = [];
-  const frontier = getConquerableFrontierCoords(state);
-  const outerR = HEX_OUTER_RADIUS * 0.965;
-  const innerR = HEX_OUTER_RADIUS * 0.885;
 
-  for (const coord of frontier) {
-    const center = axialToWorld(coord.q, coord.r);
-    const hasTile = Boolean(state.hexes[hexKey(coord.q, coord.r)]);
-    const y = hasTile ? TILE_SURFACE_Y + 0.012 : 0.036;
+  for (const key of keys) {
+    const parts = key.split(',');
+    if (parts.length !== 2) continue;
+    const q = Number(parts[0]);
+    const r = Number(parts[1]);
+    if (!Number.isFinite(q) || !Number.isFinite(r)) continue;
+
+    const center = axialToWorld(q, r);
+    const hasTile = Boolean(state.hexes[key]);
+    const y = hasTile ? TILE_SURFACE_Y + tileYOffset : emptyY;
     for (let edge = 0; edge < 6; edge++) {
       appendHexEdgeQuad(positions, center.x, center.z, y, edge, outerR, innerR);
     }
@@ -457,15 +465,25 @@ export class HexSceneController {
     }
   >();
 
-  // Territorial borders & conquerable frontier overlays
+  // Territorial borders, influence aura & active/expandable frontier overlays
   private territoryTrimMesh: THREE.Mesh;
   private territoryBorderMesh: THREE.Mesh;
   private ironClanBorderMesh: THREE.Mesh;
   private azureLeagueBorderMesh: THREE.Mesh;
   private frontierOverlayMesh: THREE.Mesh;
   private frontierOverlayMat: THREE.MeshBasicMaterial;
+  private expandingOverlayMesh: THREE.Mesh;
+  private expandingOverlayMat: THREE.MeshBasicMaterial;
+  private influenceOverlayMesh: THREE.Mesh;
+  private influenceOverlayMat: THREE.MeshBasicMaterial;
+  private expandableKeys = new Set<string>();
+  private expandingKeys = new Set<string>();
+  private influenceKeys = new Set<string>();
+  private lastExpansionSignature = '';
   private fertileOverlayMesh: THREE.Mesh;
   private underConstructionOverlayMesh: THREE.Mesh;
+  private attentionOverlayMesh: THREE.Mesh;
+  private lastAttentionSignature = '';
   private rareMarkersGroup = new THREE.Group();
   private unitsGroup = new THREE.Group();
   private unitTargetOverlayMesh: THREE.Mesh;
@@ -694,6 +712,23 @@ export class HexSceneController {
     this.azureLeagueBorderMesh.frustumCulled = false;
     this.scene.add(this.azureLeagueBorderMesh);
 
+    this.influenceOverlayMat = new THREE.MeshBasicMaterial({
+      color: 0x2dd4bf,
+      transparent: true,
+      opacity: 0.22,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    this.influenceOverlayMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      this.influenceOverlayMat
+    );
+    this.influenceOverlayMesh.frustumCulled = false;
+    this.scene.add(this.influenceOverlayMesh);
+
     this.frontierOverlayMat = new THREE.MeshBasicMaterial({
       color: 0xf59e0b,
       transparent: true,
@@ -710,6 +745,23 @@ export class HexSceneController {
     );
     this.frontierOverlayMesh.frustumCulled = false;
     this.scene.add(this.frontierOverlayMesh);
+
+    this.expandingOverlayMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.72,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    this.expandingOverlayMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      this.expandingOverlayMat
+    );
+    this.expandingOverlayMesh.frustumCulled = false;
+    this.scene.add(this.expandingOverlayMesh);
 
     const fertileMat = new THREE.MeshBasicMaterial({
       color: 0x4d7c0f,
@@ -744,6 +796,23 @@ export class HexSceneController {
     );
     this.underConstructionOverlayMesh.frustumCulled = false;
     this.scene.add(this.underConstructionOverlayMesh);
+
+    const attentionMat = new THREE.MeshBasicMaterial({
+      color: 0xe11d48,
+      transparent: true,
+      opacity: 0.72,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    this.attentionOverlayMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      attentionMat
+    );
+    this.attentionOverlayMesh.frustumCulled = false;
+    this.scene.add(this.attentionOverlayMesh);
 
     const unitTargetMat = new THREE.MeshBasicMaterial({
       color: 0x10b981,
@@ -1241,21 +1310,24 @@ export class HexSceneController {
         this.selectorRingMat.color.setHex(0x64748b);
       }
     } else if (this.toolMode === 'expand') {
-      const check = evaluateConquest(
-        this.currentWorldState,
-        activeCoord.q,
-        activeCoord.r
-      );
-      if (check.owner === 'player') {
+      const targetKey = hexKey(activeCoord.q, activeCoord.r);
+      const existing = this.currentWorldState.hexes[targetKey];
+      const owner: HexOwner =
+        typeof existing?.owner === 'string' && existing.owner.trim().length > 0
+          ? existing.owner.trim()
+          : 'neutral';
+      if (owner === 'player') {
         this.selectorRingMat.color.setHex(0x10b981); // emerald: already owned
-      } else if (check.owner !== 'neutral') {
+      } else if (owner !== 'neutral') {
         this.selectorRingMat.color.setHex(0xdc2626); // rival faction tile
-      } else if (check.canConquer) {
-        this.selectorRingMat.color.setHex(0xf59e0b); // bright gold: conquerable!
-      } else if (check.reason === 'insufficient_funds') {
-        this.selectorRingMat.color.setHex(0xea580c); // warm orange: adjacent but lacks cash
+      } else if (this.expandingKeys.has(targetKey)) {
+        this.selectorRingMat.color.setHex(0x38bdf8); // sky blue: incorporation in progress
+      } else if (this.expandableKeys.has(targetKey)) {
+        this.selectorRingMat.color.setHex(0xf59e0b); // bright gold: ready to incorporate
+      } else if (this.influenceKeys.has(targetKey)) {
+        this.selectorRingMat.color.setHex(0xea580c); // warm amber: in influence sphere, needs requirement
       } else {
-        this.selectorRingMat.color.setHex(0x64748b); // muted slate: distant neutral
+        this.selectorRingMat.color.setHex(0x64748b); // muted slate: outside frontier/reach
       }
     } else if (this.toolMode === 'demolish') {
       const existing = this.currentWorldState.hexes[hexKey(activeCoord.q, activeCoord.r)];
@@ -1487,12 +1559,110 @@ export class HexSceneController {
     oldGeo.dispose();
   }
 
+  public setAttentionKeys(keys: string[]) {
+    const sig = keys.join('|');
+    if (sig === this.lastAttentionSignature) return;
+    this.lastAttentionSignature = sig;
+    this.rebuildAttentionOverlay(this.currentWorldState, new Set(keys));
+    if (!this.disposed) {
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  private rebuildAttentionOverlay(
+    state: HexWorldState,
+    attentionKeys: Set<string>
+  ) {
+    const oldGeo = this.attentionOverlayMesh.geometry;
+    const positions: number[] = [];
+    const outerR = HEX_OUTER_RADIUS * 0.76;
+    const innerR = HEX_OUTER_RADIUS * 0.66;
+
+    for (const key of attentionKeys) {
+      const tile = state.hexes[key];
+      if (!tile) continue;
+      const center = axialToWorld(tile.q, tile.r);
+      for (let edge = 0; edge < 6; edge++) {
+        appendHexEdgeQuad(
+          positions,
+          center.x,
+          center.z,
+          TILE_SURFACE_Y + 0.023,
+          edge,
+          outerR,
+          innerR
+        );
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    this.attentionOverlayMesh.geometry = geo;
+    oldGeo.dispose();
+  }
+
+  public syncExpansionOverlay(params: {
+    expandableKeys: Set<string>;
+    expandingKeys: Set<string>;
+    influenceKeys: Set<string>;
+  }) {
+    const expArr = Array.from(params.expandableKeys).sort();
+    const actArr = Array.from(params.expandingKeys).sort();
+    const infArr = Array.from(params.influenceKeys).sort();
+    const sig = `${expArr.join(',')}|${actArr.join(',')}|${infArr.join(',')}`;
+    if (sig === this.lastExpansionSignature) return;
+    this.lastExpansionSignature = sig;
+
+    this.expandableKeys = new Set(params.expandableKeys);
+    this.expandingKeys = new Set(params.expandingKeys);
+    this.influenceKeys = new Set(params.influenceKeys);
+    this.rebuildExpansionOverlays(this.currentWorldState);
+    this.refreshSelectorAnchor();
+    if (!this.disposed) {
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  private rebuildExpansionOverlays(state: HexWorldState) {
+    const oldFrontier = this.frontierOverlayMesh.geometry;
+    const oldExpanding = this.expandingOverlayMesh.geometry;
+    const oldInfluence = this.influenceOverlayMesh.geometry;
+
+    this.influenceOverlayMesh.geometry = buildCoordRingOverlayGeometry(
+      state,
+      this.influenceKeys,
+      HEX_OUTER_RADIUS * 0.92,
+      HEX_OUTER_RADIUS * 0.87,
+      0.009,
+      0.032
+    );
+    this.frontierOverlayMesh.geometry = buildCoordRingOverlayGeometry(
+      state,
+      this.expandableKeys,
+      HEX_OUTER_RADIUS * 0.965,
+      HEX_OUTER_RADIUS * 0.885,
+      0.012,
+      0.036
+    );
+    this.expandingOverlayMesh.geometry = buildCoordRingOverlayGeometry(
+      state,
+      this.expandingKeys,
+      HEX_OUTER_RADIUS * 0.98,
+      HEX_OUTER_RADIUS * 0.84,
+      0.019,
+      0.042
+    );
+
+    oldFrontier.dispose();
+    oldExpanding.dispose();
+    oldInfluence.dispose();
+  }
+
   private rebuildTerritoryOverlays(state: HexWorldState) {
     const oldTrim = this.territoryTrimMesh.geometry;
     const oldBorder = this.territoryBorderMesh.geometry;
     const oldIronBorder = this.ironClanBorderMesh.geometry;
     const oldAzureBorder = this.azureLeagueBorderMesh.geometry;
-    const oldFrontier = this.frontierOverlayMesh.geometry;
     const oldFertile = this.fertileOverlayMesh.geometry;
 
     this.territoryTrimMesh.geometry = buildTerritoryPerimeterGeometry(
@@ -1523,14 +1693,13 @@ export class HexSceneController {
       TILE_SURFACE_Y + 0.018,
       'azure_league'
     );
-    this.frontierOverlayMesh.geometry = buildConquerableFrontierGeometry(state);
+    this.rebuildExpansionOverlays(state);
     this.fertileOverlayMesh.geometry = buildFertileFurrowsGeometry(state);
 
     oldTrim.dispose();
     oldBorder.dispose();
     oldIronBorder.dispose();
     oldAzureBorder.dispose();
-    oldFrontier.dispose();
     oldFertile.dispose();
     this.rebuildRareMarkers(state);
 
@@ -1814,7 +1983,8 @@ export class HexSceneController {
     nextState: HexWorldState,
     animateNewKeys?: string[],
     conqueredKeys?: string[],
-    underConstructionKeys?: Set<string>
+    underConstructionKeys?: Set<string>,
+    attentionKeys?: string[]
   ) {
     this.currentWorldState = nextState;
     const animSet = new Set(animateNewKeys ?? []);
@@ -1824,6 +1994,10 @@ export class HexSceneController {
     // Update territory border ribbon, construction overlay, and conquerable frontier immediately
     this.rebuildTerritoryOverlays(nextState);
     this.rebuildUnderConstructionOverlay(nextState, underSet);
+    if (attentionKeys) {
+      this.lastAttentionSignature = attentionKeys.join('|');
+      this.rebuildAttentionOverlay(nextState, new Set(attentionKeys));
+    }
     this.refreshSelectorAnchor();
 
     // Classify tiles into batched natural terrain vs. individual construction meshes
@@ -2192,10 +2366,14 @@ export class HexSceneController {
         TILE_SURFACE_Y + 0.04 + Math.sin(this.elapsedSec * 4) * 0.035;
     }
 
+    this.expandingOverlayMat.opacity = 0.56 + Math.sin(this.elapsedSec * 4.2) * 0.24;
+
     if (this.toolMode === 'expand') {
       this.frontierOverlayMat.opacity = 0.36 + Math.sin(this.elapsedSec * 2.6) * 0.12;
+      this.influenceOverlayMat.opacity = 0.24;
     } else {
       this.frontierOverlayMat.opacity = 0.2;
+      this.influenceOverlayMat.opacity = 0.12;
     }
 
     for (const child of this.rareMarkersGroup.children) {

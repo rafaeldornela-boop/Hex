@@ -7,7 +7,12 @@ import {
   type BuildingDefinition,
   type ResourceCost,
 } from './buildings-catalog';
-import { canAffordCost, computeEffectiveBuildCost, type TurnProductionBreakdown } from './economy-engine';
+import {
+  canAffordCost,
+  computeEffectiveBuildCost,
+  type KingdomResources,
+  type TurnProductionBreakdown,
+} from './economy-engine';
 import { hasHexConstruction, hexKey, type HexWorldState } from './hex-engine';
 import { TECH_BY_ID, type TechId } from './tech-engine';
 import {
@@ -22,11 +27,11 @@ import {
   ALREADY_OCCUPIED_BUILD_MESSAGE,
   NOT_OWNED_BUILD_MESSAGE,
 } from './territory-engine';
-import type { KingdomResources } from './economy-engine';
 
 export interface BuildRuleValidationResult {
   allowed: boolean;
   reasonPt: string | null;
+  workerWarningPt: string | null;
   definition: BuildingDefinition | null;
   effectiveCost: ResourceCost | null;
   terrain: TerrainDescriptor;
@@ -39,6 +44,7 @@ export interface ContextualBuildOption {
   effectiveCost: ResourceCost;
   affordable: boolean;
   missingLabelPt: string | null;
+  workerWarningPt: string | null;
 }
 
 export interface HexBuildEvaluation {
@@ -70,6 +76,8 @@ export function isBuildingAllowedOnTerrain(
 /**
  * Single source of truth used by both pure kingdom build validation (`buildInKingdom`)
  * and the 3D selector / contextual UI (`GameHud`).
+ * Buildings requiring more workers than currently available CAN still be queued
+ * (with a clear worker warning), so shortages naturally stall/throttle operation until Casas are built.
  */
 export function validateBuildCandidateOnHex(params: {
   worldState: HexWorldState;
@@ -106,6 +114,7 @@ export function validateBuildCandidateOnHex(params: {
     return {
       allowed: false,
       reasonPt: NATURAL_TERRAIN_BLOCKED_MESSAGE,
+      workerWarningPt: null,
       definition: null,
       effectiveCost: null,
       terrain,
@@ -116,6 +125,7 @@ export function validateBuildCandidateOnHex(params: {
     return {
       allowed: false,
       reasonPt: NOT_OWNED_BUILD_MESSAGE,
+      workerWarningPt: null,
       definition: null,
       effectiveCost: null,
       terrain,
@@ -126,6 +136,7 @@ export function validateBuildCandidateOnHex(params: {
     return {
       allowed: false,
       reasonPt: ALREADY_OCCUPIED_BUILD_MESSAGE,
+      workerWarningPt: null,
       definition: null,
       effectiveCost: null,
       terrain,
@@ -138,6 +149,7 @@ export function validateBuildCandidateOnHex(params: {
     return {
       allowed: false,
       reasonPt: `Requer pesquisa: ${techName}.`,
+      workerWarningPt: null,
       definition: bDef,
       effectiveCost: null,
       terrain,
@@ -148,21 +160,17 @@ export function validateBuildCandidateOnHex(params: {
     return {
       allowed: false,
       reasonPt: INCOMPATIBLE_TERRAIN_MESSAGE,
+      workerWarningPt: null,
       definition: bDef,
       effectiveCost: null,
       terrain,
     };
   }
 
-  if (bDef.workersRequired > 0 && availableWorkers < bDef.workersRequired) {
-    return {
-      allowed: false,
-      reasonPt: `Sem trabalhadores livres (precisa ${bDef.workersRequired}). Construa Casas.`,
-      definition: bDef,
-      effectiveCost: null,
-      terrain,
-    };
-  }
+  const workerWarningPt =
+    bDef.workersRequired > 0 && availableWorkers < bDef.workersRequired
+      ? `Faltam trabalhadores (${availableWorkers}/${bDef.workersRequired}): operará parcial ou parada até construir Casas.`
+      : null;
 
   const effectiveCost = computeEffectiveBuildCost(asset.name, unlockedTechs);
   if (checkAffordability) {
@@ -171,6 +179,7 @@ export function validateBuildCandidateOnHex(params: {
       return {
         allowed: false,
         reasonPt: afford.missingLabelPt ?? 'Recursos insuficientes.',
+        workerWarningPt,
         definition: bDef,
         effectiveCost,
         terrain,
@@ -181,6 +190,7 @@ export function validateBuildCandidateOnHex(params: {
   return {
     allowed: true,
     reasonPt: null,
+    workerWarningPt,
     definition: bDef,
     effectiveCost,
     terrain,
@@ -189,7 +199,7 @@ export function validateBuildCandidateOnHex(params: {
 
 /**
  * Evaluates "O que posso construir neste hex?" using the exact same rules as `buildInKingdom`.
- * Never returns natural terrains, incompatible buildings, or tech/worker-locked clutter.
+ * Shows worker-short options with an explicit warning so the player understands the causal loop.
  */
 export function evaluateHexBuildOptions(params: {
   worldState: HexWorldState;
@@ -240,7 +250,7 @@ export function evaluateHexBuildOptions(params: {
   assets.forEach((a, idx) => indexByName.set(a.name, idx));
 
   const options: ContextualBuildOption[] = [];
-  let hiddenByWorkers = 0;
+  let workerShortCount = 0;
 
   for (const assetName of STRATEGY_PALETTE_ORDER) {
     const assetIndex = indexByName.get(assetName);
@@ -251,9 +261,11 @@ export function evaluateHexBuildOptions(params: {
     if (!isBuildingAllowedOnTerrain(assetName, terrainInfo.terrainType)) continue;
     if (bDef.requiredTech && !unlockedTechs.includes(bDef.requiredTech)) continue;
 
-    if (bDef.workersRequired > 0 && economy.population.availableWorkers < bDef.workersRequired) {
-      hiddenByWorkers++;
-      continue;
+    const workerShort =
+      bDef.workersRequired > 0 &&
+      economy.population.availableWorkers < bDef.workersRequired;
+    if (workerShort) {
+      workerShortCount++;
     }
 
     const effectiveCost = computeEffectiveBuildCost(assetName, unlockedTechs);
@@ -266,6 +278,9 @@ export function evaluateHexBuildOptions(params: {
       effectiveCost,
       affordable: afford.affordable,
       missingLabelPt: afford.missingLabelPt,
+      workerWarningPt: workerShort
+        ? `Faltam trab. (${economy.population.availableWorkers}/${bDef.workersRequired})`
+        : null,
     });
   }
 
@@ -279,12 +294,10 @@ export function evaluateHexBuildOptions(params: {
   });
 
   let hintPt: string | null = null;
-  if (options.length === 0 && hiddenByWorkers > 0) {
-    hintPt = 'Sem trabalhadores livres para obras aqui. Construa Casas em planície ou floresta.';
-  } else if (options.length === 0) {
+  if (options.length === 0) {
     hintPt = 'Nenhuma estrutura compatível desbloqueada para este terreno.';
-  } else if (hiddenByWorkers > 0) {
-    hintPt = 'Construa Casas para liberar mais trabalhadores para obras avançadas.';
+  } else if (workerShortCount > 0) {
+    hintPt = 'Algumas obras precisam de mais moradores: construa Casas para operar a 100%.';
   }
 
   return {

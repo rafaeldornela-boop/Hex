@@ -10,20 +10,18 @@ import {
   type TurnProductionBreakdown,
 } from './economy-engine';
 import {
-  generateTurnEvent,
   type ActiveKingdomEvent,
   type ActiveWorldEffect,
   type EventHistoryEntry,
 } from './events-engine';
 import {
-  advanceFactionsTurn,
   createInitialFactions,
   getTradePactBonusGold,
   normalizeFactionState,
   type FactionState,
 } from './faction-engine';
+import { processKingdomTurn } from './turn-engine';
 import {
-  DEFAULT_ROTATION_DEG,
   createEmptyWorldState,
   demolishHexInState,
   deserializeWorldState,
@@ -50,7 +48,6 @@ import {
 import {
   advanceResearchProgress,
   createInitialResearchState,
-  getTechModifiers,
   selectActiveTech,
   TECH_BY_ID,
   type ResearchState,
@@ -60,16 +57,17 @@ import {
 import {
   INCOMPATIBLE_TERRAIN_MESSAGE,
   getHexTerrainAndResource,
-  getStrategicRegionInfo,
-  TERRAIN_METADATA,
 } from './terrain-engine';
 import {
   ALREADY_OCCUPIED_BUILD_MESSAGE,
   NOT_OWNED_BUILD_MESSAGE,
-  calculateConquestCost,
+  computeTerritorialCapacity,
   countPlayerTerritory,
-  getConquestFailureMessage,
-  isAdjacentToPlayerTerritory,
+  evaluateExpansion,
+  startExpansion,
+  type ActiveExpansion,
+  type ExpansionCheckResult,
+  type TerritorialCapacitySummary,
 } from './territory-engine';
 import {
   computeMarketSummary,
@@ -95,10 +93,12 @@ export interface KingdomState {
   worldState: HexWorldState;
   resources: KingdomResources;
   population: number;
+  foodDeficitTurns: number;
   research: ResearchState;
   units: UnitEntity[];
   factions: FactionState[];
   constructions: ActiveConstruction[];
+  expansions: ActiveExpansion[];
   activeEffects: ActiveWorldEffect[];
   activeEvent: ActiveKingdomEvent | null;
   eventHistory: EventHistoryEntry[];
@@ -117,6 +117,14 @@ export function getConstructionAt(
   return state.constructions.find((c) => c.q === q && c.r === r) ?? null;
 }
 
+export function getExpansionAt(
+  state: KingdomState,
+  q: number,
+  r: number
+): ActiveExpansion | null {
+  return (state.expansions ?? []).find((e) => e.q === q && e.r === r) ?? null;
+}
+
 export function createStarterKingdomState(
   assets: HexAssetEntry[],
   seed: number = DEFAULT_WORLD_SEED
@@ -130,10 +138,12 @@ export function createStarterKingdomState(
     worldState: generated.worldState,
     resources: createInitialResources(),
     population: 18,
+    foodDeficitTurns: 0,
     research: createInitialResearchState(),
     units: generated.units,
     factions: generated.factions,
     constructions: [],
+    expansions: [],
     activeEffects: [],
     activeEvent: null,
     eventHistory: [],
@@ -147,10 +157,12 @@ export function createSandboxKingdomState(): KingdomState {
     worldState: createEmptyWorldState(),
     resources: createInitialResources(),
     population: 8,
+    foodDeficitTurns: 0,
     research: createInitialResearchState(),
     units: [],
     factions: createInitialFactions(),
     constructions: [],
+    expansions: [],
     activeEffects: [],
     activeEvent: null,
     eventHistory: [],
@@ -164,6 +176,9 @@ export function getKingdomEconomy(
 ): TurnProductionBreakdown {
   const tradePactBonus = getTradePactBonusGold(state.factions);
   const underKeys = getUnderConstructionKeys(state);
+  const expansionWorkersUsed = (state.expansions ?? [])
+    .filter((e) => e.owner === 'player')
+    .reduce((sum, e) => sum + e.workersCommitted, 0);
   return computeTurnEconomyBreakdown({
     worldState: state.worldState,
     resources: state.resources,
@@ -173,10 +188,12 @@ export function getKingdomEconomy(
     assets,
     owner: 'player',
     underConstructionKeys: underKeys,
+    expansionWorkersUsed,
     activeEffects: state.activeEffects,
     tradePactGoldBonus: tradePactBonus,
     eventGoldMultiplier: state.activeEvent?.goldMultiplierMod ?? 1,
     eventFoodMultiplier: state.activeEvent?.foodMultiplierMod ?? 1,
+    foodDeficitTurns: state.foodDeficitTurns ?? 0,
   });
 }
 
@@ -224,18 +241,45 @@ export function getKingdomProgression(
   };
 }
 
-export function calculateStrategicConquestCost(
+export function getKingdomTerritoryCapacity(
+  state: KingdomState,
+  assets: HexAssetEntry[]
+): TerritorialCapacitySummary {
+  return computeTerritorialCapacity({
+    worldState: state.worldState,
+    population: state.population,
+    unlockedTechs: state.research.unlocked,
+    assets,
+    owner: 'player',
+    underConstructionKeys: getUnderConstructionKeys(state),
+    activeExpansions: state.expansions ?? [],
+    playerCapital: state.playerCapital,
+  });
+}
+
+export function evaluateExpansionInKingdom(
   state: KingdomState,
   q: number,
   r: number,
   assets: HexAssetEntry[]
-): number {
-  const existing = state.worldState.hexes[hexKey(q, r)];
-  const base = calculateConquestCost({ q, r }, existing, assets);
-  const strategic = getStrategicRegionInfo(q, r, existing);
-  const mods = getTechModifiers(state.research.unlocked);
-  return Math.round(base * strategic.conquestCostMultiplier * mods.expansionCostMultiplier);
+): ExpansionCheckResult {
+  const econ = getKingdomEconomy(state, assets);
+  return evaluateExpansion({
+    worldState: state.worldState,
+    q,
+    r,
+    population: state.population,
+    unlockedTechs: state.research.unlocked,
+    availableWorkers: econ.population.availableWorkers,
+    assets,
+    owner: 'player',
+    underConstructionKeys: getUnderConstructionKeys(state),
+    activeExpansions: state.expansions ?? [],
+    playerCapital: state.playerCapital,
+  });
 }
+
+export const canExpandInKingdom = evaluateExpansionInKingdom;
 
 export function tradeResourceInKingdom(
   state: KingdomState,
@@ -426,13 +470,18 @@ export function buildInKingdom(
         stone: state.resources.stone - cost.stone,
         food: state.resources.food - cost.food,
         ore: state.resources.ore - cost.ore,
+        metal: state.resources.metal - cost.metal,
       },
       constructions: [...state.constructions, newConstruction],
     },
     built: true,
-    messagePt: `${bDef.labelPt} em construção (${totalTurns} ${
-      totalTurns === 1 ? 'turno' : 'turnos'
-    })!`,
+    messagePt: validation.workerWarningPt
+      ? `${bDef.labelPt} em construção (${totalTurns} ${
+          totalTurns === 1 ? 'turno' : 'turnos'
+        }) · Faltam trabalhadores!`
+      : `${bDef.labelPt} em construção (${totalTurns} ${
+          totalTurns === 1 ? 'turno' : 'turnos'
+        })!`,
   };
 }
 
@@ -469,111 +518,52 @@ export function demolishInKingdom(
   };
 }
 
-export function conquerInKingdom(
+export function startExpansionInKingdom(
   state: KingdomState,
   q: number,
   r: number,
   assets: HexAssetEntry[]
 ): {
   nextState: KingdomState;
-  conquered: boolean;
-  cost: number;
-  messagePt: string | null;
+  started: boolean;
+  expansion: ActiveExpansion | null;
+  check: ExpansionCheckResult;
+  messagePt: string;
 } {
-  const key = hexKey(q, r);
-  const existing = state.worldState.hexes[key];
-  if (typeof state.worldState.worldCols === 'number' && !existing) {
+  const econ = getKingdomEconomy(state, assets);
+  const res = startExpansion({
+    worldState: state.worldState,
+    activeExpansions: state.expansions ?? [],
+    q,
+    r,
+    population: state.population,
+    unlockedTechs: state.research.unlocked,
+    availableWorkers: econ.population.availableWorkers,
+    assets,
+    owner: 'player',
+    underConstructionKeys: getUnderConstructionKeys(state),
+    playerCapital: state.playerCapital,
+  });
+
+  if (!res.started) {
     return {
       nextState: state,
-      conquered: false,
-      cost: 0,
-      messagePt: 'Fora dos limites deste mundo.',
+      started: false,
+      expansion: null,
+      check: res.check,
+      messagePt: res.messagePt,
     };
   }
-  const owner = existing?.owner ?? 'neutral';
-
-  if (owner === 'player') {
-    return {
-      nextState: state,
-      conquered: false,
-      cost: 0,
-      messagePt: getConquestFailureMessage('already_owned', 0),
-    };
-  }
-
-  if (owner !== 'neutral') {
-    return {
-      nextState: state,
-      conquered: false,
-      cost: 0,
-      messagePt: 'Território de outra facção! Use uma unidade militar para atacar.',
-    };
-  }
-
-  if (!isAdjacentToPlayerTerritory(state.worldState, q, r)) {
-    return {
-      nextState: state,
-      conquered: false,
-      cost: 0,
-      messagePt: getConquestFailureMessage('not_adjacent', 0),
-    };
-  }
-
-  const cost = calculateStrategicConquestCost(state, q, r, assets);
-  if (state.worldState.cash < cost) {
-    return {
-      nextState: state,
-      conquered: false,
-      cost,
-      messagePt: getConquestFailureMessage('insufficient_funds', cost),
-    };
-  }
-
-  const terrainInfo = getHexTerrainAndResource(q, r, existing);
-  const targetAssetName = TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
-  const terrainAssetIdx = Math.max(
-    0,
-    assets.findIndex((a) => a.name === targetAssetName)
-  );
-
-  const nextTile = existing
-    ? {
-        ...existing,
-        owner: 'player' as const,
-        terrainType: terrainInfo.terrainType,
-        resourceType: terrainInfo.resourceType,
-        resourceAmount: terrainInfo.resourceAmount,
-      }
-    : {
-        q,
-        r,
-        orientation: DEFAULT_ROTATION_DEG,
-        structureIndex: terrainAssetIdx,
-        owner: 'player' as const,
-        terrainType: terrainInfo.terrainType,
-        resourceType: terrainInfo.resourceType,
-        resourceAmount: terrainInfo.resourceAmount,
-      };
-
-  const strategic = getStrategicRegionInfo(q, r, existing);
 
   return {
     nextState: {
       ...state,
-      worldState: {
-        ...state.worldState,
-        cash: state.worldState.cash - cost,
-        hexes: {
-          ...state.worldState.hexes,
-          [key]: nextTile,
-        },
-      },
+      expansions: res.nextExpansions,
     },
-    conquered: true,
-    cost,
-    messagePt: strategic.labelPt
-      ? `Território conquistado: ${strategic.labelPt}!`
-      : 'Novo território conquistado!',
+    started: true,
+    expansion: res.expansion,
+    check: res.check,
+    messagePt: res.messagePt,
   };
 }
 
@@ -713,6 +703,7 @@ export function recruitUnitInKingdom(
         wood: state.resources.wood - uDef.cost.wood,
         food: state.resources.food - uDef.cost.food,
         ore: state.resources.ore - uDef.cost.ore,
+        metal: state.resources.metal - uDef.cost.metal,
       },
       units: [...state.units, newUnit],
     },
@@ -858,12 +849,17 @@ export function commandUnitInKingdom(
     f.id === targetOwner ? { ...f, relation: 'hostile' as const, truceTurnsRemaining: 0 } : f
   );
 
+  const nextExpansions = combat.capturedHex
+    ? (state.expansions ?? []).filter((e) => !(e.q === to.q && e.r === to.r))
+    : state.expansions ?? [];
+
   return {
     nextState: {
       ...state,
       worldState: nextWorld,
       units: nextUnits,
       factions: nextFactions,
+      expansions: nextExpansions,
     },
     acted: true,
     capturedKey: combat.capturedHex ? targetKey : undefined,
@@ -1176,6 +1172,7 @@ export function advanceKingdomTurn(
   nextState: KingdomState;
   completedTech: TechDefinition | null;
   completedBuildings: string[];
+  incorporatedKeys: string[];
   newEvent: ActiveKingdomEvent | null;
   conqueredByAiKeys: string[];
   headlinePt: string;
@@ -1187,120 +1184,12 @@ export function advanceKingdomTurn(
     working = resolveKingdomEvent(working, fallbackChoice.id, assets).nextState;
   }
 
-  const econ = getKingdomEconomy(working, assets);
-  const nextTurn = working.turn + 1;
-
-  const nextCash = Math.max(0, working.worldState.cash + econ.goldNet);
-  const nextResources: KingdomResources = {
-    wood: Math.min(econ.storageCaps.wood, Math.max(0, working.resources.wood + econ.woodNet)),
-    stone: Math.min(
-      econ.storageCaps.stone,
-      Math.max(0, working.resources.stone + econ.stoneNet)
-    ),
-    food: Math.min(econ.storageCaps.food, Math.max(0, working.resources.food + econ.foodNet)),
-    ore: Math.min(econ.storageCaps.ore, Math.max(0, working.resources.ore + econ.oreNet)),
-    science: working.resources.science + econ.scienceNet,
-  };
-
-  const nextPop = Math.min(
-    econ.population.capacity,
-    working.population + econ.population.projectedGrowth
-  );
-
-  // Progress active multi-turn constructions
-  const completedBuildings: string[] = [];
-  const nextConstructions: ActiveConstruction[] = [];
-  for (const c of working.constructions) {
-    const rem = c.turnsRemaining - 1;
-    if (rem <= 0) {
-      completedBuildings.push(getBuildingDefinition(c.assetName).labelPt);
-    } else {
-      nextConstructions.push({ ...c, turnsRemaining: rem });
-    }
-  }
-
-  // Decrement ongoing multi-turn world effects
-  const nextEffects: ActiveWorldEffect[] = working.activeEffects
-    .map((eff) => ({ ...eff, turnsRemaining: eff.turnsRemaining - 1 }))
-    .filter((eff) => eff.turnsRemaining > 0);
-
-  const researchStep = advanceResearchProgress(working.research, econ.scienceNet);
-
-  // Refresh player & AI unit movement + small garrison healing on owned tiles
-  const refreshedUnits = working.units.map((u) => {
-    const tile = working.worldState.hexes[hexKey(u.q, u.r)];
-    const onFriendly = tile?.owner === u.owner;
-    return {
-      ...u,
-      movedThisTurn: false,
-      hp: onFriendly ? Math.min(u.maxHp, u.hp + 3) : u.hp,
-    };
-  });
-
-  const underKeysAfterBuild = new Set(
-    nextConstructions.map((c) => hexKey(c.q, c.r))
-  );
-
-  const aiResult = advanceFactionsTurn({
-    worldState: { ...working.worldState, cash: nextCash },
-    factions: working.factions,
-    units: refreshedUnits,
-    assets,
-    turn: nextTurn,
-    underConstructionKeys: underKeysAfterBuild,
-  });
-
-  const playerBorderHex = Object.values(aiResult.worldState.hexes).find(
-    (t) => t.owner === 'player'
-  );
-  const newEvent = generateTurnEvent(
-    nextTurn,
-    playerBorderHex ? { q: playerBorderHex.q, r: playerBorderHex.r } : undefined
-  );
-
-  const summaryParts: string[] = [
-    `Turno ${nextTurn}`,
-    `${econ.goldNet >= 0 ? '+' : ''}$${econ.goldNet}`,
-  ];
-  if (completedBuildings.length > 0) {
-    summaryParts.push(`Pronto: ${completedBuildings.join(', ')}`);
-  }
-  if (researchStep.completedTech) {
-    summaryParts.push(`Pesquisa: ${researchStep.completedTech.namePt}`);
-  } else if (newEvent) {
-    summaryParts.push(`Evento: ${newEvent.titlePt}`);
-  } else if (aiResult.newsPt) {
-    summaryParts.push(aiResult.newsPt);
-  }
-
-    return {
-      nextState: {
-        turn: nextTurn,
-        worldSeed: working.worldSeed ?? working.worldState.seed,
-        playerCapital: working.playerCapital,
-        worldState: aiResult.worldState,
-        resources: nextResources,
-        population: nextPop,
-        research: researchStep.nextResearch,
-        units: aiResult.units,
-        factions: aiResult.factions,
-        constructions: nextConstructions,
-        activeEffects: nextEffects,
-        activeEvent: newEvent,
-        eventHistory: working.eventHistory,
-        lastTurnSummaryPt: summaryParts.join(' · '),
-      },
-      completedTech: researchStep.completedTech,
-      completedBuildings,
-      newEvent,
-      conqueredByAiKeys: aiResult.conqueredKeys,
-      headlinePt: summaryParts.join(' · '),
-    };
+  return processKingdomTurn(working, assets);
 }
 
 export function serializeKingdomState(state: KingdomState): string {
   return JSON.stringify({
-    version: 4,
+    version: 6,
     turn: state.turn,
     worldSeed: state.worldSeed ?? state.worldState.seed,
     playerCapital: state.playerCapital,
@@ -1311,10 +1200,12 @@ export function serializeKingdomState(state: KingdomState): string {
     structures: Object.values(state.worldState.hexes),
     resources: state.resources,
     population: state.population,
+    foodDeficitTurns: state.foodDeficitTurns,
     research: state.research,
     units: state.units,
     factions: state.factions,
     constructions: state.constructions,
+    expansions: state.expansions ?? [],
     activeEffects: state.activeEffects,
     activeEvent: state.activeEvent,
     eventHistory: state.eventHistory,
@@ -1341,6 +1232,7 @@ export function deserializeKingdomState(
             stone: Number(parsed.resources.stone ?? defaults.stone),
             food: Number(parsed.resources.food ?? defaults.food),
             ore: Number(parsed.resources.ore ?? defaults.ore),
+            metal: Number(parsed.resources.metal ?? defaults.metal),
             science: Number(parsed.resources.science ?? defaults.science),
           }
         : defaults;
@@ -1359,6 +1251,32 @@ export function deserializeKingdomState(
             typeof c.turnsRemaining === 'number' &&
             c.turnsRemaining > 0
         )
+      : [];
+
+    const expansions: ActiveExpansion[] = Array.isArray(parsed.expansions)
+      ? parsed.expansions
+          .filter(
+            (e): e is ActiveExpansion =>
+              Boolean(e) &&
+              typeof e.q === 'number' &&
+              typeof e.r === 'number' &&
+              typeof e.turnsRemaining === 'number' &&
+              e.turnsRemaining > 0
+          )
+          .map((e) => ({
+            q: Math.round(e.q),
+            r: Math.round(e.r),
+            turnsRemaining: Math.max(1, Math.round(e.turnsRemaining)),
+            totalTurns:
+              typeof e.totalTurns === 'number' && e.totalTurns >= 1
+                ? Math.round(e.totalTurns)
+                : Math.max(1, Math.round(e.turnsRemaining)),
+            workersCommitted:
+              typeof e.workersCommitted === 'number' && e.workersCommitted >= 1
+                ? Math.round(e.workersCommitted)
+                : 1,
+            owner: typeof e.owner === 'string' && e.owner.trim() ? e.owner.trim() : 'player',
+          }))
       : [];
 
     const activeEffects: ActiveWorldEffect[] = Array.isArray(parsed.activeEffects)
@@ -1402,6 +1320,10 @@ export function deserializeKingdomState(
         typeof parsed.population === 'number' && parsed.population >= 1
           ? Math.round(parsed.population)
           : 18,
+      foodDeficitTurns:
+        typeof parsed.foodDeficitTurns === 'number' && parsed.foodDeficitTurns >= 0
+          ? Math.round(parsed.foodDeficitTurns)
+          : 0,
       research:
         parsed.research && Array.isArray(parsed.research.unlocked)
           ? parsed.research
@@ -1409,6 +1331,7 @@ export function deserializeKingdomState(
       units: Array.isArray(parsed.units) ? parsed.units : [],
       factions,
       constructions,
+      expansions,
       activeEffects,
       activeEvent: parsed.activeEvent ?? null,
       eventHistory: Array.isArray(parsed.eventHistory) ? parsed.eventHistory : [],

@@ -205,9 +205,10 @@ test('buildInKingdom blocks natural terrain assets, enforces multi-turn queue, t
   assert.equal(doubleBuild.built, false);
   assert.match(doubleBuild.messagePt ?? '', /já possui uma construção/);
 
-  // Worker shortage check on the remaining free owned plains hex
+  // Worker shortage still allows queueing on the remaining free owned plains hex with a clear warning,
+  // and once completed it reports idle/partial until Casas restore workforce
   const starvedWorkers: typeof state = { ...state, population: 6 };
-  const noWorkerBuild = buildInKingdom(
+  const shortWorkerBuild = buildInKingdom(
     starvedWorkers,
     freeCoord.q,
     freeCoord.r,
@@ -215,8 +216,13 @@ test('buildInKingdom blocks natural terrain assets, enforces multi-turn queue, t
     90,
     HEX_ASSETS
   );
-  assert.equal(noWorkerBuild.built, false);
-  assert.match(noWorkerBuild.messagePt ?? '', /Sem trabalhadores livres/);
+  assert.equal(shortWorkerBuild.built, true);
+  assert.match(shortWorkerBuild.messagePt ?? '', /Faltam trabalhadores/);
+  const econShort = getKingdomEconomy(shortWorkerBuild.nextState, HEX_ASSETS);
+  assert.equal(
+    econShort.buildingsByKey[hexKey(freeCoord.q, freeCoord.r)]?.status,
+    'under_construction'
+  );
 
   // Advance 2 turns -> Serraria completes and increases wood production!
   const t2 = advanceKingdomTurn(state, HEX_ASSETS);
@@ -283,9 +289,9 @@ test('research progression, multi-turn event effects, trade market, and rival AI
     countFactionTerritory(state.worldState, 'azure_league');
   assert.ok(totalAiTiles >= 10, 'AI factions should expand strategically');
 
-  // Test dynamic Trade Market buy & sell
+  // Test dynamic Trade Market buy & sell (including Metal)
   const market = getKingdomMarket(state, HEX_ASSETS);
-  assert.equal(market.quotes.length, 4);
+  assert.equal(market.quotes.length, 5);
   const cashBeforeTrade = state.worldState.cash;
   const oreBeforeTrade = state.resources.ore;
   const bought = tradeResourceInKingdom(state, 'ore', 'buy', 10, HEX_ASSETS);

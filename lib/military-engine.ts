@@ -20,6 +20,7 @@ export interface UnitDefinition {
     wood: number;
     food: number;
     ore: number;
+    metal: number;
   };
   requiredTech: TechId | null;
   navalOnly: boolean;
@@ -45,7 +46,7 @@ export const UNIT_CATALOG: Record<UnitType, UnitDefinition> = {
     maxHp: 20,
     maintenanceGold: 3,
     populationCost: 1,
-    cost: { gold: 80, wood: 5, food: 15, ore: 10 },
+    cost: { gold: 80, wood: 5, food: 15, ore: 10, metal: 0 },
     requiredTech: 'military',
     navalOnly: false,
   },
@@ -57,7 +58,7 @@ export const UNIT_CATALOG: Record<UnitType, UnitDefinition> = {
     maxHp: 16,
     maintenanceGold: 4,
     populationCost: 1,
-    cost: { gold: 100, wood: 20, food: 10, ore: 5 },
+    cost: { gold: 100, wood: 20, food: 10, ore: 5, metal: 0 },
     requiredTech: 'military',
     navalOnly: false,
   },
@@ -69,7 +70,7 @@ export const UNIT_CATALOG: Record<UnitType, UnitDefinition> = {
     maxHp: 28,
     maintenanceGold: 7,
     populationCost: 2,
-    cost: { gold: 180, wood: 10, food: 25, ore: 25 },
+    cost: { gold: 180, wood: 10, food: 25, ore: 12, metal: 3 },
     requiredTech: 'metallurgy',
     navalOnly: false,
   },
@@ -81,7 +82,7 @@ export const UNIT_CATALOG: Record<UnitType, UnitDefinition> = {
     maxHp: 26,
     maintenanceGold: 6,
     populationCost: 2,
-    cost: { gold: 160, wood: 35, food: 10, ore: 15 },
+    cost: { gold: 160, wood: 35, food: 10, ore: 15, metal: 0 },
     requiredTech: 'trade',
     navalOnly: true,
   },

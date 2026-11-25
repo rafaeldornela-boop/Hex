@@ -12,8 +12,9 @@ import { HEX_ASSETS } from '@/lib/repo-data';
 import {
   AXIAL_DIRECTIONS,
   countPlayerTerritory,
-  evaluateConquest,
+  getExpandableFrontierCoords,
   getHexOwner,
+  getInfluenceCoverageCoords,
 } from '@/lib/territory-engine';
 import {
   describeTerrain,
@@ -39,23 +40,25 @@ import type { TradableResource } from '@/lib/trade-engine';
 import {
   advanceKingdomTurn,
   buildInKingdom,
-  calculateStrategicConquestCost,
   commandUnitInKingdom,
-  conquerInKingdom,
   createSandboxKingdomState,
   createStarterKingdomState,
   demolishInKingdom,
   deserializeKingdomState,
+  evaluateExpansionInKingdom,
   getConstructionAt,
+  getExpansionAt,
   getKingdomEconomy,
   getKingdomMarket,
   getKingdomProgression,
+  getKingdomTerritoryCapacity,
   getUnderConstructionKeys,
   performDiplomacyAction,
   recruitUnitInKingdom,
   resolveKingdomEvent,
   serializeKingdomState,
   setActiveResearchInKingdom,
+  startExpansionInKingdom,
   tradeResourceInKingdom,
   type KingdomState,
 } from '@/lib/kingdom-engine';
@@ -284,27 +287,25 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     [showToast]
   );
 
-  const handleConquerAt = useCallback(
+  const handleStartExpansionAt = useCallback(
     (q: number, r: number) => {
-      const res = conquerInKingdom(kingdomStateRef.current, q, r, HEX_ASSETS);
-      if (!res.conquered) {
+      const res = startExpansionInKingdom(
+        kingdomStateRef.current,
+        q,
+        r,
+        HEX_ASSETS
+      );
+      if (!res.started) {
         gameAudio.playError();
-        if (res.messagePt) showToast(res.messagePt);
+        showToast(res.messagePt);
         return;
       }
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
-      setSelectedHexSynced(null);
       gameAudio.playConquest();
-      controllerRef.current?.syncWorldState(
-        res.nextState.worldState,
-        undefined,
-        [hexKey(q, r)],
-        getUnderConstructionKeys(res.nextState)
-      );
-      if (res.messagePt) showToast(res.messagePt);
+      showToast(res.messagePt);
     },
-    [setSelectedHexSynced, showToast]
+    [showToast]
   );
 
   const handleSelectHexAt = useCallback(
@@ -390,14 +391,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     const coord = selectedHexRef.current;
     if (!coord) return;
     if (toolModeRef.current === 'expand') {
-      handleConquerAt(coord.q, coord.r);
+      handleStartExpansionAt(coord.q, coord.r);
     } else if (toolModeRef.current === 'demolish') {
       handleDemolishAt(coord.q, coord.r);
       setSelectedHexSynced(null);
     } else if (toolModeRef.current === 'build') {
       handlePlaceAt(coord.q, coord.r);
     }
-  }, [handleConquerAt, handleDemolishAt, handlePlaceAt, setSelectedHexSynced]);
+  }, [handleStartExpansionAt, handleDemolishAt, handlePlaceAt, setSelectedHexSynced]);
 
   const handleDemolishSelectedHex = useCallback(() => {
     const coord = selectedHexRef.current;
@@ -545,13 +546,19 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     } else {
       syncSceneUnits(res.nextState, null);
     }
+    const waveKeys = [...res.incorporatedKeys, ...res.conqueredByAiKeys];
     controllerRef.current?.syncWorldState(
       res.nextState.worldState,
       undefined,
-      res.conqueredByAiKeys.length > 0 ? res.conqueredByAiKeys : undefined,
+      waveKeys.length > 0 ? waveKeys : undefined,
       getUnderConstructionKeys(res.nextState)
     );
-    if (res.completedTech || res.newEvent || res.completedBuildings.length > 0) {
+    if (
+      res.completedTech ||
+      res.newEvent ||
+      res.completedBuildings.length > 0 ||
+      res.incorporatedKeys.length > 0
+    ) {
       gameAudio.playConquest();
     } else {
       gameAudio.playSaveChime();
@@ -1010,6 +1017,57 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     [kingdomState]
   );
 
+  const territorySummary = useMemo(
+    () => getKingdomTerritoryCapacity(kingdomState, HEX_ASSETS),
+    [kingdomState]
+  );
+
+  const expansionOverlayData = useMemo(() => {
+    const underKeys = getUnderConstructionKeys(kingdomState);
+    const activeExp = kingdomState.expansions ?? [];
+    const expandable = getExpandableFrontierCoords({
+      worldState,
+      activeExpansions: activeExp,
+      population: kingdomState.population,
+      unlockedTechs: kingdomState.research.unlocked,
+      availableWorkers: economy.population.availableWorkers,
+      assets: HEX_ASSETS,
+      owner: 'player',
+      underConstructionKeys: underKeys,
+      playerCapital: kingdomState.playerCapital,
+    });
+    const expandableKeys = new Set(expandable.map((c) => hexKey(c.q, c.r)));
+    const expandingKeys = new Set(
+      activeExp.filter((e) => e.owner === 'player').map((e) => hexKey(e.q, e.r))
+    );
+    const coverage = getInfluenceCoverageCoords({
+      worldState,
+      activeExpansions: activeExp,
+      population: kingdomState.population,
+      unlockedTechs: kingdomState.research.unlocked,
+      assets: HEX_ASSETS,
+      owner: 'player',
+      underConstructionKeys: underKeys,
+      playerCapital: kingdomState.playerCapital,
+    });
+    const influenceKeys = new Set<string>();
+    for (const c of coverage) {
+      const k = hexKey(c.q, c.r);
+      if (!expandableKeys.has(k) && !expandingKeys.has(k)) {
+        influenceKeys.add(k);
+      }
+    }
+    return { expandableKeys, expandingKeys, influenceKeys };
+  }, [economy.population.availableWorkers, kingdomState, worldState]);
+
+  useEffect(() => {
+    controllerRef.current?.setAttentionKeys(economy.attentionHexKeys);
+  }, [economy.attentionHexKeys]);
+
+  useEffect(() => {
+    controllerRef.current?.syncExpansionOverlay(expansionOverlayData);
+  }, [expansionOverlayData]);
+
   const progression = useMemo(
     () => getKingdomProgression(kingdomState, HEX_ASSETS),
     [kingdomState]
@@ -1040,31 +1098,25 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     return getConstructionAt(kingdomState, selectedHex.q, selectedHex.r);
   }, [kingdomState, selectedHex]);
 
+  const selectedHexActiveExpansion = useMemo(() => {
+    if (!selectedHex) return null;
+    return getExpansionAt(kingdomState, selectedHex.q, selectedHex.r);
+  }, [kingdomState, selectedHex]);
+
   const selectedHexOwned = useMemo(() => {
     if (!selectedHex) return true;
     return getHexOwner(worldState, selectedHex.q, selectedHex.r) === 'player';
   }, [selectedHex, worldState]);
 
-  const selectedConquest = useMemo(() => {
+  const selectedExpansion = useMemo(() => {
     if (!selectedHex) return null;
-    const base = evaluateConquest(worldState, selectedHex.q, selectedHex.r, HEX_ASSETS);
-    const strategicCost = calculateStrategicConquestCost(
+    return evaluateExpansionInKingdom(
       kingdomState,
       selectedHex.q,
       selectedHex.r,
       HEX_ASSETS
     );
-    const canAfford = worldState.cash >= strategicCost;
-    return {
-      ...base,
-      cost: strategicCost,
-      canConquer: base.owner === 'neutral' && base.isAdjacent && canAfford,
-      reason:
-        base.owner === 'neutral' && base.isAdjacent && !canAfford
-          ? ('insufficient_funds' as const)
-          : base.reason,
-    };
-  }, [kingdomState, selectedHex, worldState]);
+  }, [kingdomState, selectedHex]);
 
   const selectedTerrainInfo = useMemo(() => {
     if (!selectedHex) return null;
@@ -1085,11 +1137,20 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   }, [kingdomState.units, selectedHex]);
 
   const selectedHexFaction = useMemo(() => {
-    if (!selectedConquest || selectedConquest.owner === 'player' || selectedConquest.owner === 'neutral') {
+    if (
+      !selectedExpansion ||
+      selectedExpansion.owner === 'player' ||
+      selectedExpansion.owner === 'neutral'
+    ) {
       return null;
     }
-    return kingdomState.factions.find((f) => f.id === selectedConquest.owner) ?? null;
-  }, [kingdomState.factions, selectedConquest]);
+    return kingdomState.factions.find((f) => f.id === selectedExpansion.owner) ?? null;
+  }, [kingdomState.factions, selectedExpansion]);
+
+  const selectedBuildingReport = useMemo(() => {
+    if (!selectedHex) return null;
+    return economy.buildingsByKey[hexKey(selectedHex.q, selectedHex.r)] ?? null;
+  }, [economy.buildingsByKey, selectedHex]);
 
   const contextualBuild = useMemo<HexBuildEvaluation | null>(() => {
     if (!selectedHex) return null;
@@ -1162,6 +1223,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         worldSeed={kingdomState.worldSeed}
         cash={worldState.cash}
         territoryCount={territoryCount}
+        territorySummary={territorySummary}
         resources={kingdomState.resources}
         economy={economy}
         stage={progression.stage}
@@ -1176,12 +1238,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         selectedHexOwned={selectedHexOwned}
         selectedHexHasConstruction={selectedHexHasConstruction}
         selectedHexConstruction={selectedHexConstruction}
+        selectedHexActiveExpansion={selectedHexActiveExpansion}
         selectedTileAssetName={selectedTileAssetName}
-        selectedConquest={selectedConquest}
+        selectedExpansion={selectedExpansion}
         selectedTerrainInfo={selectedTerrainInfo}
         selectedStrategicInfo={selectedStrategicInfo}
         selectedHexUnit={selectedHexUnit}
         selectedHexFaction={selectedHexFaction}
+        selectedBuildingReport={selectedBuildingReport}
         contextualBuild={contextualBuild}
         canBuildActiveOnSelected={canBuildActiveOnSelected}
         activeBuildEffectiveCost={activeBuildEffectiveCost}
@@ -1226,6 +1290,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         initialTab={kingdomModalTab}
         kingdomState={kingdomState}
         economy={economy}
+        territorySummary={territorySummary}
         market={market}
         stage={progression.stage}
         militaryPower={progression.military}

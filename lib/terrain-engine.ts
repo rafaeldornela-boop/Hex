@@ -13,6 +13,7 @@ export interface TerrainResourceInfo {
 export interface TerrainDescriptor {
   type: TerrainType;
   labelPt: string;
+  potentialPt: string;
   resourceType: ResourceType;
   resourceLabelPt: string;
   resourceAmount: number;
@@ -35,6 +36,7 @@ export const TERRAIN_METADATA: Record<
 > = {
   plains: {
     labelPt: 'Planície',
+    potentialPt: 'Moradia, Comércio e Apoio',
     resourceType: 'none',
     resourceLabelPt: 'Nenhum',
     resourceAmount: 0,
@@ -42,6 +44,7 @@ export const TERRAIN_METADATA: Record<
   },
   forest: {
     labelPt: 'Floresta',
+    potentialPt: 'Madeira (Serraria)',
     resourceType: 'wood',
     resourceLabelPt: 'Madeira',
     resourceAmount: 10,
@@ -49,6 +52,7 @@ export const TERRAIN_METADATA: Record<
   },
   mountain: {
     labelPt: 'Montanha',
+    potentialPt: 'Minério e Pedra (Mina / Fundição)',
     resourceType: 'ore',
     resourceLabelPt: 'Minério',
     resourceAmount: 10,
@@ -56,6 +60,7 @@ export const TERRAIN_METADATA: Record<
   },
   fertile: {
     labelPt: 'Terra fértil',
+    potentialPt: 'Alimento (Fazenda / Moinho)',
     resourceType: 'food',
     resourceLabelPt: 'Alimento',
     resourceAmount: 10,
@@ -63,6 +68,7 @@ export const TERRAIN_METADATA: Record<
   },
   water: {
     labelPt: 'Água',
+    potentialPt: 'Pesca e Comércio (Doca / Porto)',
     resourceType: 'water',
     resourceLabelPt: 'Água / Pesca',
     resourceAmount: 10,
@@ -360,7 +366,8 @@ export interface StrategicRegionInfo {
   bonusOrePerTurn: number;
   bonusFoodPerTurn: number;
   defenseBonus: number;
-  conquestCostMultiplier: number;
+  expansionInfluenceMod: number;
+  expansionExtraTurns: number;
 }
 
 export function getTerrainDefenseBonus(terrainType: TerrainType): number {
@@ -409,7 +416,8 @@ export function getStrategicRegionInfo(
         bonusOrePerTurn: 0,
         bonusFoodPerTurn: 0,
         defenseBonus: baseDefense,
-        conquestCostMultiplier: 1,
+        expansionInfluenceMod: 0,
+        expansionExtraTurns: 0,
       };
     }
 
@@ -441,7 +449,8 @@ export function getStrategicRegionInfo(
         bonusOrePerTurn: 0,
         bonusFoodPerTurn: 0,
         defenseBonus: baseDefense,
-        conquestCostMultiplier: 1.35,
+        expansionInfluenceMod: 3,
+        expansionExtraTurns: 1,
       };
     case 'pure_iron':
       return {
@@ -452,7 +461,8 @@ export function getStrategicRegionInfo(
         bonusOrePerTurn: 4,
         bonusFoodPerTurn: 0,
         defenseBonus: baseDefense + 1,
-        conquestCostMultiplier: 1.25,
+        expansionInfluenceMod: 3,
+        expansionExtraTurns: 1,
       };
     case 'arcane_crystal':
       return {
@@ -463,7 +473,8 @@ export function getStrategicRegionInfo(
         bonusOrePerTurn: 0,
         bonusFoodPerTurn: 0,
         defenseBonus: baseDefense,
-        conquestCostMultiplier: 1.3,
+        expansionInfluenceMod: 3,
+        expansionExtraTurns: 1,
       };
     case 'rich_soil':
       return {
@@ -474,7 +485,8 @@ export function getStrategicRegionInfo(
         bonusOrePerTurn: 0,
         bonusFoodPerTurn: 4,
         defenseBonus: baseDefense,
-        conquestCostMultiplier: 1.15,
+        expansionInfluenceMod: 2,
+        expansionExtraTurns: 1,
       };
     case 'natural_harbor':
       return {
@@ -485,7 +497,8 @@ export function getStrategicRegionInfo(
         bonusOrePerTurn: 0,
         bonusFoodPerTurn: 2,
         defenseBonus: baseDefense,
-        conquestCostMultiplier: 1.2,
+        expansionInfluenceMod: 2,
+        expansionExtraTurns: 1,
       };
     default:
       return {
@@ -496,7 +509,8 @@ export function getStrategicRegionInfo(
         bonusOrePerTurn: 0,
         bonusFoodPerTurn: 0,
         defenseBonus: baseDefense,
-        conquestCostMultiplier: 1,
+        expansionInfluenceMod: 0,
+        expansionExtraTurns: 0,
       };
   }
 }

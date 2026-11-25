@@ -12,6 +12,7 @@ import {
   Crown,
   FastForward,
   Flag,
+  Flame,
   FlaskConical,
   FolderOpen,
   Hammer,
@@ -39,7 +40,12 @@ import {
 } from 'lucide-react';
 import type { HexAssetEntry } from '@/lib/godot-docs';
 import type { AxialCoord } from '@/lib/hex-engine';
-import type { ConquestCheckResult } from '@/lib/territory-engine';
+import type {
+  ActiveExpansion,
+  ExpansionCheckResult,
+  TerritorialCapacitySummary,
+} from '@/lib/territory-engine';
+import { getExpansionFailureMessage } from '@/lib/territory-engine';
 import {
   TERRAIN_METADATA,
   getStructureDisplayInfo,
@@ -48,10 +54,12 @@ import {
 } from '@/lib/terrain-engine';
 import {
   getBuildingDefinition,
+  type BuildingDefinition,
   type ResourceCost,
 } from '@/lib/buildings-catalog';
 import type { HexBuildEvaluation } from '@/lib/build-rules';
 import type {
+  BuildingOperationReport,
   KingdomResources,
   KingdomStageInfo,
   TurnProductionBreakdown,
@@ -71,6 +79,7 @@ export interface GameHudProps {
   worldSeed?: number;
   cash: number;
   territoryCount: number;
+  territorySummary: TerritorialCapacitySummary;
   resources: KingdomResources;
   economy: TurnProductionBreakdown;
   stage: KingdomStageInfo;
@@ -85,12 +94,14 @@ export interface GameHudProps {
   selectedHexOwned: boolean;
   selectedHexHasConstruction: boolean;
   selectedHexConstruction: ActiveConstruction | null;
+  selectedHexActiveExpansion: ActiveExpansion | null;
   selectedTileAssetName: string | null;
-  selectedConquest: ConquestCheckResult | null;
+  selectedExpansion: ExpansionCheckResult | null;
   selectedTerrainInfo: TerrainDescriptor | null;
   selectedStrategicInfo: StrategicRegionInfo | null;
   selectedHexUnit: UnitEntity | null;
   selectedHexFaction: FactionState | null;
+  selectedBuildingReport: BuildingOperationReport | null;
   contextualBuild: HexBuildEvaluation | null;
   canBuildActiveOnSelected: boolean;
   activeBuildEffectiveCost: ResourceCost | null;
@@ -140,7 +151,64 @@ function formatCompactCost(cost: ResourceCost | null, fallbackGold: number): str
   if (cost.wood > 0) parts.push(`${cost.wood} Mad`);
   if (cost.stone > 0) parts.push(`${cost.stone} Ped`);
   if (cost.ore > 0) parts.push(`${cost.ore} Min`);
+  if (cost.metal > 0) parts.push(`${cost.metal} Met`);
   return parts.length > 0 ? parts.join(' · ') : 'Grátis';
+}
+
+function formatLiveBuildingYield(
+  report: BuildingOperationReport,
+  def: BuildingDefinition
+): string {
+  const parts: string[] = [];
+  const p = report.actualProduction;
+  if (def.housingCapacity > 0) parts.push(`+${def.housingCapacity} Moradia`);
+  if (p.gold > 0) parts.push(`+${p.gold} Ouro`);
+  if (p.wood > 0) parts.push(`+${p.wood} Mad`);
+  if (p.stone > 0) parts.push(`+${p.stone} Ped`);
+  if (p.food > 0) parts.push(`+${p.food} Alim`);
+  if (p.ore > 0) parts.push(`+${p.ore} Min`);
+  if (p.metal > 0) parts.push(`+${p.metal} Met`);
+  if (p.science > 0) parts.push(`+${p.science} Ciên`);
+  if (def.defenseBonus > 0) parts.push(`+${def.defenseBonus} Def`);
+  if (def.storageBonus > 0) parts.push(`+${def.storageBonus} Arm`);
+  return parts.length > 0 ? parts.join(' · ') : def.summaryPt;
+}
+
+function getExpansionButtonLabel(check: ExpansionCheckResult): string {
+  if (check.canExpand) {
+    return `Incorporar (${check.turnsRequired}t · ${check.workersRequired} trab.)`;
+  }
+  switch (check.reason) {
+    case 'capacity_reached':
+      return 'Capacidade esgotada';
+    case 'requires_tech':
+      return check.requiredTech
+        ? `Requer ${TECH_BY_ID[check.requiredTech].namePt}`
+        : 'Pesquisa necessária';
+    case 'insufficient_influence':
+      return `Influência ${check.influence.score}/${check.influence.requiredInfluence}`;
+    case 'insufficient_workers':
+      return `Precisa ${check.workersRequired} trab.`;
+    case 'out_of_reach':
+      return 'Fora do alcance';
+    default:
+      return 'Fora da fronteira';
+  }
+}
+
+function getExpansionDotColor(
+  selectedHexFaction: FactionState | null,
+  selectedExpansion: ExpansionCheckResult,
+  selectedHexActiveExpansion: ActiveExpansion | null
+): string {
+  if (selectedHexFaction) return selectedHexFaction.colorHex;
+  if (selectedExpansion.owner === 'player') return '#059669';
+  if (selectedHexActiveExpansion) return '#0284c7';
+  if (selectedExpansion.canExpand) return '#f59e0b';
+  if (selectedExpansion.isAdjacent && selectedExpansion.influence.withinReach) {
+    return '#ea580c';
+  }
+  return '#94a3b8';
 }
 
 const GameHud = memo(function GameHud({
@@ -149,6 +217,7 @@ const GameHud = memo(function GameHud({
   worldSeed,
   cash,
   territoryCount,
+  territorySummary,
   resources,
   economy,
   stage,
@@ -163,12 +232,14 @@ const GameHud = memo(function GameHud({
   selectedHexOwned,
   selectedHexHasConstruction,
   selectedHexConstruction,
+  selectedHexActiveExpansion,
   selectedTileAssetName,
-  selectedConquest,
+  selectedExpansion,
   selectedTerrainInfo,
   selectedStrategicInfo,
   selectedHexUnit,
   selectedHexFaction,
+  selectedBuildingReport,
   contextualBuild,
   canBuildActiveOnSelected: _canBuildActiveOnSelected,
   activeBuildEffectiveCost,
@@ -368,7 +439,12 @@ const GameHud = memo(function GameHud({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-1.5 sm:pr-2.5 sm:border-r sm:border-[#d9ceb8]">
+                <button
+                  type="button"
+                  onClick={() => onOpenKingdomModal('economy')}
+                  title="Ver Capacidade Territorial e Expansão"
+                  className="flex items-center gap-1.5 sm:pr-2.5 sm:border-r sm:border-[#d9ceb8] text-left cursor-pointer hover:opacity-80"
+                >
                   <Flag className="w-4 h-4 text-emerald-700 shrink-0" aria-hidden="true" />
                   <div>
                     <p className="text-[9px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
@@ -378,10 +454,15 @@ const GameHud = memo(function GameHud({
                       data-testid="hud-territory"
                       className="font-display text-sm sm:text-base font-bold text-[#1f1a12] tabular-nums leading-tight"
                     >
-                      {territoryCount}
+                      {territoryCount}/{territorySummary.capacity}
+                      {territorySummary.inProgress > 0 && (
+                        <span className="ml-1 text-[10px] text-sky-700">
+                          +{territorySummary.inProgress}
+                        </span>
+                      )}
                     </p>
                   </div>
-                </div>
+                </button>
 
                 <div className="hidden sm:flex items-center gap-1.5">
                   <div>
@@ -398,18 +479,32 @@ const GameHud = memo(function GameHud({
                 </div>
               </div>
 
-              {/* Compact Population & 5-Resource Stockpile Bar (tapping opens Economy tab) */}
+              {/* Compact Population & Resource Stockpile Bar (tapping opens Economy tab) */}
               <button
                 type="button"
                 data-testid="hud-resources"
                 onClick={() => onOpenKingdomModal('economy')}
                 title="Abrir Economia do Reino"
-                className="flex flex-wrap items-center gap-x-2.5 gap-y-1 bg-[#fcf9f2]/95 border-2 border-[#3c3426] rounded-xl px-2.5 py-1 shadow-[0_2px_0_#3c3426] text-[11px] font-bold text-[#2a2319] tabular-nums hover:bg-white cursor-pointer max-w-[calc(100vw-1.5rem)]"
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 bg-[#fcf9f2]/95 border-2 border-[#3c3426] rounded-xl px-2.5 py-1 shadow-[0_2px_0_#3c3426] text-[11px] font-bold text-[#2a2319] tabular-nums hover:bg-white cursor-pointer max-w-[calc(100vw-1.5rem)]"
               >
-                <span className="inline-flex items-center gap-1 pr-2 border-r border-[#d9ceb8]" title="População">
+                <span
+                  className="inline-flex items-center gap-1 pr-2 border-r border-[#d9ceb8]"
+                  title="População e trabalhadores livres"
+                >
                   <Users className="w-3.5 h-3.5 text-emerald-700 shrink-0" aria-hidden="true" />
                   <span data-testid="hud-population">
                     {economy.population.current}/{economy.population.capacity}
+                  </span>
+                  <span
+                    data-testid="hud-workers-free"
+                    className={`ml-0.5 text-[10px] ${
+                      economy.population.buildingWorkersAssigned <
+                      economy.population.buildingWorkersRequired
+                        ? 'text-rose-700'
+                        : 'text-emerald-800'
+                    }`}
+                  >
+                    ({economy.population.availableWorkers} liv)
                   </span>
                 </span>
                 <span className="inline-flex items-center gap-1" title="Madeira">
@@ -420,13 +515,26 @@ const GameHud = memo(function GameHud({
                   <Mountain className="w-3.5 h-3.5 text-slate-600 shrink-0" aria-hidden="true" />
                   <span data-testid="res-stone">{resources.stone}</span>
                 </span>
-                <span className="inline-flex items-center gap-1" title="Alimento">
+                <span
+                  className={`inline-flex items-center gap-1 ${
+                    economy.population.hasFoodDeficit
+                      ? 'text-rose-700'
+                      : economy.foodNet < 0
+                        ? 'text-amber-800'
+                        : ''
+                  }`}
+                  title="Alimento"
+                >
                   <Wheat className="w-3.5 h-3.5 text-amber-600 shrink-0" aria-hidden="true" />
                   <span data-testid="res-food">{resources.food}</span>
                 </span>
                 <span className="inline-flex items-center gap-1" title="Minério">
                   <Pickaxe className="w-3.5 h-3.5 text-slate-700 shrink-0" aria-hidden="true" />
                   <span data-testid="res-ore">{resources.ore}</span>
+                </span>
+                <span className="inline-flex items-center gap-1" title="Metal">
+                  <Flame className="w-3.5 h-3.5 text-orange-700 shrink-0" aria-hidden="true" />
+                  <span data-testid="res-metal">{resources.metal}</span>
                 </span>
                 <span className="inline-flex items-center gap-1" title="Ciência por turno">
                   <FlaskConical className="w-3.5 h-3.5 text-sky-700 shrink-0" aria-hidden="true" />
@@ -615,29 +723,41 @@ const GameHud = memo(function GameHud({
             }}
           >
             {/* Contextual Selected-Hex Card */}
-            {selectedHex && !buildSheetOpen && selectedConquest && toolMode !== 'command' && (
+            {selectedHex && !buildSheetOpen && selectedExpansion && toolMode !== 'command' && (
               <div
                 data-testid="mobile-selection-bar"
                 className="pointer-events-auto w-full max-w-md bg-[#fcf9f2]/98 border-2 border-[#3c3426] rounded-2xl p-2.5 shadow-[0_4px_0_#3c3426] space-y-2"
               >
                 <div className="flex items-start justify-between gap-2 px-1">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span
                         className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
                         style={{
-                          backgroundColor: selectedHexFaction
-                            ? selectedHexFaction.colorHex
-                            : selectedConquest.owner === 'player'
-                              ? '#059669'
-                              : selectedConquest.isAdjacent
-                                ? '#f59e0b'
-                                : '#94a3b8',
+                          backgroundColor: getExpansionDotColor(
+                            selectedHexFaction,
+                            selectedExpansion,
+                            selectedHexActiveExpansion
+                          ),
                         }}
                       />
                       <p className="text-xs font-bold text-[#1f1a12] truncate">
                         {selectedBuildingLabel}
                       </p>
+                      {selectedBuildingReport && !selectedHexConstruction && (
+                        <span
+                          data-testid="mobile-building-status"
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold leading-none ${
+                            selectedBuildingReport.status === 'operating'
+                              ? 'bg-emerald-100 text-emerald-900'
+                              : selectedBuildingReport.status === 'partial'
+                                ? 'bg-amber-100 text-amber-900'
+                                : 'bg-rose-100 text-rose-900'
+                          }`}
+                        >
+                          {selectedBuildingReport.statusLabelPt}
+                        </span>
+                      )}
                     </div>
 
                     {selectedHexConstruction ? (
@@ -649,9 +769,40 @@ const GameHud = memo(function GameHud({
                         {selectedHexConstruction.totalTurns} turnos)
                       </p>
                     ) : selectedHexHasConstruction && selectedBuildingDef ? (
-                      <p className="text-[11px] font-medium text-[#3c3426] mt-0.5">
-                        {selectedBuildingDef.summaryPt}
-                      </p>
+                      selectedBuildingReport ? (
+                        <div className="mt-0.5 space-y-0.5">
+                          <p className="text-[11px] font-medium text-[#2a2319]">
+                            {formatLiveBuildingYield(selectedBuildingReport, selectedBuildingDef)}
+                          </p>
+                          {(selectedBuildingReport.workersRequired > 0 ||
+                            selectedBuildingReport.locationEfficiencyPct !== 100) && (
+                            <p className="text-[10px] font-semibold text-[#5c5140] tabular-nums">
+                              {selectedBuildingReport.workersRequired > 0
+                                ? `Trab.: ${selectedBuildingReport.workersAssigned}/${selectedBuildingReport.workersRequired}`
+                                : ''}
+                              {selectedBuildingReport.workersRequired > 0 &&
+                              selectedBuildingReport.locationEfficiencyPct !== 100
+                                ? ' · '
+                                : ''}
+                              {selectedBuildingReport.locationEfficiencyPct !== 100
+                                ? `Local: ${selectedBuildingReport.locationEfficiencyPct}%`
+                                : ''}
+                              {selectedBuildingReport.locationBonusNotesPt.length > 0
+                                ? ` (${selectedBuildingReport.locationBonusNotesPt[0]})`
+                                : ''}
+                            </p>
+                          )}
+                          {selectedBuildingReport.reasonPt && (
+                            <p className="text-[11px] font-bold text-rose-700">
+                              {selectedBuildingReport.reasonPt}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-[11px] font-medium text-[#3c3426] mt-0.5">
+                          {selectedBuildingDef.summaryPt}
+                        </p>
+                      )
                     ) : null}
 
                     {selectedTerrainInfo && (
@@ -659,8 +810,10 @@ const GameHud = memo(function GameHud({
                         data-testid="mobile-terrain-info"
                         className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
                       >
-                        Terreno: {selectedTerrainInfo.labelPt} · Recurso:{' '}
-                        {selectedTerrainInfo.resourceLabelPt}
+                        Terreno: {selectedTerrainInfo.labelPt} ·{' '}
+                        {selectedHexHasConstruction
+                          ? `Recurso: ${selectedTerrainInfo.resourceLabelPt}`
+                          : `Potencial: ${selectedTerrainInfo.potentialPt}`}
                       </p>
                     )}
 
@@ -677,8 +830,22 @@ const GameHud = memo(function GameHud({
                       </p>
                     )}
 
+                    {selectedExpansion.owner === 'neutral' && !selectedHexActiveExpansion && (
+                      <p
+                        data-testid="mobile-influence-info"
+                        className="text-[11px] font-semibold text-[#3c3426] mt-0.5 tabular-nums"
+                      >
+                        Influência {selectedExpansion.influence.score}/
+                        {selectedExpansion.influence.requiredInfluence} · Alcance{' '}
+                        {Number.isFinite(selectedExpansion.influence.minDistToAnchor)
+                          ? selectedExpansion.influence.minDistToAnchor
+                          : '-'}
+                        /{selectedExpansion.influence.maxAnchorReach}
+                      </p>
+                    )}
+
                     <p className="text-[11px] font-medium text-[#5c5140] mt-0.5">
-                      {selectedConquest.owner === 'player'
+                      {selectedExpansion.owner === 'player'
                         ? selectedHexConstruction
                           ? 'Obra em andamento · Aguardando conclusão'
                           : selectedHexHasConstruction
@@ -696,11 +863,11 @@ const GameHud = memo(function GameHud({
                                     ? 'Trégua'
                                     : 'Neutra'
                             })`
-                          : selectedConquest.isAdjacent
-                            ? selectedConquest.canConquer
-                              ? 'Território neutro · Adjacente'
-                              : `Adjacente · Saldo insuficiente (${formatCash(selectedConquest.cost)})`
-                            : 'Distante · Conquiste um vizinho primeiro'}
+                          : selectedHexActiveExpansion
+                            ? `Incorporando território (faltam ${selectedHexActiveExpansion.turnsRemaining}/${selectedHexActiveExpansion.totalTurns} turnos · ${selectedHexActiveExpansion.workersCommitted} trab.)`
+                            : selectedExpansion.canExpand
+                              ? `Pronto para incorporar (${selectedExpansion.turnsRequired} ${selectedExpansion.turnsRequired === 1 ? 'turno' : 'turnos'} · ${selectedExpansion.workersRequired} trab.)`
+                              : getExpansionFailureMessage(selectedExpansion)}
                     </p>
                   </div>
 
@@ -752,7 +919,7 @@ const GameHud = memo(function GameHud({
                     );
                   })}
 
-                  {selectedConquest.owner === 'player' ? (
+                  {selectedExpansion.owner === 'player' ? (
                     selectedHexHasConstruction ? (
                       <button
                         type="button"
@@ -777,7 +944,7 @@ const GameHud = memo(function GameHud({
                         Construir aqui
                       </button>
                     )
-                  ) : selectedConquest.owner !== 'neutral' ? (
+                  ) : selectedExpansion.owner !== 'neutral' ? (
                     <button
                       type="button"
                       onClick={() => onOpenKingdomModal('diplomacy')}
@@ -786,19 +953,28 @@ const GameHud = memo(function GameHud({
                       <Swords className="w-4 h-4 shrink-0" aria-hidden="true" />
                       Diplomacia / Guerra
                     </button>
-                  ) : selectedConquest.isAdjacent ? (
+                  ) : selectedHexActiveExpansion ? (
+                    <div
+                      data-testid="mobile-expanding-status"
+                      className="flex-1 min-h-[46px] px-3 rounded-xl bg-sky-100 text-sky-900 font-display text-xs font-bold border-2 border-sky-400 flex items-center justify-center gap-1.5"
+                    >
+                      <Flag className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      Incorporando ({selectedHexActiveExpansion.turnsRemaining}/
+                      {selectedHexActiveExpansion.totalTurns}t)
+                    </div>
+                  ) : selectedExpansion.isAdjacent ? (
                     <button
                       type="button"
                       data-testid="mobile-conquer-button"
                       onClick={onConfirmSelectedHex}
                       className={`flex-1 min-h-[46px] px-3 rounded-xl font-display text-xs font-bold border-2 flex items-center justify-center gap-1.5 cursor-pointer active:translate-y-0.5 ${
-                        selectedConquest.canConquer
+                        selectedExpansion.canExpand
                           ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426]'
                           : 'bg-[#efe8d8] text-[#6e604a] border-[#bcae96]'
                       }`}
                     >
                       <Flag className="w-4 h-4 shrink-0" aria-hidden="true" />
-                      Conquistar ({formatCash(selectedConquest.cost)})
+                      {getExpansionButtonLabel(selectedExpansion)}
                     </button>
                   ) : (
                     <button
@@ -808,7 +984,7 @@ const GameHud = memo(function GameHud({
                       className="flex-1 min-h-[46px] px-3 rounded-xl bg-[#efe8d8] text-[#5c5140] font-display text-xs font-semibold border-2 border-[#c8ba9f] flex items-center justify-center gap-1.5 cursor-pointer"
                     >
                       <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
-                      Território muito distante
+                      {getExpansionButtonLabel(selectedExpansion)}
                     </button>
                   )}
                 </div>
@@ -1048,6 +1224,11 @@ const GameHud = memo(function GameHud({
                               >
                                 {`${formatCompactCost(opt.effectiveCost, asset?.price ?? 0)} · ${opt.definition.buildTimeTurns}t`}
                               </span>
+                              {opt.workerWarningPt && (
+                                <span className="mt-0.5 block text-[9px] font-bold text-amber-700 truncate">
+                                  {opt.workerWarningPt}
+                                </span>
+                              )}
                             </button>
                           );
                         })}
@@ -1069,28 +1250,40 @@ const GameHud = memo(function GameHud({
           {/* ========================================================= */}
           <div className="hidden md:flex absolute bottom-3 left-1/2 -translate-x-1/2 w-[min(960px,95vw)] flex-col items-center pointer-events-none">
             {/* Desktop Contextual Selection Card */}
-            {toolMode !== 'command' && selectedHex && selectedConquest && (
+            {toolMode !== 'command' && selectedHex && selectedExpansion && (
               <div
                 data-testid="desktop-selection-bar"
                 className="pointer-events-auto mb-2 flex flex-wrap items-center gap-3 bg-[#fcf9f2]/98 border-2 border-[#3c3426] rounded-2xl px-4 py-2.5 shadow-[0_4px_0_#3c3426] max-w-full"
               >
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span
                       className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
                       style={{
-                        backgroundColor: selectedHexFaction
-                          ? selectedHexFaction.colorHex
-                          : selectedConquest.owner === 'player'
-                            ? '#059669'
-                            : selectedConquest.isAdjacent
-                              ? '#f59e0b'
-                              : '#94a3b8',
+                        backgroundColor: getExpansionDotColor(
+                          selectedHexFaction,
+                          selectedExpansion,
+                          selectedHexActiveExpansion
+                        ),
                       }}
                     />
                     <p className="text-xs font-bold text-[#1f1a12]">
                       {selectedBuildingLabel}
                     </p>
+                    {selectedBuildingReport && !selectedHexConstruction && (
+                      <span
+                        data-testid="desktop-building-status"
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold leading-none ${
+                          selectedBuildingReport.status === 'operating'
+                            ? 'bg-emerald-100 text-emerald-900'
+                            : selectedBuildingReport.status === 'partial'
+                              ? 'bg-amber-100 text-amber-900'
+                              : 'bg-rose-100 text-rose-900'
+                        }`}
+                      >
+                        {selectedBuildingReport.statusLabelPt}
+                      </span>
+                    )}
                     {selectedHexConstruction ? (
                       <span
                         data-testid="desktop-construction-status"
@@ -1101,18 +1294,53 @@ const GameHud = memo(function GameHud({
                       </span>
                     ) : selectedHexHasConstruction && selectedBuildingDef ? (
                       <span className="text-[11px] font-medium text-[#5c5140]">
-                        · {selectedBuildingDef.summaryPt}
+                        ·{' '}
+                        {selectedBuildingReport
+                          ? formatLiveBuildingYield(selectedBuildingReport, selectedBuildingDef)
+                          : selectedBuildingDef.summaryPt}
                       </span>
                     ) : null}
                   </div>
+
+                  {selectedBuildingReport &&
+                    !selectedHexConstruction &&
+                    (selectedBuildingReport.workersRequired > 0 ||
+                      selectedBuildingReport.locationEfficiencyPct !== 100 ||
+                      selectedBuildingReport.reasonPt) && (
+                      <p className="text-[11px] font-semibold text-[#5c5140] mt-0.5 tabular-nums">
+                        {selectedBuildingReport.workersRequired > 0
+                          ? `Trab.: ${selectedBuildingReport.workersAssigned}/${selectedBuildingReport.workersRequired}`
+                          : ''}
+                        {selectedBuildingReport.workersRequired > 0 &&
+                        selectedBuildingReport.locationEfficiencyPct !== 100
+                          ? ' · '
+                          : ''}
+                        {selectedBuildingReport.locationEfficiencyPct !== 100
+                          ? `Eficiência local: ${selectedBuildingReport.locationEfficiencyPct}%`
+                          : ''}
+                        {selectedBuildingReport.locationBonusNotesPt.length > 0
+                          ? ` (${selectedBuildingReport.locationBonusNotesPt[0]})`
+                          : ''}
+                        {selectedBuildingReport.reasonPt ? (
+                          <span className="text-rose-700 font-bold">
+                            {(selectedBuildingReport.workersRequired > 0 ||
+                            selectedBuildingReport.locationEfficiencyPct !== 100
+                              ? ' · '
+                              : '') + selectedBuildingReport.reasonPt}
+                          </span>
+                        ) : null}
+                      </p>
+                    )}
 
                   {selectedTerrainInfo && (
                     <p
                       data-testid="desktop-terrain-info"
                       className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
                     >
-                      Terreno: {selectedTerrainInfo.labelPt} · Recurso:{' '}
-                      {selectedTerrainInfo.resourceLabelPt}
+                      Terreno: {selectedTerrainInfo.labelPt} ·{' '}
+                      {selectedHexHasConstruction
+                        ? `Recurso: ${selectedTerrainInfo.resourceLabelPt}`
+                        : `Potencial: ${selectedTerrainInfo.potentialPt}`}
                       {strategicBonusLine ? ` · ${strategicBonusLine}` : ''}
                     </p>
                   )}
@@ -1124,8 +1352,24 @@ const GameHud = memo(function GameHud({
                     </p>
                   )}
 
+                  {selectedExpansion.owner === 'neutral' && !selectedHexActiveExpansion && (
+                    <p
+                      data-testid="desktop-influence-info"
+                      className="text-[11px] font-semibold text-[#3c3426] mt-0.5 tabular-nums"
+                    >
+                      Influência {selectedExpansion.influence.score}/
+                      {selectedExpansion.influence.requiredInfluence} · Alcance{' '}
+                      {Number.isFinite(selectedExpansion.influence.minDistToAnchor)
+                        ? selectedExpansion.influence.minDistToAnchor
+                        : '-'}
+                      /{selectedExpansion.influence.maxAnchorReach} · Capacidade{' '}
+                      {selectedExpansion.capacitySummary.used}/
+                      {selectedExpansion.capacitySummary.capacity}
+                    </p>
+                  )}
+
                   <p className="text-[11px] text-[#5c5140] mt-0.5">
-                    {selectedConquest.owner === 'player'
+                    {selectedExpansion.owner === 'player'
                       ? selectedHexConstruction
                         ? 'Obra em andamento · Produzirá após a conclusão.'
                         : selectedHexHasConstruction
@@ -1141,11 +1385,11 @@ const GameHud = memo(function GameHud({
                                   ? 'Trégua'
                                   : 'Neutra'
                           }`
-                        : selectedConquest.isAdjacent
-                          ? selectedConquest.canConquer
-                            ? 'Território neutro adjacente — pronto para conquista.'
-                            : `Dinheiro insuficiente (${formatCash(selectedConquest.cost)} necessários).`
-                          : 'Território distante — conquiste um hexágono vizinho primeiro.'}
+                        : selectedHexActiveExpansion
+                          ? `Incorporando território (faltam ${selectedHexActiveExpansion.turnsRemaining}/${selectedHexActiveExpansion.totalTurns} turnos · ${selectedHexActiveExpansion.workersCommitted} trab.)`
+                          : selectedExpansion.canExpand
+                            ? `Pronto para incorporar (${selectedExpansion.turnsRequired} ${selectedExpansion.turnsRequired === 1 ? 'turno' : 'turnos'} · ${selectedExpansion.workersRequired} trab.)`
+                            : getExpansionFailureMessage(selectedExpansion)}
                   </p>
                 </div>
 
@@ -1187,7 +1431,7 @@ const GameHud = memo(function GameHud({
                   );
                 })}
 
-                {selectedConquest.owner === 'player' && selectedHexHasConstruction && (
+                {selectedExpansion.owner === 'player' && selectedHexHasConstruction && (
                   <button
                     type="button"
                     data-testid="desktop-demolish-selected"
@@ -1199,7 +1443,7 @@ const GameHud = memo(function GameHud({
                   </button>
                 )}
 
-                {selectedConquest.owner === 'player' && !selectedHexHasConstruction && (
+                {selectedExpansion.owner === 'player' && !selectedHexHasConstruction && (
                   <button
                     type="button"
                     data-testid="desktop-build-here-button"
@@ -1214,8 +1458,8 @@ const GameHud = memo(function GameHud({
                   </button>
                 )}
 
-                {selectedConquest.owner !== 'player' &&
-                  selectedConquest.owner !== 'neutral' && (
+                {selectedExpansion.owner !== 'player' &&
+                  selectedExpansion.owner !== 'neutral' && (
                     <button
                       type="button"
                       onClick={() => onOpenKingdomModal('diplomacy')}
@@ -1226,21 +1470,34 @@ const GameHud = memo(function GameHud({
                     </button>
                   )}
 
-                {selectedConquest.owner === 'neutral' && selectedConquest.isAdjacent && (
-                  <button
-                    type="button"
-                    data-testid="desktop-conquer-button"
-                    onClick={onConfirmSelectedHex}
-                    className={`inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 whitespace-nowrap cursor-pointer ${
-                      selectedConquest.canConquer
-                        ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426] hover:bg-amber-400'
-                        : 'bg-[#efe8d8] text-[#6e604a] border-[#bcae96]'
-                    }`}
+                {selectedExpansion.owner === 'neutral' && selectedHexActiveExpansion && (
+                  <span
+                    data-testid="desktop-expanding-status"
+                    className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 border-sky-400 bg-sky-100 text-sky-900 whitespace-nowrap"
                   >
                     <Flag className="w-3.5 h-3.5" aria-hidden="true" />
-                    Conquistar ({formatCash(selectedConquest.cost)})
-                  </button>
+                    Incorporando ({selectedHexActiveExpansion.turnsRemaining}/
+                    {selectedHexActiveExpansion.totalTurns}t)
+                  </span>
                 )}
+
+                {selectedExpansion.owner === 'neutral' &&
+                  !selectedHexActiveExpansion &&
+                  selectedExpansion.isAdjacent && (
+                    <button
+                      type="button"
+                      data-testid="desktop-conquer-button"
+                      onClick={onConfirmSelectedHex}
+                      className={`inline-flex items-center gap-1.5 px-3.5 h-9 rounded-xl font-display text-xs font-bold border-2 whitespace-nowrap cursor-pointer ${
+                        selectedExpansion.canExpand
+                          ? 'bg-amber-500 text-[#1f1a12] border-[#3c3426] shadow-[0_2px_0_#3c3426] hover:bg-amber-400'
+                          : 'bg-[#efe8d8] text-[#6e604a] border-[#bcae96]'
+                      }`}
+                    >
+                      <Flag className="w-3.5 h-3.5" aria-hidden="true" />
+                      {getExpansionButtonLabel(selectedExpansion)}
+                    </button>
+                  )}
 
                 <button
                   type="button"
@@ -1339,7 +1596,7 @@ const GameHud = memo(function GameHud({
                       onSetToolMode('expand');
                     }}
                     aria-pressed={toolMode === 'expand'}
-                    title="Modo Expandir: clique em hexágonos para selecionar ou conquistar"
+                    title="Modo Expandir: clique em hexágonos para selecionar ou incorporar"
                     className={`inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg border text-xs font-bold whitespace-nowrap cursor-pointer ${
                       toolMode === 'expand'
                         ? 'bg-amber-500 border-[#3c3426] text-[#1f1a12]'
@@ -1543,6 +1800,11 @@ const GameHud = memo(function GameHud({
                             >
                               {`${formatCompactCost(opt.effectiveCost, asset?.price ?? 0)} · ${opt.definition.buildTimeTurns}t`}
                             </span>
+                            {opt.workerWarningPt && (
+                              <span className="block text-[9px] font-bold text-amber-700">
+                                {opt.workerWarningPt}
+                              </span>
+                            )}
                           </button>
                         );
                       })}
@@ -1606,7 +1868,7 @@ const GameHud = memo(function GameHud({
               <div className="bg-white border border-[#d9ceb8] rounded-xl p-2.5">
                 <p className="text-[10px] font-bold uppercase text-[#6e604a]">Território</p>
                 <p className="mt-0.5 font-display text-sm font-bold text-[#9a6308] tabular-nums">
-                  {territoryCount}
+                  {territoryCount}/{territorySummary.capacity}
                 </p>
               </div>
             </div>

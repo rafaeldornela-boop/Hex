@@ -5,7 +5,7 @@ import type { FactionState } from './faction-engine';
 import { hexKey, type HexWorldState } from './hex-engine';
 import type { TechId } from './tech-engine';
 
-export type TradableResource = 'wood' | 'stone' | 'food' | 'ore';
+export type TradableResource = 'wood' | 'stone' | 'food' | 'ore' | 'metal';
 export type MarketSupplyState = 'excedente' | 'equilibrado' | 'escassez';
 
 export interface ResourceMarketQuote {
@@ -31,6 +31,7 @@ const BASE_PRICES: Record<TradableResource, { labelPt: string; base: number }> =
   stone: { labelPt: 'Pedra', base: 10 },
   food: { labelPt: 'Alimento', base: 7 },
   ore: { labelPt: 'Minério', base: 14 },
+  metal: { labelPt: 'Metal', base: 22 },
 };
 
 export function countTradeStructures(
@@ -83,7 +84,7 @@ export function computeMarketSummary(params: {
   const droughtActive = activeEffects.some((e) => (e.foodMultiplierMod ?? 1) < 0.9);
   const crisisActive = activeEffects.some((e) => (e.goldMultiplierMod ?? 1) < 0.9);
 
-  const resourceOrder: TradableResource[] = ['wood', 'stone', 'food', 'ore'];
+  const resourceOrder: TradableResource[] = ['wood', 'stone', 'food', 'ore', 'metal'];
   const quotes: ResourceMarketQuote[] = resourceOrder.map((res) => {
     const meta = BASE_PRICES[res];
     const stock = resources[res];
@@ -95,7 +96,9 @@ export function computeMarketSummary(params: {
           ? economy.stoneNet
           : res === 'food'
             ? economy.foodNet
-            : economy.oreNet;
+            : res === 'ore'
+              ? economy.oreNet
+              : economy.metalNet;
 
     const ratio = cap > 0 ? stock / cap : 0;
 
@@ -103,7 +106,7 @@ export function computeMarketSummary(params: {
     if (
       (res === 'food' && droughtActive) ||
       netPerTurn < 0 ||
-      stock < 25
+      stock < (res === 'metal' ? 8 : 25)
     ) {
       condition = 'escassez';
     } else if (ratio >= 0.55 || netPerTurn >= 8 || stock >= 140) {

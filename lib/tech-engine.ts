@@ -56,7 +56,7 @@ export const TECH_TREE: readonly TechDefinition[] = [
     prerequisites: ['agriculture'],
     unlocksBuildings: ['building-village', 'unit-mansion'],
     unlocksUnits: [],
-    effectsSummaryPt: '-15% custo de obras · +50 Armazém · Libera Vila',
+    effectsSummaryPt: '-15% custo de obras · +50 Armazém · +2 Cap. · +1 Alcance · Libera Vila',
     tier: 2,
   },
   {
@@ -67,7 +67,7 @@ export const TECH_TREE: readonly TechDefinition[] = [
     prerequisites: ['agriculture'],
     unlocksBuildings: ['building-port'],
     unlocksUnits: ['warship'],
-    effectsSummaryPt: '+35% Ouro · Libera Porto e Navio',
+    effectsSummaryPt: '+35% Ouro · +2 Cap. · +1 Alcance · Libera Porto e Navio',
     tier: 2,
   },
   {
@@ -84,12 +84,12 @@ export const TECH_TREE: readonly TechDefinition[] = [
   {
     id: 'metallurgy',
     namePt: 'Metalurgia',
-    descriptionPt: 'Forjas avançadas para armaduras e armamentos pesados.',
+    descriptionPt: 'Forjas avançadas para refinar minério em metal e armamentos pesados.',
     costScience: 28,
     prerequisites: ['mining', 'military'],
-    unlocksBuildings: ['unit-wall-tower'],
+    unlocksBuildings: ['building-smelter', 'unit-wall-tower'],
     unlocksUnits: ['knight'],
-    effectsSummaryPt: '+4 Ataque/Defesa militar · +30% Minério · Libera Bastião e Cavaleiro',
+    effectsSummaryPt: '+4 Ataque/Defesa · +30% Minério · Libera Fundição, Bastião e Cavaleiro',
     tier: 3,
   },
   {
@@ -100,7 +100,7 @@ export const TECH_TREE: readonly TechDefinition[] = [
     prerequisites: ['construction', 'mining'],
     unlocksBuildings: ['building-walls'],
     unlocksUnits: [],
-    effectsSummaryPt: '+80 Armazém · -20% custo de expansão · Libera Muralhas',
+    effectsSummaryPt: '+80 Armazém · -1t incorporação · +4 Cap. · +1 Alcance · Libera Muralhas',
     tier: 3,
   },
 ] as const;
@@ -223,7 +223,9 @@ export interface TechModifiers {
   oreBonusMultiplier: number;
   goldMultiplier: number;
   buildCostMultiplier: number;
-  expansionCostMultiplier: number;
+  territorialCapacityBonus: number;
+  anchorReachBonus: number;
+  expansionTurnReduction: number;
   bonusStorage: number;
   militaryCombatBonus: number;
 }
@@ -236,7 +238,15 @@ export function getTechModifiers(unlocked: TechId[]): TechModifiers {
     oreBonusMultiplier: has('metallurgy') ? 1.3 : 1,
     goldMultiplier: has('trade') ? 1.35 : 1,
     buildCostMultiplier: has('construction') ? 0.85 : 1,
-    expansionCostMultiplier: has('engineering') ? 0.8 : 1,
+    territorialCapacityBonus:
+      (has('construction') ? 2 : 0) +
+      (has('trade') ? 2 : 0) +
+      (has('engineering') ? 4 : 0),
+    anchorReachBonus:
+      (has('construction') ? 1 : 0) +
+      (has('trade') ? 1 : 0) +
+      (has('engineering') ? 1 : 0),
+    expansionTurnReduction: has('engineering') ? 1 : 0,
     bonusStorage: (has('construction') ? 50 : 0) + (has('engineering') ? 80 : 0),
     militaryCombatBonus: has('metallurgy') ? 4 : 0,
   };

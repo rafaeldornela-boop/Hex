@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Check,
   Coins,
+  Flag,
   FlaskConical,
   Hammer,
   Handshake,
@@ -22,6 +23,8 @@ import { countFactionTerritory } from '@/lib/faction-engine';
 import type { KingdomState } from '@/lib/kingdom-engine';
 import { UNIT_CATALOG, type UnitEntity } from '@/lib/military-engine';
 import { TECH_BY_ID, TECH_TREE, canStartResearch, type TechId } from '@/lib/tech-engine';
+import { TERRAIN_METADATA, getHexTerrainAndResource } from '@/lib/terrain-engine';
+import type { TerritorialCapacitySummary } from '@/lib/territory-engine';
 import type { MarketSummary, TradableResource } from '@/lib/trade-engine';
 
 export type KingdomModalTab = 'economy' | 'trade' | 'research' | 'military' | 'diplomacy';
@@ -31,6 +34,7 @@ export interface KingdomModalProps {
   initialTab?: KingdomModalTab;
   kingdomState: KingdomState;
   economy: TurnProductionBreakdown;
+  territorySummary: TerritorialCapacitySummary;
   market: MarketSummary;
   stage: KingdomStageInfo;
   militaryPower: {
@@ -60,6 +64,7 @@ export default function KingdomModal({
   initialTab = 'economy',
   kingdomState,
   economy,
+  territorySummary,
   market,
   stage,
   militaryPower,
@@ -209,26 +214,154 @@ export default function KingdomModal({
                     </p>
                   </div>
                   <div className="bg-[#f7f2e6] rounded-lg p-2.5">
-                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Em Obras / Tropas</p>
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Obras / Tropas</p>
                     <p className="mt-0.5 font-display text-base font-bold text-[#1f1a12]">
-                      {economy.population.usedWorkers}
+                      {economy.population.buildingWorkersAssigned}/{economy.population.buildingWorkersRequired}
+                      {economy.population.unitWorkersUsed > 0
+                        ? ` + ${economy.population.unitWorkersUsed}t`
+                        : ''}
+                      {economy.population.expansionWorkersUsed > 0
+                        ? ` + ${economy.population.expansionWorkersUsed}exp`
+                        : ''}
                     </p>
                   </div>
                   <div className="bg-[#f7f2e6] rounded-lg p-2.5">
                     <p className="text-[10px] font-bold uppercase text-[#6e604a]">Crescimento</p>
-                    <p className="mt-0.5 font-display text-base font-bold text-[#1f1a12]">
+                    <p
+                      className={`mt-0.5 font-display text-base font-bold ${
+                        economy.population.projectedGrowth < 0
+                          ? 'text-rose-700'
+                          : 'text-[#1f1a12]'
+                      }`}
+                    >
                       {formatSigned(economy.population.projectedGrowth)} / turno
                     </p>
                   </div>
                 </div>
 
-                <p
-                  className={`text-xs font-medium ${
-                    economy.population.efficiency < 0.99 ? 'text-amber-800' : 'text-[#5c5140]'
-                  }`}
-                >
-                  {economy.population.efficiencyReasonPt}
+                {economy.population.efficiencyReasonPt && (
+                  <p
+                    className={`text-xs font-semibold ${
+                      economy.population.hasFoodDeficit || economy.population.efficiency < 0.99
+                        ? 'text-rose-700'
+                        : 'text-[#5c5140]'
+                    }`}
+                  >
+                    {economy.population.efficiencyReasonPt}
+                  </p>
+                )}
+
+                <div className="pt-2 border-t border-[#ece4d3] flex flex-wrap items-center gap-2 text-[11px] font-semibold">
+                  <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-900">
+                    Operando: {economy.operationCounts.operating}
+                  </span>
+                  {economy.operationCounts.partial > 0 && (
+                    <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900">
+                      Parcial: {economy.operationCounts.partial}
+                    </span>
+                  )}
+                  {economy.operationCounts.idle > 0 && (
+                    <span className="px-2 py-0.5 rounded bg-rose-100 text-rose-900">
+                      Parado: {economy.operationCounts.idle}
+                    </span>
+                  )}
+                  {economy.operationCounts.underConstruction > 0 && (
+                    <span className="px-2 py-0.5 rounded bg-[#f7f2e6] text-[#5c5140]">
+                      Em obra: {economy.operationCounts.underConstruction}
+                    </span>
+                  )}
+                </div>
+
+                {economy.attentionHexKeys.length > 0 && (
+                  <div className="space-y-1 text-xs">
+                    {economy.attentionHexKeys.slice(0, 4).map((bKey) => {
+                      const rep = economy.buildingsByKey[bKey];
+                      if (!rep) return null;
+                      return (
+                        <div
+                          key={bKey}
+                          className="flex items-center justify-between gap-2 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5"
+                        >
+                          <span className="font-bold text-[#1f1a12]">
+                            {rep.labelPt} ({rep.statusLabelPt})
+                          </span>
+                          <span className="text-[11px] text-rose-800 truncate">
+                            {rep.reasonPt}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+
+              {/* Territorial Capacity & Organic Expansion */}
+              <section
+                data-testid="territory-capacity-card"
+                className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 space-y-2.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-display text-sm font-bold text-[#1f1a12] flex items-center gap-1.5">
+                    <Flag className="w-4 h-4 text-amber-600" aria-hidden="true" />
+                    Capacidade Territorial e Expansão
+                  </h3>
+                  <span className="text-xs font-bold text-[#3c3426] tabular-nums">
+                    Restam {territorySummary.remaining} {territorySummary.remaining === 1 ? 'vaga' : 'vagas'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs tabular-nums">
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Controlados</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-[#1f1a12]">
+                      {territorySummary.controlled}
+                    </p>
+                  </div>
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Em Curso</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-sky-700">
+                      {territorySummary.inProgress}
+                    </p>
+                  </div>
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Capacidade</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-emerald-800">
+                      {territorySummary.used} / {territorySummary.capacity}
+                    </p>
+                  </div>
+                  <div className="bg-[#f7f2e6] rounded-lg p-2.5">
+                    <p className="text-[10px] font-bold uppercase text-[#6e604a]">Alcance Adm.</p>
+                    <p className="mt-0.5 font-display text-base font-bold text-[#1f1a12]">
+                      {territorySummary.maxAnchorReach} hexes
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-[11px] font-semibold text-[#5c5140] tabular-nums">
+                  Base +{territorySummary.baseCapacity} · População +{territorySummary.populationBonus} · Infraestrutura +{territorySummary.infrastructureBonus} · Tecnologia +{territorySummary.techBonus}
                 </p>
+
+                {(kingdomState.expansions ?? []).length > 0 && (
+                  <div className="pt-2 border-t border-[#ece4d3] space-y-1.5 text-xs">
+                    {(kingdomState.expansions ?? []).map((exp) => {
+                      const tile = kingdomState.worldState.hexes[`${exp.q},${exp.r}`];
+                      const info = getHexTerrainAndResource(exp.q, exp.r, tile);
+                      return (
+                        <div
+                          key={`${exp.q},${exp.r}`}
+                          className="flex items-center justify-between gap-2 bg-sky-50 border border-sky-200 rounded-lg px-3 py-1.5"
+                        >
+                          <span className="font-bold text-[#1f1a12]">
+                            Incorporando {TERRAIN_METADATA[info.terrainType].labelPt}
+                          </span>
+                          <span className="text-[11px] font-bold text-sky-800 tabular-nums">
+                            {exp.turnsRemaining}/{exp.totalTurns}t · {exp.workersCommitted} trab.
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </section>
 
               {/* Active Multi-Turn Effects */}
@@ -366,13 +499,36 @@ export default function KingdomModal({
                   </div>
 
                   <div className="py-2 flex items-center justify-between gap-2">
-                    <span className="font-semibold text-[#2a2319]">Minério</span>
+                    <div>
+                      <span className="font-semibold text-[#2a2319]">Minério</span>
+                      {economy.oreConsumed > 0 && (
+                        <span className="ml-2 text-[11px] text-[#6e604a]">
+                          (Fundição -{economy.oreConsumed}/turno)
+                        </span>
+                      )}
+                    </div>
                     <div>
                       <span className="font-bold text-[#1f1a12] mr-3">
                         {kingdomState.resources.ore} / {economy.storageCaps.ore}
                       </span>
-                      <span className="font-bold text-emerald-700">
+                      <span
+                        className={`font-bold ${
+                          economy.oreNet >= 0 ? 'text-emerald-700' : 'text-amber-700'
+                        }`}
+                      >
                         {formatSigned(economy.oreNet)}/turno
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="py-2 flex items-center justify-between gap-2">
+                    <span className="font-semibold text-[#2a2319]">Metal</span>
+                    <div>
+                      <span className="font-bold text-[#1f1a12] mr-3">
+                        {kingdomState.resources.metal} / {economy.storageCaps.metal}
+                      </span>
+                      <span className="font-bold text-emerald-700">
+                        {formatSigned(economy.metalNet)}/turno
                       </span>
                     </div>
                   </div>
@@ -707,6 +863,7 @@ export default function KingdomModal({
                         </div>
                         <p className="text-[11px] text-[#5c5140]">
                           {formatCash(u.cost.gold)} · {u.cost.wood} Mad · {u.cost.food} Alim · {u.cost.ore} Min
+                          {u.cost.metal > 0 ? ` · ${u.cost.metal} Met` : ''}
                         </p>
                         {locked && u.requiredTech && (
                           <p className="text-[11px] font-semibold text-rose-700">
