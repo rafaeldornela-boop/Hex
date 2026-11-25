@@ -1,77 +1,44 @@
 # Contrato — Events Narrative 2.0
 
-**Agente:** grok  
-**Branch:** `grok/events-narrative`  
-**Arquivos principais:**
+**Branch:** `grok/events-narrative`
+
+## Arquivos
 
 | Arquivo | Papel |
 |---------|--------|
 | `lib/events-engine.ts` | Catálogo, geração, resolução, crônica |
-| `lib/event-images.ts` | Biblioteca estática de imagens temáticas |
-| `public/event-images/*.svg` | Assets visuais reutilizáveis |
+| `lib/event-images.ts` | Catálogo de imagens temáticas |
+| `public/event-images/*.svg` | Placeholders SVG substituíveis por WebP/PNG |
 | `lib/events-engine.test.ts` | Testes |
 
-Não altera `HexWorldGame.tsx`, `HexSceneController.ts`, `GameHud.tsx`, economia, militar, tech ou exploração.
+## Compatibilidade legada
 
----
+Preservados para `turn-engine` / `kingdom-engine`:
 
-## Compatibilidade
-
-APIs legadas **preservadas** (usadas por `turn-engine` e `kingdom-engine`):
-
-```ts
-generateTurnEvent(turn, borderTarget?) → ActiveKingdomEvent | null
-type KingdomEventKind  // estendido com novos kinds
-type ActiveKingdomEvent // campos opcionais novos
-type EventChoiceOption
-type ActiveWorldEffect
-type EventHistoryEntry
-```
-
-Choice IDs clássicos (`irrigate_fields`, `accept_drought`, `store_food`, …) **permanecem** para `resolveKingdomEvent` em `kingdom-engine.ts` continuar funcionando.
-
----
+- `generateTurnEvent(turn, borderTarget?)`
+- `KingdomEventKind` (estendido)
+- `ActiveKingdomEvent`, `EventChoiceOption`, `ActiveWorldEffect`, `EventHistoryEntry`
+- Choice IDs clássicos (`irrigate_fields`, `accept_drought`, `store_food`, …)
 
 ## Novas APIs
 
-### Geração contextual
-
 ```ts
 generateContextualEvent(ctx: EventWorldContext): ActiveKingdomEvent | null
-```
-
-### Resolução data-driven
-
-```ts
 resolveEventChoice(event, choiceId, { turn, gold, defensePower }): EventResolution
-```
-
-### Estado narrativo
-
-```ts
 createInitialNarrativeState()
-applyResolutionToNarrative(narrative, resolution, turn, importance?)
+applyResolutionToNarrative(narrative, resolution, turn)
 serializeNarrativeState / deserializeNarrativeState
+getEventImage(category)
+getEventCatalogStats()
 ```
 
-### Imagens
+`EventResolution.chronicleWorthy` controla o que entra na Crônica do Reino (crises, raros, invasões, diplomacia, fim de cadeia).
 
-```ts
-getEventImage(category) → { src, labelPt, accentHex }
-// src: '/event-images/<category>.svg'
-```
+## Integração futura (Antigravity)
 
----
-
-## Integração sugerida
-
-1. Preferir `generateContextualEvent` com snapshot do reino; manter `generateTurnEvent` como fallback.
-2. `resolveKingdomEvent` deve delegar para `resolveEventChoice` e aplicar deltas + narrative state.
+1. Preferir `generateContextualEvent` com snapshot do reino.
+2. `resolveKingdomEvent` → delegar a `resolveEventChoice` e aplicar deltas.
 3. Persistir `NarrativeState` no save.
-4. UI: `imageSrc`, `category`, `rarity`, crônica.
+4. UI: `imageSrc`, raridade, crônica.
 
-## Limitações
-
-- resolveKingdomEvent ainda não delega automaticamente.
-- SVGs são placeholders temáticos.
-- Áudio/animações fora de escopo.
+Não alterar UI/turn/kingdom neste branch.
