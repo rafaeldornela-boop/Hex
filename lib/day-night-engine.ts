@@ -95,8 +95,8 @@ const PHASE_PRESETS: Record<DayPhaseId, PhaseVisualPreset> = {
     rimIntensity: 0.34,
     skyHex: 0xd99b8c,
     fogHex: 0xd6a49a,
-    fogNear: 24,
-    fogFar: 98,
+    fogNear: 32,
+    fogFar: 124,
     waterTintHex: 0xd1bccc,
     exposure: 0.86,
     environmentIntensity: 0.2,
@@ -116,8 +116,8 @@ const PHASE_PRESETS: Record<DayPhaseId, PhaseVisualPreset> = {
     rimIntensity: 0.28,
     skyHex: 0xa6d8f2,
     fogHex: 0xaad9f0,
-    fogNear: 36,
-    fogFar: 130,
+    fogNear: 46,
+    fogFar: 162,
     waterTintHex: 0xffffff,
     exposure: 0.93,
     environmentIntensity: 0.32,
@@ -137,8 +137,8 @@ const PHASE_PRESETS: Record<DayPhaseId, PhaseVisualPreset> = {
     rimIntensity: 0.28,
     skyHex: 0x9bd2ee,
     fogHex: 0x9bd2ee,
-    fogNear: 38,
-    fogFar: 135,
+    fogNear: 48,
+    fogFar: 170,
     waterTintHex: 0xffffff,
     exposure: 0.93,
     environmentIntensity: 0.34,
@@ -158,8 +158,8 @@ const PHASE_PRESETS: Record<DayPhaseId, PhaseVisualPreset> = {
     rimIntensity: 0.3,
     skyHex: 0xaacae4,
     fogHex: 0xb5cde0,
-    fogNear: 35,
-    fogFar: 126,
+    fogNear: 44,
+    fogFar: 158,
     waterTintHex: 0xf7ebd9,
     exposure: 0.92,
     environmentIntensity: 0.3,
@@ -179,8 +179,8 @@ const PHASE_PRESETS: Record<DayPhaseId, PhaseVisualPreset> = {
     rimIntensity: 0.34,
     skyHex: 0x4b3b69,
     fogHex: 0x5c476e,
-    fogNear: 21,
-    fogFar: 86,
+    fogNear: 28,
+    fogFar: 112,
     waterTintHex: 0x82658a,
     exposure: 0.8,
     environmentIntensity: 0.14,
@@ -201,8 +201,8 @@ const PHASE_PRESETS: Record<DayPhaseId, PhaseVisualPreset> = {
     rimIntensity: 0.22,
     skyHex: 0x0b162b,
     fogHex: 0x10203d,
-    fogNear: 18,
-    fogFar: 74,
+    fogNear: 24,
+    fogFar: 98,
     waterTintHex: 0x26416b,
     exposure: 0.68,
     environmentIntensity: 0.04,
@@ -296,7 +296,7 @@ export function computeAtmosphereTarget(params: {
     skyHex = lerpHexColor(skyHex, meta.isNight ? 0x162540 : 0xbdd7eb, 0.32);
     fogHex = lerpHexColor(fogHex, meta.isNight ? 0x1b2d4d : 0xc6ddf0, 0.35);
     waterTintHex = lerpHexColor(waterTintHex, meta.isNight ? 0x3b5882 : 0xadc8e6, 0.35);
-    fogNear = Math.max(14, fogNear - 4);
+    fogNear = Math.max(18, fogNear - 4);
     if (meta.isNight) environmentIntensity = Math.min(environmentIntensity, 0.06);
   } else {
     // Spring: fresh crisp hue
@@ -313,8 +313,8 @@ export function computeAtmosphereTarget(params: {
     environmentIntensity *= isStorm ? 0.75 : 0.88;
     skyHex = lerpHexColor(skyHex, meta.isNight ? 0x0a1322 : 0x72889e, isStorm ? 0.55 : 0.38);
     fogHex = lerpHexColor(fogHex, meta.isNight ? 0x0f1b30 : 0x8096ab, isStorm ? 0.55 : 0.38);
-    fogNear = Math.max(14, fogNear - (isStorm ? 10 : 6));
-    fogFar = Math.max(62, fogFar - (isStorm ? 30 : 18));
+    fogNear = Math.max(18, fogNear - (isStorm ? 10 : 6));
+    fogFar = Math.max(76, fogFar - (isStorm ? 32 : 20));
     waterTintHex = lerpHexColor(waterTintHex, 0x455d78, 0.45);
   } else if (weather === 'frost') {
     skyHex = lerpHexColor(skyHex, meta.isNight ? 0x132440 : 0xc8e0f4, 0.35);

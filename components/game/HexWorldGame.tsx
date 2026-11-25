@@ -1471,6 +1471,21 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     return getCityAtCoord(kingdomState.cities, selectedHex.q, selectedHex.r);
   }, [kingdomState.cities, selectedHex]);
 
+  useEffect(() => {
+    if (!selectedCity) {
+      controllerRef.current?.syncSelectedCityRegion({ regionKeys: [], districtKeys: [] });
+      return;
+    }
+    const regionKeys =
+      economy.regionalSummary?.regionHexKeysByCityId[selectedCity.id] ??
+      selectedCity.regionHexKeys ??
+      [];
+    const districtKeys = Array.from(
+      new Set(selectedCity.districts.flatMap((d) => d.hexKeys))
+    );
+    controllerRef.current?.syncSelectedCityRegion({ regionKeys, districtKeys });
+  }, [economy.regionalSummary, selectedCity]);
+
   const selectedRoad = useMemo<RoadTile | null>(() => {
     if (!selectedHex) return null;
     return getRoadAt(kingdomState.roads, selectedHex.q, selectedHex.r);

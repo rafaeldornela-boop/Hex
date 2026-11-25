@@ -537,7 +537,11 @@ export default function KingdomModal({
                           {city.name} · {city.stageLabelPt} (Estágio {city.level}/5)
                         </span>
                         <span className="text-[11px] font-semibold text-[#5c5140] tabular-nums">
-                          Pop. ~{city.localPopulation} · {city.stabilityLabelPt}
+                          Pop. ~{city.localPopulation}
+                          {(city.regionHexKeys?.length ?? 0) > 0
+                            ? ` · ${city.regionHexKeys?.length} hexes na região`
+                            : ''}{' '}
+                          · {city.stabilityLabelPt}
                           {city.nextLevelScore !== null
                             ? ` · Evol. ${city.developmentScore}/${city.nextLevelScore}`
                             : ' · Máx.'}
@@ -545,13 +549,17 @@ export default function KingdomModal({
                       </div>
 
                       {city.specializations.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5">
-                          {city.specializations.map((spec) => (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {city.specializations.map((spec, idx) => (
                             <span
                               key={spec.id}
-                              className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 text-[10px] font-bold"
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                idx === 0
+                                  ? 'bg-emerald-700 text-white'
+                                  : 'bg-emerald-100 text-emerald-900'
+                              }`}
                             >
-                              {spec.labelPt}
+                              {spec.labelPt} · {spec.stageLabelPt}
                             </span>
                           ))}
                           {city.connectedCityIds.length > 0 && (
@@ -561,6 +569,12 @@ export default function KingdomModal({
                             </span>
                           )}
                         </div>
+                      )}
+
+                      {city.primarySpecialization && (
+                        <p className="text-[11px] font-semibold text-emerald-900">
+                          Bônus Regional: {city.primarySpecialization.bonusSummaryPt}
+                        </p>
                       )}
 
                       {city.districts.length > 0 && (
@@ -665,6 +679,9 @@ export default function KingdomModal({
                           : ''}
                         {economy.networkTradeGold + economy.corridorTradeGold > 0
                           ? ` · Rede Viária +${formatCash(economy.networkTradeGold + economy.corridorTradeGold)}`
+                          : ''}
+                        {economy.regionalBonusGold > 0
+                          ? ` · Regiões +${formatCash(economy.regionalBonusGold)}`
                           : ''}
                       </p>
                     </div>

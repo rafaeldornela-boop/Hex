@@ -49,8 +49,8 @@ import {
   type DayPhaseId,
 } from '@/lib/day-night-engine';
 import {
-  computeTileClimateProfile,
-  computeTileSeasonalTintHex,
+  computeFarmCropVisualState,
+  computeHexSeasonalVisualProfile,
   type ClimateWeatherId,
 } from '@/lib/season-engine';
 import {
@@ -105,10 +105,10 @@ interface CachedSubMesh {
   localMatrix: THREE.Matrix4;
 }
 
-const CAMERA_MIN_DIST = 6.5;
-const CAMERA_MAX_DIST = 54;
-const CAMERA_PAN_BOUND_X = 24;
-const CAMERA_PAN_BOUND_Z = 27;
+const CAMERA_MIN_DIST = 8.0;
+const CAMERA_MAX_DIST = 72;
+const CAMERA_PAN_BOUND_X = 31;
+const CAMERA_PAN_BOUND_Z = 35;
 const TILE_SURFACE_Y = 0.2 * HEX_WORLD_SCALE;
 
 // Pre-allocated scratch helpers (zero GC inside animation loop)
@@ -464,6 +464,72 @@ function createTintedMaterialVariant(
   return Array.isArray(mat) ? mat.map(cloneOne) : cloneOne(mat);
 }
 
+function createSeasonalTerrainMaterialVariant(
+  mat: THREE.Material | THREE.Material[]
+): THREE.Material | THREE.Material[] {
+  const cloneOne = (m: THREE.Material): THREE.Material => {
+    const cloned = m.clone();
+    cloned.customProgramCacheKey = () => 'hex-seasonal-terrain-v1';
+    cloned.onBeforeCompile = (shader) => {
+      shader.vertexShader =
+        `attribute vec4 aSeasonData;\nvarying vec3 vLocalSeasonPos;\nvarying vec4 vSeasonData;\n` +
+        shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>\nvLocalSeasonPos = position;\nvSeasonData = aSeasonData;\n`
+        );
+      shader.fragmentShader =
+        `varying vec3 vLocalSeasonPos;\nvarying vec4 vSeasonData;\n` +
+        shader.fragmentShader.replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+          {
+            float sShift = vSeasonData.x;
+            float sSnow = vSeasonData.y;
+            float sWetIce = vSeasonData.z;
+            float sDecid = vSeasonData.w;
+            float py = vLocalSeasonPos.y;
+            bool isCanopy = (py > 0.24 && py < 0.72);
+            if (isCanopy && sShift > 0.95) {
+              float autT = clamp((sShift - 0.95) / 1.05, 0.0, 1.0);
+              if (sDecid > 0.5) {
+                float hueVar = fract(sin(dot(vLocalSeasonPos.xz, vec2(12.9898, 78.233))) * 43758.5453);
+                vec3 autCol = mix(vec3(0.86, 0.56, 0.14), vec3(0.76, 0.25, 0.12), step(0.48, hueVar));
+                diffuseColor.rgb = mix(diffuseColor.rgb, autCol, autT * 0.84);
+              } else {
+                diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.14, 0.34, 0.20), autT * 0.35);
+              }
+            } else if (isCanopy && sShift > 0.3) {
+              float sprT = clamp((sShift - 0.3) * 0.7, 0.0, 1.0);
+              diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.32, 0.72, 0.28), sprT * 0.34);
+            } else if (isCanopy && sShift < -0.25) {
+              float winT = clamp((-sShift - 0.25) / 0.7, 0.0, 1.0);
+              if (sDecid > 0.5) {
+                diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.47, 0.33, 0.22), winT * 0.76);
+              } else {
+                diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.13, 0.31, 0.22), winT * 0.42);
+              }
+            }
+            if (py <= 0.22 && sWetIce > 0.1) {
+              diffuseColor.rgb *= mix(1.0, 0.85, clamp(sWetIce, 0.0, 0.8));
+            }
+            if (sSnow > 0.01) {
+              float snowMask = 0.0;
+              if (py > 0.40) {
+                snowMask = smoothstep(0.38, 0.64, py) * sSnow;
+              } else if (py <= 0.22 && sDecid < 0.5) {
+                snowMask = sSnow * 0.52;
+              }
+              diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.92, 0.96, 1.0), clamp(snowMask, 0.0, 0.92));
+            }
+          }`
+        );
+    };
+    cloned.needsUpdate = true;
+    return cloned;
+  };
+  return Array.isArray(mat) ? mat.map(cloneOne) : cloneOne(mat);
+}
+
 export class HexSceneController {
   private container: HTMLElement;
   private callbacks: HexSceneCallbacks;
@@ -506,8 +572,10 @@ export class HexSceneController {
       level: number;
     }
   >();
+  private seasonalTerrainMats = new Map<string, THREE.Material | THREE.Material[]>();
   private terrainInstanceEntries: Array<{
     im: THREE.InstancedMesh;
+    assetName: string;
     entries: Array<{ tile: PlacedHex; owner: HexOwner }>;
   }> = [];
 
@@ -525,6 +593,12 @@ export class HexSceneController {
   private upgradeGoldMat: THREE.MeshStandardMaterial;
   private upgradeGeoCache = new Map<string, THREE.BufferGeometry>();
   private roadLanternsMesh: THREE.InstancedMesh;
+  private springFlowersMesh: THREE.InstancedMesh;
+  private farmCropStalksMesh: THREE.InstancedMesh;
+  private farmCropHeadsMesh: THREE.InstancedMesh;
+  private winterIceMesh: THREE.InstancedMesh;
+  private lastUnderConstructionKeys = new Set<string>();
+  private lastSeasonalDetailsSig = '';
   private currentSeason: SeasonId = 'spring';
   private currentSeasonProgress = 0;
   private currentWeather: ClimateWeatherId = 'clear';
@@ -546,8 +620,8 @@ export class HexSceneController {
   private curRimIntensity = 0.28;
   private curSkyColor = new THREE.Color(0xa6d8f2);
   private curFogColor = new THREE.Color(0xaad9f0);
-  private curFogNear = 36;
-  private curFogFar = 130;
+  private curFogNear = 46;
+  private curFogFar = 162;
   private curWaterTint = new THREE.Color(0xffffff);
   private curExposure = 0.93;
   private curEnvIntensity = 0.32;
@@ -571,9 +645,13 @@ export class HexSceneController {
   private influenceKeys = new Set<string>();
   private lastExpansionSignature = '';
   private fertileOverlayMesh: THREE.Mesh;
+  private fertileOverlayMat: THREE.MeshBasicMaterial;
   private underConstructionOverlayMesh: THREE.Mesh;
   private attentionOverlayMesh: THREE.Mesh;
   private lastAttentionSignature = '';
+  private selectedRegionOverlayMesh: THREE.Mesh;
+  private selectedDistrictOverlayMesh: THREE.Mesh;
+  private lastSelectedRegionSig = '';
   private rareMarkersGroup = new THREE.Group();
   private roadsMesh: THREE.Mesh;
   private tradeCorridorsMesh: THREE.Mesh;
@@ -606,8 +684,8 @@ export class HexSceneController {
   private camTargetGoal = new THREE.Vector3(0, 0, 0);
   private camYaw = Math.PI / 4; // 45° isometric view
   private camYawGoal = Math.PI / 4;
-  private camDistance = 15.5;
-  private camDistanceGoal = 15.5;
+  private camDistance = 19.0;
+  private camDistanceGoal = 19.0;
   private camPitch = 0.66; // ~38° down-angle
 
   // Desktop pointer + keyboard input state
@@ -695,7 +773,7 @@ export class HexSceneController {
     const defaultDist = this.getDefaultCameraDistance(aspect);
     this.camDistance = defaultDist;
     this.camDistanceGoal = defaultDist;
-    this.camera = new THREE.PerspectiveCamera(aspect < 0.8 ? 36 : 32, aspect, 0.1, 260);
+    this.camera = new THREE.PerspectiveCamera(aspect < 0.8 ? 36 : 32, aspect, 0.1, 360);
 
     // Warm/Cool 3-Point Outdoor Lighting Rig (1 shadow caster following camTarget)
     this.hemiLight = new THREE.HemisphereLight(0x98d2f7, 0x5a6e47, 0.6);
@@ -710,13 +788,13 @@ export class HexSceneController {
         this.quality.shadowMapSize,
         this.quality.shadowMapSize
       );
-      const d = 18;
+      const d = 23;
       this.sunLight.shadow.camera.left = -d;
       this.sunLight.shadow.camera.right = d;
       this.sunLight.shadow.camera.top = d;
       this.sunLight.shadow.camera.bottom = -d;
       this.sunLight.shadow.camera.near = 2;
-      this.sunLight.shadow.camera.far = 75;
+      this.sunLight.shadow.camera.far = 95;
       this.sunLight.shadow.bias = -0.0005;
       this.sunLight.shadow.normalBias = 0.02;
     }
@@ -802,8 +880,8 @@ export class HexSceneController {
       this.quality.waterTextureSize,
       maxAniso
     );
-    this.waterTexture.repeat.set(38, 38);
-    const waterGeo = new THREE.PlaneGeometry(420, 420);
+    this.waterTexture.repeat.set(48, 48);
+    const waterGeo = new THREE.PlaneGeometry(540, 540);
     waterGeo.rotateX(-Math.PI / 2);
     this.waterMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
@@ -928,7 +1006,7 @@ export class HexSceneController {
     this.expandingOverlayMesh.frustumCulled = false;
     this.scene.add(this.expandingOverlayMesh);
 
-    const fertileMat = new THREE.MeshBasicMaterial({
+    this.fertileOverlayMat = new THREE.MeshBasicMaterial({
       color: 0x4d7c0f,
       transparent: true,
       opacity: 0.76,
@@ -940,7 +1018,7 @@ export class HexSceneController {
     });
     this.fertileOverlayMesh = new THREE.Mesh(
       new THREE.BufferGeometry(),
-      fertileMat
+      this.fertileOverlayMat
     );
     this.fertileOverlayMesh.frustumCulled = false;
     this.scene.add(this.fertileOverlayMesh);
@@ -978,6 +1056,103 @@ export class HexSceneController {
     );
     this.attentionOverlayMesh.frustumCulled = false;
     this.scene.add(this.attentionOverlayMesh);
+
+    // Selected city regional domain & active districts highlight (hidden until a city center is clicked)
+    this.selectedRegionOverlayMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      new THREE.MeshBasicMaterial({
+        color: 0x10b981,
+        transparent: true,
+        opacity: 0.84,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      })
+    );
+    this.selectedRegionOverlayMesh.frustumCulled = false;
+    this.scene.add(this.selectedRegionOverlayMesh);
+
+    this.selectedDistrictOverlayMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      new THREE.MeshBasicMaterial({
+        color: 0xfacc15,
+        transparent: true,
+        opacity: 0.65,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -3,
+        polygonOffsetUnits: -3,
+      })
+    );
+    this.selectedDistrictOverlayMesh.frustumCulled = false;
+    this.scene.add(this.selectedDistrictOverlayMesh);
+
+    // Batched seasonal detail InstancedMeshes (spring blossoms, 4-season farm crops, winter northern ice)
+    const flowerGeo = new THREE.DodecahedronGeometry(0.026 * HEX_WORLD_SCALE, 0);
+    const flowerMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.62,
+      metalness: 0.0,
+      flatShading: true,
+    });
+    this.springFlowersMesh = new THREE.InstancedMesh(flowerGeo, flowerMat, 1);
+    this.springFlowersMesh.count = 0;
+    this.springFlowersMesh.frustumCulled = false;
+    this.scene.add(this.springFlowersMesh);
+
+    const cropStalkGeo = new THREE.BoxGeometry(
+      0.32 * HEX_WORLD_SCALE,
+      0.095 * HEX_WORLD_SCALE,
+      0.042 * HEX_WORLD_SCALE
+    );
+    const cropStalkMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.78,
+      metalness: 0.02,
+      flatShading: true,
+    });
+    this.farmCropStalksMesh = new THREE.InstancedMesh(cropStalkGeo, cropStalkMat, 1);
+    this.farmCropStalksMesh.count = 0;
+    this.farmCropStalksMesh.frustumCulled = false;
+    this.scene.add(this.farmCropStalksMesh);
+
+    const cropHeadGeo = new THREE.BoxGeometry(
+      0.34 * HEX_WORLD_SCALE,
+      0.046 * HEX_WORLD_SCALE,
+      0.048 * HEX_WORLD_SCALE
+    );
+    const cropHeadMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.72,
+      metalness: 0.04,
+      flatShading: true,
+    });
+    this.farmCropHeadsMesh = new THREE.InstancedMesh(cropHeadGeo, cropHeadMat, 1);
+    this.farmCropHeadsMesh.count = 0;
+    this.farmCropHeadsMesh.frustumCulled = false;
+    this.scene.add(this.farmCropHeadsMesh);
+
+    const iceGeo = new THREE.CylinderGeometry(
+      HEX_OUTER_RADIUS * 0.72,
+      HEX_OUTER_RADIUS * 0.78,
+      0.015 * HEX_WORLD_SCALE,
+      6
+    );
+    const iceMat = new THREE.MeshStandardMaterial({
+      color: 0xdff2ff,
+      roughness: 0.25,
+      metalness: 0.08,
+      transparent: true,
+      opacity: 0.76,
+      flatShading: true,
+    });
+    this.winterIceMesh = new THREE.InstancedMesh(iceGeo, iceMat, 1);
+    this.winterIceMesh.count = 0;
+    this.winterIceMesh.frustumCulled = false;
+    this.scene.add(this.winterIceMesh);
 
     const unitTargetMat = new THREE.MeshBasicMaterial({
       color: 0x10b981,
@@ -1131,7 +1306,7 @@ export class HexSceneController {
   }
 
   private getDefaultCameraDistance(aspect: number): number {
-    return aspect < 0.8 ? 21.5 : 15.5;
+    return aspect < 0.8 ? 26.5 : 19.0;
   }
 
   private getHomeWorldPos(): { x: number; z: number } {
@@ -1228,9 +1403,9 @@ export class HexSceneController {
       const home = this.getHomeWorldPos();
       this.camTargetGoal.set(home.x, 0, home.z);
     } else if (e.code === 'Equal' || e.code === 'NumpadAdd') {
-      this.zoomBy(-2.0);
+      this.zoomBy(-2.5);
     } else if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
-      this.zoomBy(2.0);
+      this.zoomBy(2.5);
     }
     this.wakeRenderLoop();
   };
@@ -1467,7 +1642,7 @@ export class HexSceneController {
     if (e.shiftKey) {
       this.callbacks.onCycleStructure(e.deltaY > 0 ? 1 : -1);
     } else {
-      const zoomStep = e.ctrlKey || e.metaKey ? 1.4 : 2.4;
+      const zoomStep = e.ctrlKey || e.metaKey ? 1.8 : 3.0;
       this.zoomBy(e.deltaY > 0 ? zoomStep : -zoomStep);
     }
     this.wakeRenderLoop();
@@ -2304,7 +2479,25 @@ export class HexSceneController {
     }
   }
 
-  private computeTileColorHex(tile: PlacedHex, owner: HexOwner): number {
+  private getSeasonalTerrainMaterial(
+    assetName: string,
+    subIdx: number,
+    baseMat: THREE.Material | THREE.Material[]
+  ): THREE.Material | THREE.Material[] {
+    const cacheKey = `${assetName}:${subIdx}`;
+    let cached = this.seasonalTerrainMats.get(cacheKey);
+    if (!cached) {
+      cached = createSeasonalTerrainMaterialVariant(baseMat);
+      this.seasonalTerrainMats.set(cacheKey, cached);
+    }
+    return cached;
+  }
+
+  private getTileSeasonalProfile(
+    tile: PlacedHex,
+    owner: HexOwner,
+    assetName: string
+  ) {
     const ownerTintHex =
       owner === 'player'
         ? 0xffffff
@@ -2313,37 +2506,329 @@ export class HexSceneController {
           : owner === 'azure_league'
             ? 0xb5d0f2
             : 0x8fa7be;
-
-    const terrain = getHexTerrainAndResource(tile.q, tile.r, tile).terrainType;
-    const climate = computeTileClimateProfile({
+    return computeHexSeasonalVisualProfile({
       q: tile.q,
       r: tile.r,
       tile,
+      assetName,
+      ownerTintHex,
+      season: this.currentSeason,
+      seasonProgress: this.currentSeasonProgress,
+      weather: this.currentWeather,
       worldCols: this.currentWorldState.worldCols,
       worldRows: this.currentWorldState.worldRows,
       worldSeed: this.currentWorldSeed,
-    });
-    return computeTileSeasonalTintHex({
-      ownerTintHex,
-      terrainType: terrain,
-      season: this.currentSeason,
-      seasonProgress: this.currentSeasonProgress,
-      climate,
-      weather: this.currentWeather,
     });
   }
 
   private applySeasonalTerrainColors() {
     for (const bucket of this.terrainInstanceEntries) {
-      const { im, entries } = bucket;
+      const { im, assetName, entries } = bucket;
+      const seasonAttr = im.geometry.getAttribute('aSeasonData') as
+        | THREE.InstancedBufferAttribute
+        | undefined;
       for (let i = 0; i < entries.length; i++) {
         const { tile, owner } = entries[i];
-        im.setColorAt(i, _colorTmp.setHex(this.computeTileColorHex(tile, owner)));
+        const profile = this.getTileSeasonalProfile(tile, owner, assetName);
+        im.setColorAt(i, _colorTmp.setHex(profile.instanceTintHex));
+        if (seasonAttr) {
+          seasonAttr.setXYZW(
+            i,
+            profile.foliageShift,
+            profile.snowAmount,
+            profile.wetnessOrIce,
+            profile.isDeciduous ? 1.0 : 0.0
+          );
+        }
       }
       if (im.instanceColor) {
         im.instanceColor.needsUpdate = true;
       }
+      if (seasonAttr) {
+        seasonAttr.needsUpdate = true;
+      }
     }
+    this.rebuildSeasonalDetailLayers();
+    this.wakeRenderLoop();
+  }
+
+  private rebuildSeasonalDetailLayers() {
+    const baseCropState = computeFarmCropVisualState({
+      season: this.currentSeason,
+      seasonProgress: this.currentSeasonProgress,
+      farmLevel: 1,
+      weather: this.currentWeather,
+    });
+    this.fertileOverlayMat.color.setHex(baseCropState.furrowColorHex);
+
+    const tileKeysSig = Object.keys(this.currentWorldState.hexes).length;
+    const progressBucket = Math.round(this.currentSeasonProgress * 12);
+    const farmSig = Object.values(this.currentWorldState.hexes)
+      .filter((t) => HEX_ASSETS[t.structureIndex]?.name === 'building-farm')
+      .map((t) => `${t.q},${t.r}:${t.level ?? 1}:${this.lastUnderConstructionKeys.has(hexKey(t.q, t.r)) ? 'u' : 'c'}`)
+      .join('|');
+    const detailSig = `${this.currentSeason}:${progressBucket}:${this.currentWeather}:${tileKeysSig}:${farmSig}`;
+    if (detailSig === this.lastSeasonalDetailsSig) return;
+    this.lastSeasonalDetailsSig = detailSig;
+
+    const flowerTransforms: Array<{ x: number; z: number; scale: number; rot: number; color: number }> = [];
+    const cropRows: Array<{
+      x: number;
+      z: number;
+      rotY: number;
+      stalkScale: number;
+      headScale: number;
+      stalkColor: number;
+      headColor: number;
+    }> = [];
+    const iceHexes: Array<{ x: number; z: number; scale: number }> = [];
+
+    const FLOWER_PALETTE = [0xfef08a, 0xf9a8d4, 0xffffff, 0xbae6fd];
+    const FLOWER_OFFSETS: Array<[number, number]> = [
+      [-0.22 * HEX_WORLD_SCALE, -0.14 * HEX_WORLD_SCALE],
+      [0.19 * HEX_WORLD_SCALE, -0.18 * HEX_WORLD_SCALE],
+      [0.06 * HEX_WORLD_SCALE, 0.21 * HEX_WORLD_SCALE],
+    ];
+    const FARM_ROW_OFFSETS = [
+      -0.16 * HEX_WORLD_SCALE,
+      0.0,
+      0.16 * HEX_WORLD_SCALE,
+    ];
+
+    for (const tile of Object.values(this.currentWorldState.hexes)) {
+      const key = hexKey(tile.q, tile.r);
+      const assetName = HEX_ASSETS[tile.structureIndex]?.name ?? '';
+      const center = axialToWorld(tile.q, tile.r);
+
+      if (assetName === 'building-farm' && !this.lastUnderConstructionKeys.has(key)) {
+        const crop = computeFarmCropVisualState({
+          season: this.currentSeason,
+          seasonProgress: this.currentSeasonProgress,
+          farmLevel: getBuildingLevel(tile),
+          weather: this.currentWeather,
+        });
+        const rotRad = THREE.MathUtils.degToRad(tile.orientation);
+        const cosR = Math.cos(rotRad);
+        const sinR = Math.sin(rotRad);
+        for (const dz of FARM_ROW_OFFSETS) {
+          const ox = 0.08 * HEX_WORLD_SCALE;
+          const rx = center.x + ox * cosR + dz * sinR;
+          const rz = center.z - ox * sinR + dz * cosR;
+          cropRows.push({
+            x: rx,
+            z: rz,
+            rotY: rotRad,
+            stalkScale: crop.stalkHeightScale,
+            headScale: crop.headScale,
+            stalkColor: crop.stalkColorHex,
+            headColor: crop.headColorHex,
+          });
+        }
+        continue;
+      }
+
+      if (hasHexConstruction(tile, HEX_ASSETS)) continue;
+
+      const profile = this.getTileSeasonalProfile(tile, tile.owner ?? 'neutral', assetName);
+      if (profile.flowerDensity > 0.14) {
+        const countForTile = profile.flowerDensity > 0.65 ? 3 : 2;
+        for (let fi = 0; fi < countForTile; fi++) {
+          const [ox, oz] = FLOWER_OFFSETS[fi];
+          const color =
+            FLOWER_PALETTE[Math.abs(tile.q * 7 + tile.r * 13 + fi) % FLOWER_PALETTE.length];
+          flowerTransforms.push({
+            x: center.x + ox,
+            z: center.z + oz,
+            scale: 0.75 + profile.flowerDensity * 0.45,
+            rot: ((tile.q + tile.r + fi) * 0.7) % Math.PI,
+            color,
+          });
+        }
+      }
+
+      if (profile.iceAmount > 0.16) {
+        iceHexes.push({
+          x: center.x,
+          z: center.z,
+          scale: 0.65 + profile.iceAmount * 0.35,
+        });
+      }
+    }
+
+    // Helper to ensure capacity without shrinking needlessly or leaking GPU buffers
+    const ensureInstancedCapacity = (
+      current: THREE.InstancedMesh,
+      needed: number,
+      assignMesh: (next: THREE.InstancedMesh) => void
+    ): THREE.InstancedMesh => {
+      if (needed <= current.instanceMatrix.count) return current;
+      const next = new THREE.InstancedMesh(
+        current.geometry,
+        current.material,
+        Math.max(16, Math.ceil(needed * 1.25))
+      );
+      next.frustumCulled = false;
+      this.scene.remove(current);
+      current.dispose();
+      this.scene.add(next);
+      assignMesh(next);
+      return next;
+    };
+
+    // 1. Spring blossoms
+    if (flowerTransforms.length > 0) {
+      const fm = ensureInstancedCapacity(
+        this.springFlowersMesh,
+        flowerTransforms.length,
+        (next) => {
+          this.springFlowersMesh = next;
+        }
+      );
+      for (let i = 0; i < flowerTransforms.length; i++) {
+        const f = flowerTransforms[i];
+        _dummy.position.set(f.x, TILE_SURFACE_Y + 0.014 * HEX_WORLD_SCALE, f.z);
+        _dummy.rotation.set(0, f.rot, 0);
+        _dummy.scale.set(f.scale, f.scale * 0.58, f.scale);
+        _dummy.updateMatrix();
+        fm.setMatrixAt(i, _dummy.matrix);
+        fm.setColorAt(i, _colorTmp.setHex(f.color));
+      }
+      fm.count = flowerTransforms.length;
+      fm.instanceMatrix.needsUpdate = true;
+      if (fm.instanceColor) fm.instanceColor.needsUpdate = true;
+    } else {
+      this.springFlowersMesh.count = 0;
+    }
+
+    // 2. 4-Season Farm Crops (stalks + heads)
+    if (cropRows.length > 0) {
+      const sm = ensureInstancedCapacity(
+        this.farmCropStalksMesh,
+        cropRows.length,
+        (next) => {
+          this.farmCropStalksMesh = next;
+        }
+      );
+      const hm = ensureInstancedCapacity(
+        this.farmCropHeadsMesh,
+        cropRows.length,
+        (next) => {
+          this.farmCropHeadsMesh = next;
+        }
+      );
+      for (let i = 0; i < cropRows.length; i++) {
+        const c = cropRows[i];
+        const stalkH = 0.095 * HEX_WORLD_SCALE * c.stalkScale;
+        _dummy.position.set(c.x, TILE_SURFACE_Y + 0.02 * HEX_WORLD_SCALE + stalkH * 0.5, c.z);
+        _dummy.rotation.set(0, c.rotY, 0);
+        _dummy.scale.set(1, c.stalkScale, 1);
+        _dummy.updateMatrix();
+        sm.setMatrixAt(i, _dummy.matrix);
+        sm.setColorAt(i, _colorTmp.setHex(c.stalkColor));
+
+        _dummy.position.set(
+          c.x,
+          TILE_SURFACE_Y + 0.02 * HEX_WORLD_SCALE + stalkH + 0.015 * HEX_WORLD_SCALE,
+          c.z
+        );
+        _dummy.scale.set(1, c.headScale, c.headScale > 0.5 ? 1.1 : 0.85);
+        _dummy.updateMatrix();
+        hm.setMatrixAt(i, _dummy.matrix);
+        hm.setColorAt(i, _colorTmp.setHex(c.headColor));
+      }
+      sm.count = cropRows.length;
+      hm.count = cropRows.length;
+      sm.instanceMatrix.needsUpdate = true;
+      hm.instanceMatrix.needsUpdate = true;
+      if (sm.instanceColor) sm.instanceColor.needsUpdate = true;
+      if (hm.instanceColor) hm.instanceColor.needsUpdate = true;
+    } else {
+      this.farmCropStalksMesh.count = 0;
+      this.farmCropHeadsMesh.count = 0;
+    }
+
+    // 3. Northern winter sea ice plates
+    if (iceHexes.length > 0) {
+      const im = ensureInstancedCapacity(
+        this.winterIceMesh,
+        iceHexes.length,
+        (next) => {
+          this.winterIceMesh = next;
+        }
+      );
+      for (let i = 0; i < iceHexes.length; i++) {
+        const ice = iceHexes[i];
+        _dummy.position.set(ice.x, TILE_SURFACE_Y * 0.64, ice.z);
+        _dummy.rotation.set(0, 0, 0);
+        _dummy.scale.set(ice.scale, 1, ice.scale);
+        _dummy.updateMatrix();
+        im.setMatrixAt(i, _dummy.matrix);
+      }
+      im.count = iceHexes.length;
+      im.instanceMatrix.needsUpdate = true;
+    } else {
+      this.winterIceMesh.count = 0;
+    }
+  }
+
+  public syncSelectedCityRegion(params: {
+    regionKeys: string[];
+    districtKeys: string[];
+  }) {
+    const regArr = [...params.regionKeys].sort();
+    const distArr = [...params.districtKeys].sort();
+    const sig = `${regArr.join(',')}|${distArr.join(',')}`;
+    if (sig === this.lastSelectedRegionSig) return;
+    this.lastSelectedRegionSig = sig;
+
+    const oldRegGeo = this.selectedRegionOverlayMesh.geometry;
+    const oldDistGeo = this.selectedDistrictOverlayMesh.geometry;
+
+    if (regArr.length === 0) {
+      this.selectedRegionOverlayMesh.geometry = new THREE.BufferGeometry();
+      this.selectedDistrictOverlayMesh.geometry = new THREE.BufferGeometry();
+    } else {
+      // Render inset outer boundary of the selected city's regional domain + inner district borders
+      const regionSet = new Set(regArr);
+      const regPositions: number[] = [];
+      const outerR = HEX_OUTER_RADIUS * 0.86;
+      const innerR = HEX_OUTER_RADIUS * 0.74;
+      for (const k of regArr) {
+        const tile = this.currentWorldState.hexes[k];
+        if (!tile) continue;
+        const center = axialToWorld(tile.q, tile.r);
+        for (let edge = 0; edge < 6; edge++) {
+          const dir = AXIAL_DIRECTIONS[edge];
+          const nKey = hexKey(tile.q + dir.q, tile.r + dir.r);
+          if (!regionSet.has(nKey)) {
+            appendHexEdgeQuad(
+              regPositions,
+              center.x,
+              center.z,
+              TILE_SURFACE_Y + 0.036,
+              edge,
+              outerR,
+              innerR
+            );
+          }
+        }
+      }
+      const nextRegGeo = new THREE.BufferGeometry();
+      nextRegGeo.setAttribute('position', new THREE.Float32BufferAttribute(regPositions, 3));
+      this.selectedRegionOverlayMesh.geometry = nextRegGeo;
+
+      this.selectedDistrictOverlayMesh.geometry = buildCoordRingOverlayGeometry(
+        this.currentWorldState,
+        distArr,
+        HEX_OUTER_RADIUS * 0.72,
+        HEX_OUTER_RADIUS * 0.62,
+        0.038,
+        0.05
+      );
+    }
+
+    oldRegGeo.dispose();
+    oldDistGeo.dispose();
     this.wakeRenderLoop();
   }
 
@@ -2913,6 +3398,7 @@ export class HexSceneController {
     while (this.terrainInstancesGroup.children.length > 0) {
       const child = this.terrainInstancesGroup.children[0] as THREE.InstancedMesh;
       this.terrainInstancesGroup.remove(child);
+      child.geometry?.dispose();
       child.dispose();
     }
     this.terrainInstanceEntries = [];
@@ -2922,12 +3408,14 @@ export class HexSceneController {
       const subMeshes = this.terrainSubMeshes.get(assetName);
       if (!subMeshes || subMeshes.length === 0) continue;
 
-      for (const sub of subMeshes) {
-        const im = new THREE.InstancedMesh(
-          sub.geometry,
-          sub.material,
-          entries.length
-        );
+      subMeshes.forEach((sub, subIdx) => {
+        const instGeo = sub.geometry.clone();
+        const seasonData = new Float32Array(entries.length * 4);
+        const seasonAttr = new THREE.InstancedBufferAttribute(seasonData, 4);
+        instGeo.setAttribute('aSeasonData', seasonAttr);
+
+        const seasonalMat = this.getSeasonalTerrainMaterial(assetName, subIdx, sub.material);
+        const im = new THREE.InstancedMesh(instGeo, seasonalMat, entries.length);
         im.castShadow = false;
         im.receiveShadow = this.quality.shadowsEnabled;
 
@@ -2939,17 +3427,27 @@ export class HexSceneController {
           _tileMatrix.compose(_posVec, _quat, _scaleVec);
           _finalMatrix.multiplyMatrices(_tileMatrix, sub.localMatrix);
           im.setMatrixAt(i, _finalMatrix);
-          im.setColorAt(i, _colorTmp.setHex(this.computeTileColorHex(tile, owner)));
+
+          const profile = this.getTileSeasonalProfile(tile, owner, assetName);
+          im.setColorAt(i, _colorTmp.setHex(profile.instanceTintHex));
+          seasonAttr.setXYZW(
+            i,
+            profile.foliageShift,
+            profile.snowAmount,
+            profile.wetnessOrIce,
+            profile.isDeciduous ? 1.0 : 0.0
+          );
         }
 
         im.instanceMatrix.needsUpdate = true;
         if (im.instanceColor) {
           im.instanceColor.needsUpdate = true;
         }
+        seasonAttr.needsUpdate = true;
         im.computeBoundingSphere();
         this.terrainInstancesGroup.add(im);
-        this.terrainInstanceEntries.push({ im, entries });
-      }
+        this.terrainInstanceEntries.push({ im, assetName, entries });
+      });
     }
   }
 
@@ -2965,6 +3463,7 @@ export class HexSceneController {
     const animSet = new Set(animateNewKeys ?? []);
     const conquestSet = new Set(conqueredKeys ?? []);
     const underSet = underConstructionKeys ?? new Set<string>();
+    this.lastUnderConstructionKeys = new Set(underSet);
     const upgradeSet = upgradingKeys ?? new Set<string>();
     const overlayActiveSet = new Set<string>([...underSet, ...upgradeSet]);
 
@@ -3155,8 +3654,10 @@ export class HexSceneController {
 
     if (this.disposed) return;
 
-    // Rebuild batched terrain InstancedMeshes (~10-20 draw calls for 1,000+ hexes!)
+    // Rebuild batched terrain InstancedMeshes (~10-20 draw calls for 1,000+ hexes!) + seasonal detail layers
     this.rebuildTerrainInstances(terrainBuckets);
+    this.lastSeasonalDetailsSig = '';
+    this.rebuildSeasonalDetailLayers();
 
     // Spawn burst feedback on newly conquered natural terrain tiles
     for (const key of conquestSet) {
@@ -3290,13 +3791,13 @@ export class HexSceneController {
     if (this.gameState === 'title') {
       this.titleOrbitAngle += dt * 0.16;
       const isPortrait = aspect < 0.85;
-      const dist = isPortrait ? 20.5 : 15.0;
+      const dist = isPortrait ? 25.0 : 18.5;
       const pitch = isPortrait ? 0.62 : 0.56;
       const horiz = Math.cos(pitch) * dist;
       const y = Math.sin(pitch) * dist;
       const home = this.getHomeWorldPos();
-      const focusX = home.x + (isPortrait ? 0 : -1.35);
-      const focusZ = home.z + (isPortrait ? 0.95 : -0.3);
+      const focusX = home.x + (isPortrait ? 0 : -1.68);
+      const focusZ = home.z + (isPortrait ? 1.18 : -0.37);
       this.camera.position.set(
         focusX + Math.sin(this.titleOrbitAngle) * horiz,
         y,
@@ -3322,7 +3823,7 @@ export class HexSceneController {
         const sinY = Math.sin(this.camYaw);
         const worldDx = _moveVec.x * cosY + _moveVec.z * sinY;
         const worldDz = -_moveVec.x * sinY + _moveVec.z * cosY;
-        const panSpeed = Math.max(8, this.camDistance * 0.65) * dt;
+        const panSpeed = Math.max(10, this.camDistance * 0.65) * dt;
         this.camTargetGoal.x = THREE.MathUtils.clamp(
           this.camTargetGoal.x + worldDx * panSpeed,
           -CAMERA_PAN_BOUND_X,
@@ -3589,11 +4090,14 @@ export class HexSceneController {
     this.lastFrameMs = now;
     this.lastRenderMs = now;
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
+    const camDt = this.isSoftwareGl
+      ? Math.min(Math.max(rawDt, 0.001), 0.18)
+      : dt;
     const atmosDt = this.isSoftwareGl
       ? Math.min(Math.max(rawDt, 0.001), 0.25)
       : dt;
 
-    this.updateCameraTransform(dt);
+    this.updateCameraTransform(camDt);
     if (this.gameState !== 'paused') {
       this.updateEffects(dt, atmosDt);
     }
@@ -3643,11 +4147,15 @@ export class HexSceneController {
     for (const geo of this.upgradeGeoCache.values()) {
       geometries.add(geo);
     }
+    for (const sm of this.seasonalTerrainMats.values()) {
+      addMat(sm);
+    }
     materials.add(this.nightLanternGlowMat);
     materials.add(this.upgradeStoneMat);
     materials.add(this.upgradeTimberMat);
     materials.add(this.upgradeRoofMat);
     materials.add(this.upgradeGoldMat);
+    materials.add(this.fertileOverlayMat);
 
     geometries.add(this.conquestRingGeo);
     geometries.forEach((g) => g.dispose());
@@ -3656,11 +4164,17 @@ export class HexSceneController {
     while (this.terrainInstancesGroup.children.length > 0) {
       const child = this.terrainInstancesGroup.children[0] as THREE.InstancedMesh;
       this.terrainInstancesGroup.remove(child);
+      child.geometry?.dispose();
       child.dispose();
     }
+    this.springFlowersMesh.dispose();
+    this.farmCropStalksMesh.dispose();
+    this.farmCropHeadsMesh.dispose();
+    this.winterIceMesh.dispose();
 
     this.conquestWaves = [];
     this.terrainInstanceEntries = [];
+    this.seasonalTerrainMats.clear();
     this.upgradeGeoCache.clear();
     this.ownerMaterialPairs.clear();
     this.terrainSubMeshes.clear();

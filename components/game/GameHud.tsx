@@ -529,16 +529,16 @@ const GameHud = memo(function GameHud({
           >
             {/* Top-Left Compact Economy & Kingdom Plaque */}
             <div className="pointer-events-auto flex flex-col items-start gap-1.5 min-w-0">
-              <div className="flex items-center gap-2 sm:gap-3 bg-[#fcf9f2]/96 border-2 border-[#3c3426] rounded-xl px-2.5 py-1.5 sm:px-3.5 sm:py-2 shadow-[0_3px_0_#3c3426]">
-                <div className="flex items-center gap-1.5 pr-2 sm:pr-2.5 border-r border-[#d9ceb8]">
-                  <Coins className="w-4 h-4 sm:w-5 sm:h-5 text-amber-600 shrink-0" aria-hidden="true" />
+              <div className="flex items-center gap-1.5 sm:gap-3 bg-[#fcf9f2]/96 border-2 border-[#3c3426] rounded-xl px-2 py-1 sm:px-3.5 sm:py-2 shadow-[0_3px_0_#3c3426]">
+                <div className="flex items-center gap-1 sm:gap-1.5 pr-1.5 sm:pr-2.5 border-r border-[#d9ceb8]">
+                  <Coins className="w-3.5 h-3.5 sm:w-5 sm:h-5 text-amber-600 shrink-0" aria-hidden="true" />
                   <div>
-                    <p className="text-[9px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
+                    <p className="text-[8px] sm:text-[9px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
                       Saldo
                     </p>
                     <p
                       data-testid="hud-cash"
-                      className="font-display text-sm sm:text-base font-bold text-[#1f1a12] tabular-nums leading-tight"
+                      className="font-display text-xs sm:text-base font-bold text-[#1f1a12] tabular-nums leading-tight"
                     >
                       {formatCash(cash)}
                     </p>
@@ -549,20 +549,20 @@ const GameHud = memo(function GameHud({
                   type="button"
                   onClick={() => onOpenKingdomModal('economy')}
                   title="Ver Capacidade Territorial e Expansão"
-                  className="flex items-center gap-1.5 sm:pr-2.5 sm:border-r sm:border-[#d9ceb8] text-left cursor-pointer hover:opacity-80"
+                  className="flex items-center gap-1 sm:gap-1.5 sm:pr-2.5 sm:border-r sm:border-[#d9ceb8] text-left cursor-pointer hover:opacity-80"
                 >
-                  <Flag className="w-4 h-4 text-emerald-700 shrink-0" aria-hidden="true" />
+                  <Flag className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-700 shrink-0" aria-hidden="true" />
                   <div>
-                    <p className="text-[9px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
+                    <p className="text-[8px] sm:text-[9px] font-bold uppercase tracking-wider text-[#6e604a] leading-none">
                       Território
                     </p>
                     <p
                       data-testid="hud-territory"
-                      className="font-display text-sm sm:text-base font-bold text-[#1f1a12] tabular-nums leading-tight"
+                      className="font-display text-xs sm:text-base font-bold text-[#1f1a12] tabular-nums leading-tight"
                     >
                       {territoryCount}/{territorySummary.capacity}
                       {territorySummary.inProgress > 0 && (
-                        <span className="ml-1 text-[10px] text-sky-700">
+                        <span className="ml-0.5 text-[10px] text-sky-700">
                           +{territorySummary.inProgress}
                         </span>
                       )}
@@ -705,7 +705,7 @@ const GameHud = memo(function GameHud({
             </div>
 
             {/* Top-Right: Turn Advance + Kingdom Drawer + Utility */}
-            <div className="pointer-events-auto flex items-center gap-1.5 shrink-0">
+            <div className="pointer-events-auto flex items-center gap-1 sm:gap-1.5 shrink-0">
               <button
                 type="button"
                 data-testid="advance-turn-button"
@@ -714,11 +714,11 @@ const GameHud = memo(function GameHud({
                   onAdvanceTurn();
                 }}
                 title="Avançar Turno (Espaço)"
-                className="min-h-[42px] px-3 rounded-xl bg-emerald-700 border-2 border-[#1e2d24] text-white font-display text-xs font-bold shadow-[0_3px_0_#1e2d24] hover:bg-emerald-800 active:translate-y-0.5 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="min-h-[38px] sm:min-h-[42px] px-2.5 sm:px-3 rounded-xl bg-emerald-700 border-2 border-[#1e2d24] text-white font-display text-xs font-bold shadow-[0_3px_0_#1e2d24] hover:bg-emerald-800 active:translate-y-0.5 flex items-center gap-1 sm:gap-1.5 whitespace-nowrap cursor-pointer"
               >
-                <FastForward className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <FastForward className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" aria-hidden="true" />
                 <span className="hidden sm:inline">Turno +1</span>
-                <span className="sm:hidden">T{turn} +</span>
+                <span className="sm:hidden">T{turn}+</span>
               </button>
 
               <button
@@ -729,7 +729,7 @@ const GameHud = memo(function GameHud({
                   onOpenKingdomModal(activeEvent ? 'diplomacy' : 'economy');
                 }}
                 title="Painel do Reino (Economia, Pesquisa, Exército, Facções)"
-                className="relative min-h-[42px] px-3 rounded-xl bg-[#fcf9f2]/96 border-2 border-[#3c3426] text-[#1f1a12] font-display text-xs font-bold shadow-[0_3px_0_#3c3426] hover:bg-white flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                className="relative min-h-[38px] sm:min-h-[42px] px-2.5 sm:px-3 rounded-xl bg-[#fcf9f2]/96 border-2 border-[#3c3426] text-[#1f1a12] font-display text-xs font-bold shadow-[0_3px_0_#3c3426] hover:bg-white flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
                 <Crown className="w-4 h-4 text-amber-600 shrink-0" aria-hidden="true" />
                 <span className="hidden sm:inline">Reino</span>
@@ -752,9 +752,9 @@ const GameHud = memo(function GameHud({
                   onPause();
                 }}
                 aria-label="Abrir menu e opções"
-                className="md:hidden w-11 h-11 rounded-xl bg-[#fcf9f2]/96 border-2 border-[#3c3426] text-[#2a2319] shadow-[0_3px_0_#3c3426] active:bg-white flex items-center justify-center cursor-pointer"
+                className="md:hidden w-9 h-9 rounded-xl bg-[#fcf9f2]/96 border-2 border-[#3c3426] text-[#2a2319] shadow-[0_3px_0_#3c3426] active:bg-white flex items-center justify-center cursor-pointer"
               >
-                <Menu className="w-5 h-5" aria-hidden="true" />
+                <Menu className="w-4 h-4" aria-hidden="true" />
               </button>
 
               {/* Desktop Utility Strip */}
@@ -946,18 +946,26 @@ const GameHud = memo(function GameHud({
                           </span>
                         </p>
                         <p className="text-[10px] font-semibold text-[#5c5140] tabular-nums truncate">
-                          Pop. local ~{selectedCity.localPopulation} ·{' '}
-                          {selectedCity.connectedCityIds.length > 0
-                            ? `${selectedCity.connectedCityIds.length} conexão(ões)`
+                          Pop. ~{selectedCity.localPopulation} ·{' '}
+                          {(selectedCity.regionHexKeys?.length ?? 0) > 0
+                            ? `${selectedCity.regionHexKeys?.length} hexes na região`
                             : selectedCity.stabilityLabelPt}
                           {selectedCity.nextLevelScore !== null
                             ? ` · Evol. ${selectedCity.developmentScore}/${selectedCity.nextLevelScore}`
                             : ' · Estágio Máx.'}
                         </p>
-                        {selectedCity.specializations.length > 0 && (
+                        {selectedCity.primarySpecialization ? (
                           <p className="text-[10px] font-bold text-emerald-800 truncate">
-                            {selectedCity.specializations.map((s) => s.labelPt).join(' · ')}
+                            {selectedCity.primarySpecialization.labelPt} (
+                            {selectedCity.primarySpecialization.stageLabelPt}) ·{' '}
+                            {selectedCity.primarySpecialization.bonusSummaryPt}
                           </p>
+                        ) : (
+                          selectedCity.specializations.length > 0 && (
+                            <p className="text-[10px] font-bold text-emerald-800 truncate">
+                              {selectedCity.specializations.map((s) => s.labelPt).join(' · ')}
+                            </p>
+                          )
                         )}
                       </div>
                     )}
@@ -1651,7 +1659,10 @@ const GameHud = memo(function GameHud({
                         {selectedCity.name} · {selectedCity.stageLabelPt} ({selectedCity.level}/5)
                       </span>
                       <span className="text-[#5c5140] tabular-nums">
-                        Pop. local ~{selectedCity.localPopulation} ·{' '}
+                        Pop. ~{selectedCity.localPopulation} ·{' '}
+                        {(selectedCity.regionHexKeys?.length ?? 0) > 0
+                          ? `${selectedCity.regionHexKeys?.length} hexes na região · `
+                          : ''}
                         {selectedCity.connectedCityIds.length > 0
                           ? `${selectedCity.connectedCityIds.length} conexão(ões)`
                           : selectedCity.stabilityLabelPt}
@@ -1659,10 +1670,18 @@ const GameHud = memo(function GameHud({
                           ? ` · Evol. ${selectedCity.developmentScore}/${selectedCity.nextLevelScore}`
                           : ' · Estágio Máx.'}
                       </span>
-                      {selectedCity.specializations.length > 0 && (
+                      {selectedCity.primarySpecialization ? (
                         <span className="font-bold text-emerald-800">
-                          {selectedCity.specializations.map((s) => s.labelPt).join(' · ')}
+                          {selectedCity.primarySpecialization.labelPt} (
+                          {selectedCity.primarySpecialization.stageLabelPt}) ·{' '}
+                          {selectedCity.primarySpecialization.bonusSummaryPt}
                         </span>
+                      ) : (
+                        selectedCity.specializations.length > 0 && (
+                          <span className="font-bold text-emerald-800">
+                            {selectedCity.specializations.map((s) => s.labelPt).join(' · ')}
+                          </span>
+                        )
                       )}
                     </div>
                   )}
@@ -2207,7 +2226,7 @@ const GameHud = memo(function GameHud({
                     tabIndex={-1}
                     onClick={(e) => {
                       e.currentTarget.blur();
-                      onZoom(-1.6);
+                      onZoom(-2.0);
                     }}
                     aria-label="Aproximar câmera (+)"
                     title="Aproximar (+)"
@@ -2221,7 +2240,7 @@ const GameHud = memo(function GameHud({
                     tabIndex={-1}
                     onClick={(e) => {
                       e.currentTarget.blur();
-                      onZoom(1.6);
+                      onZoom(2.0);
                     }}
                     aria-label="Afastar câmera (-)"
                     title="Afastar (-)"

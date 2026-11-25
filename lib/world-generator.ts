@@ -1,6 +1,7 @@
 import type { HexAssetEntry } from './godot-docs';
 import {
   DEFAULT_ROTATION_DEG,
+  HEX_WORLD_SCALE,
   INITIAL_CASH,
   axialToWorld,
   hexKey,
@@ -226,8 +227,9 @@ export function generateProceduralKingdomWorld(
       const continentMask = Math.max(edgeDist * 0.88, radialDist * 0.92);
 
       // Domain-warped world space sampling (invariant to HEX_WORLD_SCALE)
-      const sx = worldPos.x * 0.085;
-      const sz = worldPos.z * 0.085;
+      const scaleInv = 1.65 / HEX_WORLD_SCALE;
+      const sx = worldPos.x * scaleInv * 0.085;
+      const sz = worldPos.z * scaleInv * 0.085;
       const warpX = (fbm2d(sx + 11.3, sz - 7.1, seed + 17, 2) - 0.5) * 1.45;
       const warpZ = (fbm2d(sx - 5.7, sz + 14.2, seed + 53, 2) - 0.5) * 1.45;
 

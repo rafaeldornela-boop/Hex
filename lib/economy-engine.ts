@@ -28,7 +28,9 @@ import {
 import { computeBuildingLogistics } from './logistics-engine';
 import {
   evaluateRegionalWorld,
+  SPECIALIZATION_STAGE_META,
   type RegionalHexBonus,
+  type RegionalSpecializationId,
   type RegionalWorldSummary,
 } from './regional-engine';
 import { ensureStarterCapitalCity, type CityEntity } from './city-engine';
@@ -122,6 +124,12 @@ export interface TurnProductionBreakdown {
   roadMaintenanceGold: number;
   networkTradeGold: number;
   corridorTradeGold: number;
+  regionalBonusGold: number;
+  regionalBonusScience: number;
+  regionalStorageBonus: number;
+  regionalFoodStorageBonus: number;
+  regionalHousingBonus: number;
+  regionalRoadUpkeepSaved: number;
   goldNet: number;
   woodNet: number;
   stoneNet: number;
@@ -552,6 +560,14 @@ export function computeTurnEconomyBreakdown(params: {
     underConstructionKeys,
   });
 
+  const previousPrimaryByCityId: Record<string, RegionalSpecializationId> = {};
+  for (const c of activeCities) {
+    const prevId = c.primarySpecialization?.id ?? c.specializations?.[0]?.id;
+    if (prevId) {
+      previousPrimaryByCityId[c.id] = prevId;
+    }
+  }
+
   const regionalSummary = evaluateRegionalWorld({
     worldState,
     cities: activeCities.map((c) => ({
@@ -559,13 +575,45 @@ export function computeTurnEconomyBreakdown(params: {
       name: c.name,
       center: c.center,
       owner: c.owner,
+      level: c.level,
     })),
     roads,
     connectivity: roadConnectivity,
     assets,
     underConstructionKeys,
+    previousPrimaryByCityId,
     owner,
   });
+
+  // City-level regional specialization flat & capacity bonuses (computed once per city, never duplicated in tile efficiency)
+  let regionalBonusGold = 0;
+  let regionalBonusScience = 0;
+  let regionalStorageBonus = 0;
+  let regionalFoodStorageBonus = 0;
+  let regionalHousingBonus = 0;
+  let regionalRoadUpkeepSaved = 0;
+
+  if (owner === 'player') {
+    for (const profile of Object.values(regionalSummary.cityProfilesById)) {
+      const spec = profile.primarySpecialization;
+      const tier = SPECIALIZATION_STAGE_META[spec.stage].tier;
+      if (spec.id === 'agricultural') {
+        regionalFoodStorageBonus += tier === 3 ? 40 : tier === 2 ? 24 : 12;
+      } else if (spec.id === 'port') {
+        regionalStorageBonus += tier === 3 ? 40 : tier === 2 ? 25 : 12;
+        regionalBonusGold += tier === 3 ? 15 : tier === 2 ? 9 : 4;
+      } else if (spec.id === 'commercial') {
+        regionalBonusGold += tier === 3 ? 15 : tier === 2 ? 9 : 4;
+      } else if (spec.id === 'urban') {
+        regionalHousingBonus += tier === 3 ? 4 : tier === 2 ? 2 : 0;
+        regionalBonusGold += tier === 3 ? 12 : tier === 2 ? 6 : 2;
+      } else if (spec.id === 'academic') {
+        regionalBonusScience += tier === 3 ? 6 : tier === 2 ? 3 : 1;
+      } else if (spec.id === 'forestry') {
+        regionalRoadUpkeepSaved += tier === 3 ? 3 : tier === 2 ? 2 : 1;
+      }
+    }
+  }
 
   let effectGoldMult = eventGoldMultiplier;
   let effectFoodMult = eventFoodMultiplier;
@@ -587,8 +635,8 @@ export function computeTurnEconomyBreakdown(params: {
   }
   const effectFactor = Math.max(0.5, 1 - effectEffPenalty);
 
-  let capacity = BASE_HOUSING_CAPACITY;
-  let storageBonus = mods.bonusStorage;
+  let capacity = BASE_HOUSING_CAPACITY + regionalHousingBonus;
+  let storageBonus = mods.bonusStorage + regionalStorageBonus;
 
   let baseGoldGross = 8; // royal base tax
   let buildingMaint = 0;
@@ -802,6 +850,11 @@ export function computeTurnEconomyBreakdown(params: {
   let extractedOreThisTurn = baseOreProd;
   let preStarveFoodProd = baseFoodProd * seasonFoodMult * weatherFoodMult;
 
+  const getRegionalSpecForHex = (key: string) => {
+    const cityId = regionalSummary.controllingCityIdByHexKey[key];
+    return cityId ? regionalSummary.cityProfilesById[cityId]?.primarySpecialization ?? null : null;
+  };
+
   for (const item of completedBuildings) {
     const assign = workerAlloc.assignmentsByKey[item.key];
     const workerRatio = assign ? assign.ratio : 1;
@@ -811,22 +864,35 @@ export function computeTurnEconomyBreakdown(params: {
       item.districtMultiplier *
       workerRatio *
       effectFactor;
+    const citySpec = getRegionalSpecForHex(item.key);
+    const citySpecTier = citySpec ? SPECIALIZATION_STAGE_META[citySpec.stage].tier : 0;
 
     if (item.stats.production.ore > 0) {
+      const regMiningMult =
+        citySpec?.id === 'mining' ? (citySpecTier === 3 ? 1.15 : citySpecTier === 2 ? 1.1 : 1.06) : 1;
       extractedOreThisTurn +=
         item.stats.production.ore *
         rawScale *
         mods.stoneOreMultiplier *
-        mods.oreBonusMultiplier;
+        mods.oreBonusMultiplier *
+        regMiningMult;
     }
     if (item.stats.production.food > 0) {
       const waterMitigation =
         weather.id === 'drought_weather' && item.hasWaterNeighbor ? 0.35 : 0;
       const techMitigation = unlockedTechs.includes('agriculture') ? 0.1 : 0;
+      const regionalFoodMitigation =
+        citySpec?.id === 'agricultural'
+          ? citySpecTier === 3
+            ? 0.15
+            : citySpecTier === 2
+              ? 0.1
+              : 0.05
+          : 0;
       const effSeasonFood = computeResilientMultiplier(
         seasonFoodMult,
         item.stats.seasonalResilience,
-        techMitigation
+        techMitigation + regionalFoodMitigation
       );
       const effWeatherFood = computeResilientMultiplier(
         weatherFoodMult,
@@ -908,13 +974,36 @@ export function computeTurnEconomyBreakdown(params: {
       starvationFactor *
       effectFactor;
 
+    const citySpec = getRegionalSpecForHex(item.key);
+    const citySpecTier = citySpec ? SPECIALIZATION_STAGE_META[citySpec.stage].tier : 0;
+    const regMiningMult =
+      citySpec?.id === 'mining' ? (citySpecTier === 3 ? 1.15 : citySpecTier === 2 ? 1.1 : 1.06) : 1;
+    const regForestryMult =
+      citySpec?.id === 'forestry' ? (citySpecTier === 3 ? 1.15 : citySpecTier === 2 ? 1.1 : 1.06) : 1;
+    const regCommerceMult =
+      citySpec?.id === 'commercial' && item.bDef.role === 'commerce'
+        ? citySpecTier === 3
+          ? 1.08
+          : citySpecTier === 2
+            ? 1.05
+            : 1.03
+        : 1;
+    const regFoodMitigation =
+      citySpec?.id === 'agricultural'
+        ? citySpecTier === 3
+          ? 0.15
+          : citySpecTier === 2
+            ? 0.1
+            : 0.05
+        : 0;
+
     const waterMitigation =
       weather.id === 'drought_weather' && item.hasWaterNeighbor ? 0.35 : 0;
     const techAgriMitigation = unlockedTechs.includes('agriculture') ? 0.1 : 0;
     const effSeasonFood = computeResilientMultiplier(
       seasonFoodMult,
       item.stats.seasonalResilience,
-      techAgriMitigation
+      techAgriMitigation + regFoodMitigation
     );
     const effWeatherFood = computeResilientMultiplier(
       weatherFoodMult,
@@ -946,13 +1035,14 @@ export function computeTurnEconomyBreakdown(params: {
             effectGoldMult *
             effSeasonGold *
             effWeatherGold *
+            regCommerceMult *
             combinedFactor
         ) + (workerRatio > 0 ? item.districtGoldFlat : 0),
       wood: Math.round(
-        item.stats.production.wood * effSeasonWood * effWeatherWood * combinedFactor
+        item.stats.production.wood * effSeasonWood * effWeatherWood * regForestryMult * combinedFactor
       ),
       stone: Math.round(
-        item.stats.production.stone * mods.stoneOreMultiplier * combinedFactor
+        item.stats.production.stone * mods.stoneOreMultiplier * regMiningMult * combinedFactor
       ),
       food: Math.round(
         item.stats.production.food *
@@ -966,9 +1056,10 @@ export function computeTurnEconomyBreakdown(params: {
         item.stats.production.ore *
           mods.stoneOreMultiplier *
           mods.oreBonusMultiplier *
+          regMiningMult *
           combinedFactor
       ),
-      metal: Math.round(item.stats.production.metal * combinedFactor),
+      metal: Math.round(item.stats.production.metal * regMiningMult * combinedFactor),
       science: Math.round(item.stats.production.science * combinedFactor),
     };
 
@@ -1081,7 +1172,9 @@ export function computeTurnEconomyBreakdown(params: {
     };
   }
 
-  const roadMaint = owner === 'player' ? roadConnectivity.roadMaintenanceGold : 0;
+  const rawRoadMaint = owner === 'player' ? roadConnectivity.roadMaintenanceGold : 0;
+  const effectiveRoadUpkeepSaved = Math.min(rawRoadMaint, regionalRoadUpkeepSaved);
+  const roadMaint = Math.max(0, rawRoadMaint - effectiveRoadUpkeepSaved);
   const networkTradeGold = owner === 'player' ? roadConnectivity.networkTradeGold : 0;
   const corridorTradeGold = owner === 'player' ? regionalSummary.corridorTradeGold : 0;
 
@@ -1089,6 +1182,7 @@ export function computeTurnEconomyBreakdown(params: {
     Math.round(
       (baseGoldGross * mods.goldMultiplier +
         tradePactGoldBonus +
+        regionalBonusGold +
         (networkTradeGold + corridorTradeGold) * seasonTradeMult) *
         effectGoldMult *
         weatherGoldMult
@@ -1117,7 +1211,7 @@ export function computeTurnEconomyBreakdown(params: {
   const finalMetalProd = buildingMetalProd;
   const finalScience = Math.max(
     1,
-    Math.round(baseScienceProd) + buildingScienceProd + effectScienceBonus
+    Math.round(baseScienceProd) + buildingScienceProd + effectScienceBonus + regionalBonusScience
   );
 
   // Final population dynamics check using exact foodProduced
@@ -1148,6 +1242,12 @@ export function computeTurnEconomyBreakdown(params: {
     roadMaintenanceGold: roadMaint,
     networkTradeGold,
     corridorTradeGold,
+    regionalBonusGold,
+    regionalBonusScience,
+    regionalStorageBonus,
+    regionalFoodStorageBonus,
+    regionalHousingBonus,
+    regionalRoadUpkeepSaved: effectiveRoadUpkeepSaved,
     goldNet: finalGoldGross - totalMaint,
     woodNet: finalWood,
     stoneNet: finalStone,
@@ -1164,7 +1264,7 @@ export function computeTurnEconomyBreakdown(params: {
     storageCaps: {
       wood: 100 + storageBonus,
       stone: 100 + storageBonus,
-      food: 120 + storageBonus,
+      food: 120 + storageBonus + regionalFoodStorageBonus,
       ore: 80 + storageBonus,
       metal: 60 + storageBonus,
     },

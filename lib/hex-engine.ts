@@ -15,7 +15,7 @@ import type { FutureEconomySnapshot, TileDomainMetadata } from './world-domain';
  * Exact flat-topped hexagonal tessellation matching the Kenney Hexagons .glb
  * geometry scaled uniformly by HEX_WORLD_SCALE for crisp strategic board readability.
  */
-export const HEX_WORLD_SCALE = 1.65;
+export const HEX_WORLD_SCALE = 2.05;
 export const HEX_FLAT_TO_FLAT = 1.0 * HEX_WORLD_SCALE;
 export const HEX_OUTER_RADIUS = HEX_FLAT_TO_FLAT / Math.sqrt(3);
 export const HEX_COL_STEP = (Math.sqrt(3) / 2) * HEX_FLAT_TO_FLAT;

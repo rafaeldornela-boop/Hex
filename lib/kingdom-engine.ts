@@ -1277,6 +1277,24 @@ export function commandUnitInKingdom(
     ? (state.expansions ?? []).filter((e) => !(e.q === to.q && e.r === to.r))
     : state.expansions ?? [];
 
+  let nextCities = state.cities ?? [];
+  if (combat.capturedHex) {
+    const citySync = syncAndEvolveCities({
+      worldState: nextWorld,
+      roads: nextRoads,
+      existingCities: nextCities,
+      playerCapital: state.playerCapital,
+      population: state.population,
+      unlockedTechs: state.research.unlocked,
+      assets,
+      underConstructionKeys: getUnderConstructionKeys(state),
+      hasFoodDeficit: (state.foodDeficitTurns ?? 0) > 0,
+      turn: state.turn,
+      worldSeed: state.worldSeed ?? nextWorld.seed,
+    });
+    nextCities = citySync.cities;
+  }
+
   return {
     nextState: {
       ...state,
@@ -1285,6 +1303,7 @@ export function commandUnitInKingdom(
       factions: nextFactions,
       expansions: nextExpansions,
       roads: nextRoads,
+      cities: nextCities,
     },
     acted: true,
     capturedKey: combat.capturedHex ? targetKey : undefined,
@@ -1609,7 +1628,7 @@ export function serializeKingdomState(state: KingdomState): string {
   const dayPhase = state.dayPhase ?? getDayPhaseForTurn(state.turn);
   const climateWeather = state.climateWeather ?? createInitialClimateWeather();
   return JSON.stringify({
-    version: 8,
+    version: 9,
     turn: state.turn,
     calendar,
     dayPhase,

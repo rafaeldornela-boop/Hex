@@ -3,8 +3,12 @@ import { getBuildingDefinition } from './buildings-catalog';
 import { hexKey, type AxialCoord, type HexOwner, type HexWorldState } from './hex-engine';
 import {
   evaluateRegionalWorld,
+  getSpecializationStage,
+  REGIONAL_SPECIALIZATION_CATALOG,
+  SPECIALIZATION_STAGE_META,
   type NaturalDistrict,
   type RegionalSpecializationBadge,
+  type RegionalSpecializationId,
   type RegionalWorldSummary,
 } from './regional-engine';
 import {
@@ -28,8 +32,10 @@ export interface CityEntity {
   developmentScore: number;
   nextLevelScore: number | null;
   localPopulation: number;
+  primarySpecialization?: RegionalSpecializationBadge | null;
   specializations: RegionalSpecializationBadge[];
   districts: NaturalDistrict[];
+  regionHexKeys?: string[];
   connectedCityIds: string[];
   networkId: string | null;
   stabilityLabelPt: string;
@@ -261,6 +267,14 @@ export function syncAndEvolveCities(params: {
     underConstructionKeys,
   });
 
+  const previousPrimaryByCityId: Record<string, RegionalSpecializationId> = {};
+  for (const c of workingCities) {
+    const prevId = c.primarySpecialization?.id ?? c.specializations?.[0]?.id;
+    if (prevId) {
+      previousPrimaryByCityId[c.id] = prevId;
+    }
+  }
+
   const regional = evaluateRegionalWorld({
     worldState,
     cities: workingCities.map((c) => ({
@@ -268,11 +282,13 @@ export function syncAndEvolveCities(params: {
       name: c.name,
       center: c.center,
       owner: c.owner,
+      level: c.level,
     })),
     roads,
     connectivity,
     assets,
     underConstructionKeys,
+    previousPrimaryByCityId,
     owner: 'player',
   });
 
@@ -308,6 +324,9 @@ export function syncAndEvolveCities(params: {
     const regionalProfile = regional.cityProfilesById[city.id];
     const districts = regionalProfile?.districts ?? [];
     const specializations = regionalProfile?.specializations ?? [];
+    const primarySpecialization =
+      regionalProfile?.primarySpecialization ?? specializations[0] ?? null;
+    const regionHexKeys = regional.regionHexKeysByCityId[city.id] ?? [];
 
     let completedNear = 0;
     let housingNear = 0;
@@ -384,8 +403,10 @@ export function syncAndEvolveCities(params: {
       developmentScore,
       nextLevelScore: stageMeta.nextScore,
       localPopulation,
+      primarySpecialization,
       specializations,
       districts,
+      regionHexKeys,
       connectedCityIds,
       networkId,
       stabilityLabelPt,
@@ -419,6 +440,30 @@ export function getCityTerritoryCapacityBonus(
     (sum, c) => sum + (CITY_STAGE_META[c.level]?.capacityBonus ?? 0),
     0
   );
+}
+
+function normalizeSpecializationBadge(raw: unknown): RegionalSpecializationBadge | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as Partial<RegionalSpecializationBadge>;
+  if (typeof s.id !== 'string' || !(s.id in REGIONAL_SPECIALIZATION_CATALOG)) {
+    return null;
+  }
+  const id = s.id as RegionalSpecializationId;
+  const meta = REGIONAL_SPECIALIZATION_CATALOG[id];
+  const score = typeof s.score === 'number' && Number.isFinite(s.score) ? Math.round(s.score) : 6;
+  const stage =
+    s.stage && s.stage in SPECIALIZATION_STAGE_META
+      ? s.stage
+      : getSpecializationStage(score);
+  return {
+    id,
+    labelPt: meta.labelPt,
+    score,
+    stage,
+    stageLabelPt: SPECIALIZATION_STAGE_META[stage].labelPt,
+    summaryPt: meta.summaryPt,
+    bonusSummaryPt: meta.bonusByStagePt[stage],
+  };
 }
 
 export function normalizeCities(
@@ -488,8 +533,16 @@ export function normalizeCities(
       nextLevelScore: CITY_STAGE_META[level].nextScore,
       localPopulation:
         typeof c.localPopulation === 'number' ? Math.round(c.localPopulation) : 10,
-      specializations: Array.isArray(c.specializations) ? c.specializations : [],
+      primarySpecialization: normalizeSpecializationBadge(c.primarySpecialization),
+      specializations: Array.isArray(c.specializations)
+        ? c.specializations
+            .map((s) => normalizeSpecializationBadge(s))
+            .filter((s): s is RegionalSpecializationBadge => s !== null)
+        : [],
       districts: Array.isArray(c.districts) ? c.districts : [],
+      regionHexKeys: Array.isArray(c.regionHexKeys)
+        ? c.regionHexKeys.filter((k): k is string => typeof k === 'string')
+        : [],
       connectedCityIds: Array.isArray(c.connectedCityIds) ? c.connectedCityIds : [],
       networkId: typeof c.networkId === 'string' ? c.networkId : null,
       stabilityLabelPt:
