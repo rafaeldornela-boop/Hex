@@ -1,8 +1,11 @@
 /**
- * Centralized procedural Web Audio, adaptive music, ambient soundscape,
- * and accessibility/audio preferences manager.
- * Zero external audio files (no 404s, instant lazy loading on demand).
+ * Centralized audio engine for Hexagon World (Hex).
+ * Plays original medieval/historical strategy instrumental MP3 tracks,
+ * natural ambient soundscapes, and acoustic SFX with smooth crossfades,
+ * lazy on-demand loading, mobile autoplay-safe unlocking, and persisted
+ * volume & accessibility preferences.
  */
+import { withBasePath } from './base-path';
 
 export type MusicState =
   | 'normal'
@@ -20,6 +23,19 @@ export type AmbientBiome =
   | 'rain'
   | 'storm'
   | 'night';
+
+export type SfxAssetKey =
+  | 'build'
+  | 'build_complete'
+  | 'demolish'
+  | 'research'
+  | 'trade'
+  | 'combat'
+  | 'conquest'
+  | 'discovery'
+  | 'event'
+  | 'victory'
+  | 'defeat';
 
 export type TextSizeOption = 'normal' | 'large';
 
@@ -48,11 +64,44 @@ export interface AdaptiveMusicContext {
 
 const PREFS_STORAGE_KEY = 'hex_audio_accessibility_prefs_v1';
 
+export const MUSIC_TRACK_PATHS: Record<MusicState, string> = {
+  normal: '/audio/music/normal.mp3',
+  prosperity: '/audio/music/prosperity.mp3',
+  crisis: '/audio/music/crisis.mp3',
+  war: '/audio/music/war.mp3',
+  discovery: '/audio/music/discovery.mp3',
+};
+
+export const AMBIENT_TRACK_PATHS: Record<AmbientBiome, string> = {
+  forest: '/audio/ambient/forest.mp3',
+  water: '/audio/ambient/water.mp3',
+  city: '/audio/ambient/city.mp3',
+  mining: '/audio/ambient/mining.mp3',
+  port: '/audio/ambient/port.mp3',
+  rain: '/audio/ambient/rain.mp3',
+  storm: '/audio/ambient/storm.mp3',
+  night: '/audio/ambient/night.mp3',
+};
+
+export const SFX_ASSET_PATHS: Record<SfxAssetKey, string> = {
+  build: '/audio/sfx/build.mp3',
+  build_complete: '/audio/sfx/build_complete.mp3',
+  demolish: '/audio/sfx/demolish.mp3',
+  research: '/audio/sfx/research.mp3',
+  trade: '/audio/sfx/trade.mp3',
+  combat: '/audio/sfx/combat.mp3',
+  conquest: '/audio/sfx/conquest.mp3',
+  discovery: '/audio/sfx/discovery.mp3',
+  event: '/audio/sfx/event.mp3',
+  victory: '/audio/sfx/victory.mp3',
+  defeat: '/audio/sfx/defeat.mp3',
+};
+
 export const DEFAULT_AUDIO_PREFERENCES: GameAudioPreferences = {
-  masterVolume: 0.75,
-  musicVolume: 0.42,
-  sfxVolume: 0.8,
-  ambientVolume: 0.32,
+  masterVolume: 0.78,
+  musicVolume: 0.52,
+  sfxVolume: 0.82,
+  ambientVolume: 0.34,
   muted: false,
   ambientEnabled: true,
   reduceAnimations: false,
@@ -99,18 +148,18 @@ export function resolveAdaptiveMusicState(ctx: AdaptiveMusicContext): MusicState
   return 'normal';
 }
 
-const MUSIC_CHORDS: Record<MusicState, readonly number[]> = {
-  normal: [220.0, 277.18, 329.63], // A major warm pastoral
-  prosperity: [261.63, 329.63, 392.0, 493.88], // Cmaj7 bright
-  crisis: [196.0, 233.08, 293.66], // G minor tense
-  war: [146.83, 220.0, 261.63], // D minor/fifth heavy
-  discovery: [293.66, 369.99, 440.0, 554.37], // Dmaj7 luminous
-};
+interface CrossfadeChannel {
+  activeEl: HTMLAudioElement | null;
+  fadingOutEl: HTMLAudioElement | null;
+  activeKey: string | null;
+  fadeTimer: ReturnType<typeof setInterval> | null;
+}
 
 class HexGameAudio {
   private ctx: AudioContext | null = null;
   private prefs: GameAudioPreferences = { ...DEFAULT_AUDIO_PREFERENCES };
   private prefsLoaded = false;
+  private unlocked = false;
   private listeners = new Set<(prefs: GameAudioPreferences) => void>();
 
   // Rate-limiting & polyphony caps
@@ -118,20 +167,28 @@ class HexGameAudio {
   private activeSfxVoices = 0;
   private readonly maxSfxVoices = 8;
 
-  // Adaptive music nodes (lazy created when music starts)
-  private musicMasterGain: GainNode | null = null;
-  private musicOscs: OscillatorNode[] = [];
-  private musicStarted = false;
+  // Lazy-decoded acoustic SFX buffer cache
+  private sfxBuffers = new Map<SfxAssetKey, AudioBuffer>();
+  private sfxLoading = new Map<SfxAssetKey, Promise<AudioBuffer | null>>();
+
+  // HTMLAudioElement streaming channels for music & ambient (mobile-friendly, low RAM)
+  private musicChannel: CrossfadeChannel = {
+    activeEl: null,
+    fadingOutEl: null,
+    activeKey: null,
+    fadeTimer: null,
+  };
+  private ambientChannel: CrossfadeChannel = {
+    activeEl: null,
+    fadingOutEl: null,
+    activeKey: null,
+    fadeTimer: null,
+  };
+
   private currentMusicState: MusicState = 'normal';
   private lastMusicSwitchMs = 0;
-  private readonly musicHoldMs = 12000;
-
-  // Ambient soundscape nodes
-  private ambientMasterGain: GainNode | null = null;
-  private ambientFilter: BiquadFilterNode | null = null;
-  private ambientNoiseSource: AudioBufferSourceNode | null = null;
+  private readonly musicHoldMs = 18000;
   private currentAmbient: AmbientBiome = 'forest';
-  private ambientStarted = false;
 
   constructor() {
     this.loadPreferences();
@@ -148,7 +205,6 @@ class HexGameAudio {
         this.prefs = normalizeAudioPreferences(parsed);
         return;
       }
-      // Respect OS reduced-motion preference on first visit
       const prefersReducedMotion =
         typeof window.matchMedia === 'function' &&
         window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -182,7 +238,7 @@ class HexGameAudio {
     this.loadPreferences();
     this.prefs = normalizeAudioPreferences({ ...this.prefs, ...partial });
     this.savePreferences();
-    this.applyBusGains();
+    this.applyBusVolumes();
     for (const cb of this.listeners) {
       cb({ ...this.prefs });
     }
@@ -192,7 +248,7 @@ class HexGameAudio {
   resetPreferences(): GameAudioPreferences {
     this.prefs = { ...DEFAULT_AUDIO_PREFERENCES };
     this.savePreferences();
-    this.applyBusGains();
+    this.applyBusVolumes();
     for (const cb of this.listeners) {
       cb({ ...this.prefs });
     }
@@ -221,22 +277,33 @@ class HexGameAudio {
 
   private getEffectiveMusicGain(): number {
     if (this.prefs.muted) return 0;
-    return this.prefs.masterVolume * this.prefs.musicVolume * 0.14;
+    return clamp01(this.prefs.masterVolume * this.prefs.musicVolume * 0.72, 0);
   }
 
   private getEffectiveAmbientGain(): number {
     if (this.prefs.muted || !this.prefs.ambientEnabled) return 0;
-    return this.prefs.masterVolume * this.prefs.ambientVolume * 0.11;
+    return clamp01(this.prefs.masterVolume * this.prefs.ambientVolume * 0.42, 0);
   }
 
-  private applyBusGains() {
-    if (!this.ctx) return;
-    const now = this.ctx.currentTime;
-    if (this.musicMasterGain) {
-      this.musicMasterGain.gain.setTargetAtTime(this.getEffectiveMusicGain(), now, 0.35);
+  private applyBusVolumes() {
+    const musicVol = this.getEffectiveMusicGain();
+    if (this.musicChannel.activeEl) {
+      this.musicChannel.activeEl.volume = musicVol;
+      if (musicVol <= 0.002 && !this.musicChannel.activeEl.paused) {
+        this.musicChannel.activeEl.pause();
+      } else if (musicVol > 0.002 && this.unlocked && this.musicChannel.activeEl.paused) {
+        this.musicChannel.activeEl.play().catch(() => {});
+      }
     }
-    if (this.ambientMasterGain) {
-      this.ambientMasterGain.gain.setTargetAtTime(this.getEffectiveAmbientGain(), now, 0.45);
+
+    const ambVol = this.getEffectiveAmbientGain();
+    if (this.ambientChannel.activeEl) {
+      this.ambientChannel.activeEl.volume = ambVol;
+      if (ambVol <= 0.002 && !this.ambientChannel.activeEl.paused) {
+        this.ambientChannel.activeEl.pause();
+      } else if (ambVol > 0.002 && this.unlocked && this.ambientChannel.activeEl.paused) {
+        this.ambientChannel.activeEl.play().catch(() => {});
+      }
     }
   }
 
@@ -256,6 +323,152 @@ class HexGameAudio {
     return this.ctx;
   }
 
+  private createLoopElement(srcPath: string): HTMLAudioElement | null {
+    if (typeof window === 'undefined' || typeof Audio === 'undefined') return null;
+    const el = new Audio(withBasePath(srcPath));
+    el.loop = true;
+    el.preload = 'auto';
+    el.volume = 0;
+    el.setAttribute('playsinline', '');
+    return el;
+  }
+
+  private crossfadeChannel(
+    channel: CrossfadeChannel,
+    key: string,
+    srcPath: string,
+    getTargetVol: () => number,
+    fadeDurationMs = 1800
+  ) {
+    if (!this.unlocked || typeof window === 'undefined') return;
+    if (channel.activeKey === key && channel.activeEl) {
+      const target = getTargetVol();
+      if (target > 0.002 && channel.activeEl.paused) {
+        channel.activeEl.volume = target;
+        channel.activeEl.play().catch(() => {});
+      }
+      return;
+    }
+
+    if (channel.fadeTimer) {
+      clearInterval(channel.fadeTimer);
+      channel.fadeTimer = null;
+    }
+    if (channel.fadingOutEl) {
+      channel.fadingOutEl.pause();
+      channel.fadingOutEl.src = '';
+      channel.fadingOutEl = null;
+    }
+
+    const outgoing = channel.activeEl;
+    const incoming = this.createLoopElement(srcPath);
+    if (!incoming) return;
+
+    channel.fadingOutEl = outgoing;
+    channel.activeEl = incoming;
+    channel.activeKey = key;
+
+    const targetVol = getTargetVol();
+    if (targetVol > 0.002) {
+      incoming.play().catch(() => {});
+    }
+
+    const startOutVol = outgoing ? outgoing.volume : 0;
+    const steps = Math.max(8, Math.round(fadeDurationMs / 75));
+    let step = 0;
+
+    channel.fadeTimer = setInterval(() => {
+      step += 1;
+      const t = Math.min(1, step / steps);
+      const currentTarget = getTargetVol();
+      if (channel.activeEl === incoming) {
+        incoming.volume = clamp01(currentTarget * t, 0);
+      }
+      if (outgoing) {
+        outgoing.volume = clamp01(startOutVol * (1 - t), 0);
+      }
+      if (t >= 1) {
+        if (channel.fadeTimer) {
+          clearInterval(channel.fadeTimer);
+          channel.fadeTimer = null;
+        }
+        if (outgoing) {
+          outgoing.pause();
+          outgoing.src = '';
+          if (channel.fadingOutEl === outgoing) {
+            channel.fadingOutEl = null;
+          }
+        }
+      }
+    }, 75);
+  }
+
+  /**
+   * Unlocks Web Audio & HTML5 audio streams on first user interaction (mobile-safe).
+   */
+  unlockAndStartAtmosphere() {
+    this.loadPreferences();
+    this.unlocked = true;
+    this.ensureContext();
+    this.crossfadeChannel(
+      this.musicChannel,
+      this.currentMusicState,
+      MUSIC_TRACK_PATHS[this.currentMusicState],
+      () => this.getEffectiveMusicGain(),
+      2000
+    );
+    this.crossfadeChannel(
+      this.ambientChannel,
+      this.currentAmbient,
+      AMBIENT_TRACK_PATHS[this.currentAmbient],
+      () => this.getEffectiveAmbientGain(),
+      1400
+    );
+  }
+
+  setMusicState(nextState: MusicState, forceImmediate = false) {
+    if (nextState === this.currentMusicState) return;
+    const nowMs = Date.now();
+    const isUrgent = nextState === 'war' || nextState === 'crisis';
+    if (!forceImmediate && !isUrgent && nowMs - this.lastMusicSwitchMs < this.musicHoldMs) {
+      return;
+    }
+    this.currentMusicState = nextState;
+    this.lastMusicSwitchMs = nowMs;
+
+    if (this.unlocked) {
+      this.crossfadeChannel(
+        this.musicChannel,
+        nextState,
+        MUSIC_TRACK_PATHS[nextState],
+        () => this.getEffectiveMusicGain(),
+        2200
+      );
+    }
+  }
+
+  getMusicState(): MusicState {
+    return this.currentMusicState;
+  }
+
+  setAmbientBiome(biome: AmbientBiome) {
+    if (biome === this.currentAmbient) return;
+    this.currentAmbient = biome;
+    if (this.unlocked) {
+      this.crossfadeChannel(
+        this.ambientChannel,
+        biome,
+        AMBIENT_TRACK_PATHS[biome],
+        () => this.getEffectiveAmbientGain(),
+        1400
+      );
+    }
+  }
+
+  getAmbientBiome(): AmbientBiome {
+    return this.currentAmbient;
+  }
+
   private canPlaySfx(key: string, cooldownMs = 60): boolean {
     if (this.getEffectiveSfxGain() <= 0.005) return false;
     if (this.activeSfxVoices >= this.maxSfxVoices) return false;
@@ -270,373 +483,189 @@ class HexGameAudio {
     this.activeSfxVoices += 1;
     setTimeout(() => {
       this.activeSfxVoices = Math.max(0, this.activeSfxVoices - 1);
-    }, Math.ceil(durationSec * 1000) + 20);
+    }, Math.ceil(durationSec * 1000) + 25);
   }
 
-  /**
-   * Starts adaptive background music & ambient bed lazily on first user gesture.
-   */
-  unlockAndStartAtmosphere() {
+  private loadSfxBuffer(key: SfxAssetKey): Promise<AudioBuffer | null> {
+    const cached = this.sfxBuffers.get(key);
+    if (cached) return Promise.resolve(cached);
+    const inflight = this.sfxLoading.get(key);
+    if (inflight) return inflight;
+
+    const ctx = this.ensureContext();
+    if (!ctx || typeof fetch === 'undefined') return Promise.resolve(null);
+
+    const p = fetch(withBasePath(SFX_ASSET_PATHS[key]))
+      .then((res) => (res.ok ? res.arrayBuffer() : null))
+      .then((buf) => (buf ? ctx.decodeAudioData(buf) : null))
+      .then((decoded) => {
+        if (decoded) this.sfxBuffers.set(key, decoded);
+        this.sfxLoading.delete(key);
+        return decoded;
+      })
+      .catch(() => {
+        this.sfxLoading.delete(key);
+        return null;
+      });
+    this.sfxLoading.set(key, p);
+    return p;
+  }
+
+  private playSfxBuffer(key: SfxAssetKey, gainScale = 0.72, cooldownMs = 90) {
+    if (!this.canPlaySfx(`buf:${key}`, cooldownMs)) return;
     const ctx = this.ensureContext();
     if (!ctx) return;
-    this.startMusicLoop(ctx);
-    this.startAmbientLoop(ctx);
-    this.applyBusGains();
-  }
 
-  private startMusicLoop(ctx: AudioContext) {
-    if (this.musicStarted) return;
-    this.musicStarted = true;
-    const master = ctx.createGain();
-    master.gain.value = 0;
+    const trigger = (buffer: AudioBuffer | null) => {
+      if (!buffer || !this.ctx || this.prefs.muted) return;
+      const vol = clamp01(this.getEffectiveSfxGain() * gainScale, 0);
+      if (vol <= 0.004) return;
+      const src = this.ctx.createBufferSource();
+      src.buffer = buffer;
+      const gain = this.ctx.createGain();
+      gain.gain.value = vol;
+      src.connect(gain);
+      gain.connect(this.ctx.destination);
+      src.start(0);
+      this.trackVoice(Math.min(buffer.duration, 3.5));
+    };
 
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 720;
-
-    filter.connect(master);
-    master.connect(ctx.destination);
-    this.musicMasterGain = master;
-
-    const chord = MUSIC_CHORDS[this.currentMusicState];
-    const now = ctx.currentTime;
-    for (let i = 0; i < 4; i++) {
-      const osc = ctx.createOscillator();
-      osc.type = i === 0 ? 'triangle' : 'sine';
-      osc.frequency.setValueAtTime(chord[i % chord.length], now);
-      const voiceGain = ctx.createGain();
-      voiceGain.gain.value = i === 0 ? 0.35 : 0.22;
-      osc.connect(voiceGain);
-      voiceGain.connect(filter);
-      osc.start(now);
-      this.musicOscs.push(osc);
-    }
-    master.gain.setTargetAtTime(this.getEffectiveMusicGain(), now, 1.5);
-  }
-
-  private startAmbientLoop(ctx: AudioContext) {
-    if (this.ambientStarted) return;
-    this.ambientStarted = true;
-
-    const bufferSize = ctx.sampleRate * 2;
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    // Soft pink-ish noise
-    let b0 = 0;
-    let b1 = 0;
-    let b2 = 0;
-    for (let i = 0; i < bufferSize; i++) {
-      const white = Math.random() * 2 - 1;
-      b0 = 0.997 * b0 + white * 0.029;
-      b1 = 0.985 * b1 + white * 0.032;
-      b2 = 0.95 * b2 + white * 0.048;
-      data[i] = (b0 + b1 + b2) * 0.25;
-    }
-
-    const src = ctx.createBufferSource();
-    src.buffer = buffer;
-    src.loop = true;
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.value = this.getAmbientFilterFreq(this.currentAmbient);
-    filter.Q.value = 0.85;
-
-    const master = ctx.createGain();
-    master.gain.value = 0;
-
-    src.connect(filter);
-    filter.connect(master);
-    master.connect(ctx.destination);
-    src.start(ctx.currentTime);
-
-    this.ambientNoiseSource = src;
-    this.ambientFilter = filter;
-    this.ambientMasterGain = master;
-    master.gain.setTargetAtTime(this.getEffectiveAmbientGain(), ctx.currentTime, 1.2);
-  }
-
-  private getAmbientFilterFreq(biome: AmbientBiome): number {
-    switch (biome) {
-      case 'forest':
-        return 620;
-      case 'water':
-      case 'port':
-        return 420;
-      case 'city':
-        return 510;
-      case 'mining':
-        return 260;
-      case 'rain':
-        return 1150;
-      case 'storm':
-        return 820;
-      case 'night':
-        return 320;
+    const cached = this.sfxBuffers.get(key);
+    if (cached) {
+      trigger(cached);
+    } else {
+      void this.loadSfxBuffer(key).then(trigger);
     }
   }
 
-  setMusicState(nextState: MusicState, forceImmediate = false) {
-    if (nextState === this.currentMusicState) return;
-    const nowMs = Date.now();
-    const isUrgent = nextState === 'war' || nextState === 'crisis';
-    if (!forceImmediate && !isUrgent && nowMs - this.lastMusicSwitchMs < this.musicHoldMs) {
-      return;
-    }
-    this.currentMusicState = nextState;
-    this.lastMusicSwitchMs = nowMs;
-
-    if (!this.ctx || !this.musicStarted || this.musicOscs.length === 0) return;
-    const now = this.ctx.currentTime;
-    const chord = MUSIC_CHORDS[nextState];
-    this.musicOscs.forEach((osc, idx) => {
-      osc.frequency.setTargetAtTime(chord[idx % chord.length], now, 1.6);
-    });
-  }
-
-  getMusicState(): MusicState {
-    return this.currentMusicState;
-  }
-
-  setAmbientBiome(biome: AmbientBiome) {
-    if (biome === this.currentAmbient) return;
-    this.currentAmbient = biome;
-    if (!this.ctx || !this.ambientFilter) return;
-    this.ambientFilter.frequency.setTargetAtTime(
-      this.getAmbientFilterFreq(biome),
-      this.ctx.currentTime,
-      0.9
-    );
-  }
-
-  getAmbientBiome(): AmbientBiome {
-    return this.currentAmbient;
-  }
-
-  private playTone(params: {
-    freqStart: number;
-    freqEnd?: number;
-    duration: number;
-    type?: OscillatorType;
-    peakGain: number;
-    delay?: number;
-    lowpass?: number;
-  }) {
+  private playSubtleUiTone(freqStart: number, freqEnd: number, duration: number, peakGain: number) {
     const ctx = this.ctx;
     if (!ctx) return;
     const sfxVol = this.getEffectiveSfxGain();
     if (sfxVol <= 0.005) return;
 
-    const start = ctx.currentTime + (params.delay ?? 0);
+    const start = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    osc.type = params.type ?? 'triangle';
-    osc.frequency.setValueAtTime(params.freqStart, start);
-    if (params.freqEnd && params.freqEnd !== params.freqStart) {
-      osc.frequency.exponentialRampToValueAtTime(
-        Math.max(20, params.freqEnd),
-        start + params.duration
-      );
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freqStart, start);
+    if (freqEnd !== freqStart) {
+      osc.frequency.exponentialRampToValueAtTime(Math.max(40, freqEnd), start + duration);
     }
-
-    const scaledPeak = Math.max(0.002, params.peakGain * sfxVol);
+    const scaled = Math.max(0.002, peakGain * sfxVol);
     gain.gain.setValueAtTime(0.0008, start);
-    gain.gain.linearRampToValueAtTime(scaledPeak, start + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0008, start + params.duration);
+    gain.gain.linearRampToValueAtTime(scaled, start + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0008, start + duration);
 
-    if (params.lowpass) {
-      const filter = ctx.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.setValueAtTime(params.lowpass, start);
-      osc.connect(filter);
-      filter.connect(gain);
-    } else {
-      osc.connect(gain);
-    }
+    osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(start);
-    osc.stop(start + params.duration + 0.015);
-    this.trackVoice(params.duration + (params.delay ?? 0));
+    osc.stop(start + duration + 0.015);
+    this.trackVoice(duration);
   }
 
-  // --- SFX API ---
+  // --- SFX Public API ---
 
   playUiClick() {
     if (!this.canPlaySfx('ui', 45)) return;
     if (!this.ensureContext()) return;
-    this.playTone({ freqStart: 520, freqEnd: 590, duration: 0.04, type: 'sine', peakGain: 0.05 });
+    this.playSubtleUiTone(540, 610, 0.038, 0.045);
   }
 
   playPlace() {
-    if (!this.canPlaySfx('place', 65)) return;
-    if (!this.ensureContext()) return;
-    const jitter = 0.94 + Math.random() * 0.12;
-    this.playTone({
-      freqStart: 195 * jitter,
-      freqEnd: 92 * jitter,
-      duration: 0.11,
-      type: 'triangle',
-      peakGain: 0.16,
-    });
+    this.playSfxBuffer('build', 0.78, 70);
   }
 
   playBuildStart() {
-    this.playPlace();
+    this.playSfxBuffer('build', 0.78, 70);
   }
 
   playBuildComplete() {
-    if (!this.canPlaySfx('build_complete', 140)) return;
-    if (!this.ensureContext()) return;
-    this.playTone({ freqStart: 392, duration: 0.12, type: 'triangle', peakGain: 0.09, delay: 0 });
-    this.playTone({ freqStart: 523.25, duration: 0.18, type: 'triangle', peakGain: 0.1, delay: 0.065 });
+    this.playSfxBuffer('build_complete', 0.78, 160);
   }
 
   playUpgrade() {
-    if (!this.canPlaySfx('upgrade', 120)) return;
-    if (!this.ensureContext()) return;
-    [349.23, 440, 587.33].forEach((freq, i) => {
-      this.playTone({ freqStart: freq, duration: 0.16, type: 'triangle', peakGain: 0.09, delay: i * 0.055 });
-    });
+    this.playSfxBuffer('build_complete', 0.82, 160);
   }
 
   playModuleInstall() {
-    if (!this.canPlaySfx('module', 120)) return;
-    if (!this.ensureContext()) return;
-    this.playTone({ freqStart: 440, duration: 0.08, type: 'sine', peakGain: 0.08, delay: 0 });
-    this.playTone({ freqStart: 659.25, duration: 0.14, type: 'triangle', peakGain: 0.09, delay: 0.055 });
+    this.playSfxBuffer('build_complete', 0.72, 150);
   }
 
   playDemolish() {
-    if (!this.canPlaySfx('demolish', 90)) return;
-    if (!this.ensureContext()) return;
-    this.playTone({
-      freqStart: 140,
-      freqEnd: 52,
-      duration: 0.12,
-      type: 'sawtooth',
-      peakGain: 0.11,
-      lowpass: 420,
-    });
+    this.playSfxBuffer('demolish', 0.78, 100);
   }
 
   playRotate() {
     if (!this.canPlaySfx('rotate', 45)) return;
     if (!this.ensureContext()) return;
-    this.playTone({ freqStart: 520, freqEnd: 680, duration: 0.05, type: 'sine', peakGain: 0.07 });
+    this.playSubtleUiTone(480, 620, 0.045, 0.05);
   }
 
   playCycle() {
     if (!this.canPlaySfx('cycle', 45)) return;
     if (!this.ensureContext()) return;
-    this.playTone({ freqStart: 420, freqEnd: 470, duration: 0.04, type: 'sine', peakGain: 0.05 });
+    this.playSubtleUiTone(410, 460, 0.036, 0.042);
   }
 
   playSaveChime() {
-    if (!this.canPlaySfx('save', 150)) return;
-    if (!this.ensureContext()) return;
-    [523.25, 659.25].forEach((freq, idx) => {
-      this.playTone({
-        freqStart: freq,
-        duration: 0.18,
-        type: 'triangle',
-        peakGain: 0.09,
-        delay: idx * 0.075,
-      });
-    });
+    this.playSfxBuffer('trade', 0.62, 160);
+  }
+
+  playResearchComplete() {
+    this.playSfxBuffer('research', 0.85, 220);
+  }
+
+  playCombat() {
+    this.playSfxBuffer('combat', 0.82, 120);
   }
 
   playConquest() {
-    if (!this.canPlaySfx('conquest', 150)) return;
-    if (!this.ensureContext()) return;
-    [392.0, 523.25, 659.25].forEach((freq, idx) => {
-      this.playTone({
-        freqStart: freq,
-        duration: 0.24,
-        type: 'triangle',
-        peakGain: 0.11,
-        delay: idx * 0.065,
-      });
-    });
+    this.playSfxBuffer('conquest', 0.84, 220);
   }
 
   playDiscovery() {
-    if (!this.canPlaySfx('discovery', 180)) return;
-    if (!this.ensureContext()) return;
-    [440, 554.37, 659.25, 880].forEach((freq, idx) => {
-      this.playTone({
-        freqStart: freq,
-        duration: 0.22,
-        type: 'sine',
-        peakGain: 0.085,
-        delay: idx * 0.06,
-      });
-    });
+    this.playSfxBuffer('discovery', 0.82, 220);
   }
 
   playTrade() {
-    if (!this.canPlaySfx('trade', 100)) return;
-    if (!this.ensureContext()) return;
-    this.playTone({ freqStart: 880, duration: 0.07, type: 'sine', peakGain: 0.07, delay: 0 });
-    this.playTone({ freqStart: 1174.66, duration: 0.12, type: 'sine', peakGain: 0.075, delay: 0.055 });
+    this.playSfxBuffer('trade', 0.76, 110);
   }
 
   playDecision() {
-    if (!this.canPlaySfx('decision', 200)) return;
-    if (!this.ensureContext()) return;
-    this.playTone({ freqStart: 293.66, duration: 0.28, type: 'triangle', peakGain: 0.1, delay: 0 });
-    this.playTone({ freqStart: 440.0, duration: 0.34, type: 'sine', peakGain: 0.08, delay: 0.09 });
+    this.playSfxBuffer('event', 0.78, 240);
   }
 
   playDiplomacy() {
-    if (!this.canPlaySfx('diplomacy', 160)) return;
-    if (!this.ensureContext()) return;
-    [329.63, 440, 523.25].forEach((freq, idx) => {
-      this.playTone({ freqStart: freq, duration: 0.2, type: 'triangle', peakGain: 0.08, delay: idx * 0.07 });
-    });
+    this.playSfxBuffer('event', 0.7, 180);
   }
 
   playSpecialEvent() {
-    if (!this.canPlaySfx('special_event', 200)) return;
-    if (!this.ensureContext()) return;
-    [392, 466.16, 587.33].forEach((freq, idx) => {
-      this.playTone({ freqStart: freq, duration: 0.24, type: 'triangle', peakGain: 0.09, delay: idx * 0.075 });
-    });
+    this.playSfxBuffer('discovery', 0.72, 220);
   }
 
   playTurnAdvance() {
     if (!this.canPlaySfx('turn', 120)) return;
     if (!this.ensureContext()) return;
-    this.playTone({ freqStart: 330, freqEnd: 440, duration: 0.09, type: 'sine', peakGain: 0.065 });
+    this.playSubtleUiTone(330, 415, 0.075, 0.052);
   }
 
   playSeasonChange() {
-    if (!this.canPlaySfx('season', 250)) return;
-    if (!this.ensureContext()) return;
-    [392, 493.88, 587.33].forEach((freq, idx) => {
-      this.playTone({ freqStart: freq, duration: 0.26, type: 'sine', peakGain: 0.06, delay: idx * 0.09 });
-    });
+    this.playSfxBuffer('discovery', 0.56, 300);
   }
 
   playVictory() {
-    if (!this.canPlaySfx('victory', 500)) return;
-    if (!this.ensureContext()) return;
-    [261.63, 329.63, 392.0, 523.25, 659.25].forEach((freq, idx) => {
-      this.playTone({ freqStart: freq, duration: 0.4, type: 'triangle', peakGain: 0.11, delay: idx * 0.09 });
-    });
+    this.playSfxBuffer('victory', 0.9, 600);
   }
 
   playDefeat() {
-    if (!this.canPlaySfx('defeat', 500)) return;
-    if (!this.ensureContext()) return;
-    [293.66, 261.63, 220.0, 174.61].forEach((freq, idx) => {
-      this.playTone({ freqStart: freq, duration: 0.36, type: 'triangle', peakGain: 0.1, delay: idx * 0.13 });
-    });
+    this.playSfxBuffer('defeat', 0.88, 600);
   }
 
   playError() {
-    if (!this.canPlaySfx('error', 80)) return;
+    if (!this.canPlaySfx('error', 90)) return;
     if (!this.ensureContext()) return;
-    this.playTone({ freqStart: 210, freqEnd: 145, duration: 0.12, type: 'sine', peakGain: 0.09 });
+    this.playSubtleUiTone(215, 150, 0.11, 0.075);
   }
 }
 

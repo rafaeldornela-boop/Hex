@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   generateTurnEvent,
   generateContextualEvent,
+  computeEventTriggerProbability,
   resolveEventChoice,
   materializeEvent,
   getEventDefinition,
@@ -31,16 +32,89 @@ test('catalog size, categories and chain', () => {
   assert.ok((stats.byRarity.rare ?? 0) + (stats.byRarity.legendary ?? 0) >= 2);
 });
 
-test('generateTurnEvent cadence and determinism', () => {
+test('variable contextual event cadence averages 5-8 turns without rigid turn % 3 clock', () => {
   assert.equal(generateTurnEvent(1), null);
   assert.equal(generateTurnEvent(2), null);
-  const a = generateTurnEvent(3);
-  const b = generateTurnEvent(3);
-  assert.ok(a);
-  assert.equal(a!.id, b!.id);
-  assert.ok(a!.choices.length >= 2);
-  assert.equal(generateTurnEvent(4), null);
-  assert.ok(generateTurnEvent(6));
+  assert.equal(generateTurnEvent(3), null);
+
+  // Simulate 100 turns across normal kingdom conditions
+  const triggerTurns: number[] = [];
+  const categories: string[] = [];
+  let narrative = createInitialNarrativeState();
+  let history: NonNullable<EventWorldContext['history']> = [];
+  const seasons = ['spring', 'summer', 'autumn', 'winter'] as const;
+
+  for (let turn = 1; turn <= 100; turn += 1) {
+    const evt = generateContextualEvent({
+      turn,
+      season: seasons[Math.floor((turn - 1) / 4) % 4],
+      weatherId: turn % 9 === 0 ? 'rain' : 'clear',
+      farmCount: 2,
+      mineCount: 1,
+      portCount: 1,
+      territoryCount: 10 + Math.floor(turn / 8),
+      population: 14 + Math.floor(turn / 5),
+      gold: 300,
+      goldNet: 25,
+      hasTradeTech: turn >= 16,
+      hasMilitaryTech: turn >= 20,
+      unlockedTechCount: Math.min(12, Math.floor(turn / 7)),
+      history,
+      flags: narrative.flags,
+      scheduled: narrative.scheduled,
+      cooldowns: narrative.cooldowns,
+      worldSeed: 42026,
+    });
+    if (evt) {
+      triggerTurns.push(turn);
+      if (evt.category) categories.push(evt.category);
+      const res = resolveEventChoice(evt, evt.choices[0]!.id, {
+        turn,
+        gold: 500,
+        defensePower: 20,
+      });
+      narrative = applyResolutionToNarrative(narrative, res, turn);
+      history = [res.historyEntry, ...history];
+    }
+  }
+
+  assert.ok(triggerTurns.length >= 10 && triggerTurns.length <= 22, `Expected 10..22 events in 100 turns, got ${triggerTurns.length}`);
+  // Must NOT be every 3 turns
+  const allDivisibleBy3 = triggerTurns.every((t) => t % 3 === 0);
+  assert.equal(allDivisibleBy3, false, 'Event cadence must not be a rigid turn % 3 schedule');
+
+  // Compute average gap between events
+  const gaps: number[] = [];
+  for (let i = 1; i < triggerTurns.length; i += 1) {
+    gaps.push(triggerTurns[i]! - triggerTurns[i - 1]!);
+  }
+  const avgGap = gaps.reduce((s, g) => s + g, 0) / gaps.length;
+  assert.ok(avgGap >= 4.5 && avgGap <= 8.5, `Average event gap should be ~5-8 turns, got ${avgGap.toFixed(2)}`);
+
+  // Consecutive same-category avoidance
+  let consecutiveSame = 0;
+  for (let i = 1; i < categories.length; i += 1) {
+    if (categories[i] === categories[i - 1]) consecutiveSame += 1;
+  }
+  assert.ok(consecutiveSame <= 1, `Should avoid consecutive same-category events, got ${consecutiveSame}`);
+
+  // Crisis stress boosts trigger probability vs calm kingdom
+  const calmProb = computeEventTriggerProbability({
+    turn: 12,
+    history: [{ turn: 7, titlePt: 'Prev', outcomePt: 'Ok', kind: 'harvest' }],
+    gold: 400,
+    goldNet: 30,
+  });
+  const stressProb = computeEventTriggerProbability({
+    turn: 12,
+    history: [{ turn: 7, titlePt: 'Prev', outcomePt: 'Ok', kind: 'harvest' }],
+    foodDeficit: true,
+    conflictActive: true,
+    weatherId: 'drought_weather',
+    gold: 40,
+    goldNet: -25,
+  });
+  assert.ok(stressProb > calmProb, `Stress prob (${stressProb}) should exceed calm prob (${calmProb})`);
 });
 
 test('legacy choice ids preserved', () => {
@@ -87,22 +161,13 @@ test('drought chain schedules follow-up', () => {
 
 test('drought warning requires dry weather when contextual conditions are evaluated', () => {
   const dry = generateContextualEvent({
-    turn: 10, season: 'summer', weatherId: 'drought_weather', farmCount: 1, worldSeed: 7,
+    turn: 10, season: 'summer', weatherId: 'drought_weather', farmCount: 1, worldSeed: 7, forceRoll: true,
   });
   const clear = generateContextualEvent({
-    turn: 10, season: 'summer', weatherId: 'clear', farmCount: 1, worldSeed: 7,
+    turn: 10, season: 'summer', weatherId: 'clear', farmCount: 1, worldSeed: 7, forceRoll: true,
   });
   assert.equal(dry?.definitionId, 'drought_early_warning');
   assert.notEqual(clear?.definitionId, 'drought_early_warning');
-
-  const periodicDry = generateTurnEvent(3, undefined, {
-    season: 'summer', weatherId: 'drought_weather', farmCount: 1,
-  });
-  const periodicClear = generateTurnEvent(3, undefined, {
-    season: 'summer', weatherId: 'clear', farmCount: 1,
-  });
-  assert.equal(periodicDry?.definitionId, 'drought_early_warning');
-  assert.notEqual(periodicClear?.definitionId, 'drought_early_warning');
 });
 
 test('drought_arc completes all scheduled stages while sharing the campaign cooldown', () => {
@@ -212,7 +277,7 @@ test('image library covers catalog categories', () => {
 });
 
 test('ActiveKingdomEvent exposes image and definition fields', () => {
-  const evt = generateTurnEvent(3);
+  const evt = generateContextualEvent({ turn: 8, forceRoll: true, worldSeed: 42 });
   assert.ok(evt?.imageSrc);
   assert.ok(evt?.definitionId);
   assert.ok(evt?.category);

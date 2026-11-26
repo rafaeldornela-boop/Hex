@@ -44,12 +44,14 @@ export interface EventWorldContext {
   farmCount?: number;
   mineCount?: number;
   portCount?: number;
+  territoryCount?: number;
   hasTradeTech?: boolean;
   hasMilitaryTech?: boolean;
   defensePower?: number;
   foodDeficit?: boolean;
   foodStock?: number;
   gold?: number;
+  goldNet?: number;
   population?: number;
   conflictActive?: boolean;
   explorationCount?: number;
@@ -60,6 +62,8 @@ export interface EventWorldContext {
   cooldowns?: Record<string, number>;
   borderTarget?: { q: number; r: number };
   worldSeed?: number;
+  /** Internal test/caller override to bypass probability gate when checking pure candidate selection */
+  forceRoll?: boolean;
 }
 
 export interface EventResolution {
@@ -133,9 +137,21 @@ function hashTurnSeed(turn: number, seed: number): number {
   return h >>> 0;
 }
 
+function getLastEventCategory(ctx: EventWorldContext): EventCategory | null {
+  const last = ctx.history?.[0];
+  if (!last) return null;
+  if (last.definitionId && DEFINITION_BY_ID[last.definitionId]) {
+    return DEFINITION_BY_ID[last.definitionId]!.category;
+  }
+  const byKind = EVENT_CATALOG.find((d) => d.kind === last.kind);
+  return byKind ? byKind.category : null;
+}
+
 function conditionsMet(def: EventDefinition, ctx: EventWorldContext): boolean {
   const c = def.conditions;
   if (c.minTurn !== undefined && ctx.turn < c.minTurn) return false;
+  if (def.rarity === 'rare' && ctx.turn < 8) return false;
+  if (def.rarity === 'legendary' && ctx.turn < 14) return false;
   if (c.seasons && (!ctx.season || !c.seasons.includes(ctx.season))) return false;
   if (c.weatherIds && (!ctx.weatherId || !c.weatherIds.includes(ctx.weatherId))) return false;
   if (c.minFarms !== undefined && (ctx.farmCount ?? 0) < c.minFarms) return false;
@@ -152,7 +168,7 @@ function conditionsMet(def: EventDefinition, ctx: EventWorldContext): boolean {
   }
   if (c.cooldownKey) {
     const last = ctx.cooldowns?.[c.cooldownKey];
-    const cd = c.cooldownTurns ?? 6;
+    const cd = c.cooldownTurns ?? 8;
     const scheduledFor = ctx.scheduled?.[def.id];
     const explicitlyDue = typeof scheduledFor === 'number' && scheduledFor <= ctx.turn;
     if (!explicitlyDue && typeof last === 'number' && ctx.turn - last < cd) return false;
@@ -163,20 +179,100 @@ function conditionsMet(def: EventDefinition, ctx: EventWorldContext): boolean {
   return true;
 }
 
+/**
+ * Computes organic, variable probability (0..0.95) for a non-scheduled event to trigger.
+ * Target average cadence: ~5 to 8 turns, influenced by kingdom stress and development.
+ */
+export function computeEventTriggerProbability(ctx: EventWorldContext): number {
+  const dueScheduled = Object.entries(ctx.scheduled ?? {}).some(
+    ([id, t]) => t <= ctx.turn && Boolean(DEFINITION_BY_ID[id]) && conditionsMet(DEFINITION_BY_ID[id]!, ctx)
+  );
+  if (dueScheduled) return 1;
+
+  if (ctx.turn < 4) return 0;
+
+  const lastTurn = ctx.history?.[0]?.turn ?? 0;
+  const gap = ctx.turn - lastTurn;
+
+  const severeStress =
+    Boolean(ctx.foodDeficit) ||
+    Boolean(ctx.conflictActive) ||
+    ctx.weatherId === 'drought_weather' ||
+    ctx.weatherId === 'storm' ||
+    ((ctx.gold ?? 200) < 70 && (ctx.goldNet ?? 0) < 0);
+
+  // Breathing room so the player is never bombarded turn after turn
+  if (gap < 4) {
+    if (gap === 3 && severeStress) return 0.14;
+    return 0;
+  }
+
+  let baseProb: number;
+  if (gap === 4) baseProb = 0.10;
+  else if (gap === 5) baseProb = 0.22;
+  else if (gap === 6) baseProb = 0.36;
+  else if (gap === 7) baseProb = 0.52;
+  else if (gap === 8) baseProb = 0.70;
+  else if (gap === 9) baseProb = 0.82;
+  else baseProb = 0.92;
+
+  // Contextual modifiers from world state
+  let mod = 0;
+  if (ctx.foodDeficit) mod += 0.10;
+  if (ctx.conflictActive) mod += 0.08;
+  if (ctx.weatherId === 'drought_weather' || ctx.weatherId === 'storm' || ctx.weatherId === 'frost') {
+    mod += 0.07;
+  }
+  if ((ctx.gold ?? 200) < 80 || (ctx.goldNet ?? 0) < -15) mod += 0.06;
+  if ((ctx.territoryCount ?? 0) >= 12 || (ctx.population ?? 0) >= 25) mod += 0.03;
+  if ((ctx.unlockedTechCount ?? 0) >= 4) mod += 0.02;
+
+  return Math.max(0, Math.min(0.95, Number((baseProb + mod).toFixed(3))));
+}
+
 function computeWeight(def: EventDefinition, ctx: EventWorldContext): number {
   let w = def.weight;
+  const isExplicitlyDue =
+    ctx.scheduled !== undefined &&
+    ctx.scheduled[def.id] !== undefined &&
+    ctx.turn >= ctx.scheduled[def.id]!;
+
   if (def.conditions.weatherIds && ctx.weatherId) {
-    if (def.conditions.weatherIds.includes(ctx.weatherId)) w *= 1.6;
+    if (def.conditions.weatherIds.includes(ctx.weatherId)) w *= 1.65;
   }
-  if (def.category === 'seasonal' && ctx.season) w *= 1.3;
-  if (def.category === 'crisis' && ctx.foodDeficit) w *= 1.5;
-  if (def.category === 'military' && ctx.conflictActive) w *= 1.4;
-  if (def.category === 'exploration' && (ctx.explorationCount ?? 0) > 3) w *= 1.25;
-  if (def.rarity === 'rare') w *= 0.7;
-  if (def.rarity === 'legendary') w *= 0.45;
-  if (ctx.scheduled && ctx.scheduled[def.id] !== undefined && ctx.turn >= ctx.scheduled[def.id]!) {
-    w += 50;
+  if (def.category === 'seasonal' && ctx.season) w *= 1.25;
+  if (def.category === 'crisis') {
+    if (ctx.foodDeficit) w *= 1.65;
+    if ((ctx.gold ?? 200) < 80 || (ctx.goldNet ?? 0) < -15) w *= 1.35;
+    if (ctx.weatherId === 'drought_weather' || ctx.weatherId === 'storm') w *= 1.35;
   }
+  if (def.category === 'military' && ctx.conflictActive) w *= 1.5;
+  if (def.category === 'economic' && (ctx.hasTradeTech || (ctx.portCount ?? 0) > 0)) w *= 1.25;
+  if (def.category === 'political' && ((ctx.population ?? 0) >= 18 || (ctx.territoryCount ?? 0) >= 10)) {
+    w *= 1.25;
+  }
+  if (def.category === 'exploration' && (ctx.explorationCount ?? 0) > 2) w *= 1.3;
+  if (def.kind === 'tech' && (ctx.unlockedTechCount ?? 0) >= 2) w *= 1.2;
+
+  // Rarity pacing: rare & legendary events should genuinely feel rare
+  if (def.rarity === 'rare') w *= 0.36;
+  if (def.rarity === 'legendary') w *= 0.18;
+
+  // Avoid repeating the same category back-to-back unless scheduled
+  if (!isExplicitlyDue) {
+    const lastCat = getLastEventCategory(ctx);
+    if (lastCat && lastCat === def.category) {
+      w *= 0.08;
+    }
+    // Additional penalty if exact same event appeared in last 4 history entries
+    const recentSame = (ctx.history ?? []).slice(0, 4).some((h) => h.definitionId === def.id);
+    if (recentSame) {
+      w *= 0.15;
+    }
+  } else {
+    w += 80;
+  }
+
   return Math.max(0, w);
 }
 
@@ -213,49 +309,38 @@ export function materializeEvent(
   };
 }
 
-/** Legacy entry used by turn-engine - cadence every 3 turns from turn 3. */
+/**
+ * Natural variable-cadence event generator (replaces rigid turn % 3 calendar).
+ */
 export function generateTurnEvent(
   turn: number,
   borderTarget?: { q: number; r: number },
   context?: Omit<EventWorldContext, 'turn' | 'borderTarget'>
 ): ActiveKingdomEvent | null {
-  if (turn < 3 || turn % 3 !== 0) return null;
-  const classicOrder = [
-    'drought_early_warning',
-    'classic_good_harvest',
-    'classic_discovery',
-    'classic_trade',
-    'classic_epidemic',
-    'classic_economic_crisis',
-    'classic_revolt',
-    'classic_tech',
-    'classic_invasion',
-  ];
-  const pick = turn === 3 ? 0 : hashTurnSeed(turn, 42026) % classicOrder.length;
-  if (!context) {
-    const def = DEFINITION_BY_ID[classicOrder[pick]!];
-    return def ? materializeEvent(def, turn, borderTarget) : null;
-  }
-
-  const eventContext: EventWorldContext = { ...context, turn, borderTarget };
-  for (let offset = 0; offset < classicOrder.length; offset += 1) {
-    const id = classicOrder[(pick + offset) % classicOrder.length]!;
-    const def = DEFINITION_BY_ID[id];
-    if (def && conditionsMet(def, eventContext)) {
-      return materializeEvent(def, turn, borderTarget);
-    }
-  }
-  return null;
+  return generateContextualEvent({
+    ...(context ?? {}),
+    turn,
+    borderTarget,
+  });
 }
 
 export function generateContextualEvent(ctx: EventWorldContext): ActiveKingdomEvent | null {
-  if (ctx.turn < 3) return null;
   const last = ctx.history?.[0];
   if (last && last.turn === ctx.turn) return null;
 
   const dueScheduled = Object.entries(ctx.scheduled ?? {})
     .filter(([, t]) => t <= ctx.turn)
     .map(([id]) => id);
+
+  if (dueScheduled.length === 0 && !ctx.forceRoll) {
+    const triggerChance = computeEventTriggerProbability(ctx);
+    if (triggerChance <= 0) return null;
+    const gap = ctx.turn - (last?.turn ?? 0);
+    const roll =
+      hashTurnSeed(ctx.turn * 17 + gap * 31, (ctx.worldSeed ?? 42026) ^ 0x9e3779b9) /
+      0x100000000;
+    if (roll >= triggerChance) return null;
+  }
 
   const candidates: { def: EventDefinition; weight: number }[] = [];
   for (const def of EVENT_CATALOG) {
@@ -266,12 +351,22 @@ export function generateContextualEvent(ctx: EventWorldContext): ActiveKingdomEv
   }
   if (candidates.length === 0) return null;
 
-  const maxPriority = Math.max(...candidates.map((c) => c.def.priority));
-  const band = candidates.filter((c) => c.def.priority >= maxPriority - 15);
+  // Prefer non-repeated categories strictly when alternatives exist (for non-scheduled events)
+  let pool = candidates;
+  if (dueScheduled.length === 0) {
+    const lastCat = getLastEventCategory(ctx);
+    if (lastCat) {
+      const differentCat = candidates.filter((c) => c.def.category !== lastCat);
+      if (differentCat.length > 0) pool = differentCat;
+    }
+  }
+
+  const maxPriority = Math.max(...pool.map((c) => c.def.priority));
+  const band = pool.filter((c) => c.def.priority >= maxPriority - 15);
   const total = band.reduce((s, c) => s + c.weight, 0);
   if (total <= 0) return null;
 
-  let roll = hashTurnSeed(ctx.turn, ctx.worldSeed ?? 42026) % total;
+  let roll = hashTurnSeed(ctx.turn, ctx.worldSeed ?? 42026) % Math.max(1, Math.round(total));
   for (const c of band) {
     roll -= c.weight;
     if (roll < 0) return materializeEvent(c.def, ctx.turn, ctx.borderTarget);

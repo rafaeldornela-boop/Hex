@@ -33,7 +33,15 @@ import type { TurnProductionBreakdown, KingdomStageInfo } from '@/lib/economy-en
 import { countFactionTerritory } from '@/lib/faction-engine';
 import type { KingdomState } from '@/lib/kingdom-engine';
 import { UNIT_CATALOG, type UnitEntity } from '@/lib/military-engine';
-import { TECH_BY_ID, TECH_TREE, canStartResearch, type TechId } from '@/lib/tech-engine';
+import {
+  TECH_BY_ID,
+  TECH_PATHS,
+  TECH_PATH_LABELS_PT,
+  TECH_TREE,
+  canStartResearch,
+  type TechId,
+  type TechPathId,
+} from '@/lib/tech-engine';
 import { TERRAIN_METADATA, getHexTerrainAndResource } from '@/lib/terrain-engine';
 import type { TerritorialCapacitySummary } from '@/lib/territory-engine';
 import type { MarketSummary, TradableResource } from '@/lib/trade-engine';
@@ -92,6 +100,7 @@ export default function KingdomModal({
   onFocusUnit,
 }: KingdomModalProps) {
   const [activeTab, setActiveTab] = useState<KingdomModalTab>(initialTab);
+  const [selectedTechPath, setSelectedTechPath] = useState<TechPathId | 'all'>('agricultura');
   const [prevOpen, setPrevOpen] = useState(open);
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
 
@@ -100,6 +109,12 @@ export default function KingdomModal({
     setPrevInitialTab(initialTab);
     if (open) {
       setActiveTab(initialTab);
+      const currentActiveTech = kingdomState.research.activeTechId
+        ? TECH_BY_ID[kingdomState.research.activeTechId]
+        : null;
+      if (currentActiveTech) {
+        setSelectedTechPath(currentActiveTech.path);
+      }
     }
   }
 
@@ -928,10 +943,10 @@ export default function KingdomModal({
             <div className="space-y-4">
               {/* Active Research Banner */}
               <section className="bg-white border border-[#d9ceb8] rounded-xl p-3.5 space-y-2">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
                   <h3 className="font-display text-sm font-bold text-[#1f1a12] flex items-center gap-1.5">
                     <FlaskConical className="w-4 h-4 text-sky-700" aria-hidden="true" />
-                    Pesquisa Ativa
+                    Pesquisa Ativa · {kingdomState.research.unlocked.length}/{TECH_TREE.length}
                   </h3>
                   <span className="text-xs font-bold text-sky-700 tabular-nums">
                     +{economy.scienceNet} Ciência / turno
@@ -941,7 +956,12 @@ export default function KingdomModal({
                 {activeTech ? (
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between text-xs font-bold text-[#1f1a12] tabular-nums">
-                      <span>{activeTech.namePt}</span>
+                      <span>
+                        {activeTech.namePt}{' '}
+                        <span className="font-normal text-[#6e604a]">
+                          ({TECH_PATH_LABELS_PT[activeTech.path]} · Nível {activeTech.tier})
+                        </span>
+                      </span>
                       <span>
                         {kingdomState.research.progressScience} / {activeTech.costScience}
                       </span>
@@ -964,82 +984,235 @@ export default function KingdomModal({
                   </div>
                 ) : (
                   <p className="text-xs text-emerald-700 font-semibold">
-                    Todas as tecnologias disponíveis foram pesquisadas!
+                    Todas as {TECH_TREE.length} tecnologias foram pesquisadas!
                   </p>
                 )}
               </section>
 
-              {/* Full 7-Tech Tree */}
-              <div className="space-y-2">
-                {TECH_TREE.map((tech) => {
-                  const unlocked = kingdomState.research.unlocked.includes(tech.id);
-                  const isActive = kingdomState.research.activeTechId === tech.id;
-                  const available = canStartResearch(kingdomState.research, tech.id);
-                  const missingPrereqs = tech.prerequisites
-                    .filter((p) => !kingdomState.research.unlocked.includes(p))
-                    .map((p) => TECH_BY_ID[p]?.namePt ?? p);
+              {/* 6-Path Selector Bar (compact & touch-friendly for mobile) */}
+              <div
+                data-testid="tech-path-selector"
+                className="flex gap-1.5 overflow-x-auto pb-1 hex-touch-scroll-x"
+              >
+                {(Object.keys(TECH_PATHS) as TechPathId[]).map((pathId) => {
+                  const ids = TECH_PATHS[pathId];
+                  const doneCount = ids.filter((id) =>
+                    kingdomState.research.unlocked.includes(id)
+                  ).length;
+                  const hasActive = ids.some(
+                    (id) => kingdomState.research.activeTechId === id
+                  );
+                  const hasAvail = ids.some((id) =>
+                    canStartResearch(kingdomState.research, id)
+                  );
+                  const isSelected = selectedTechPath === pathId;
+                  const shortLabel: Record<TechPathId, string> = {
+                    agricultura: 'Agricultura',
+                    engenharia: 'Engenharia',
+                    metalurgia: 'Metalurgia',
+                    comercio: 'Comércio',
+                    militar: 'Militar',
+                    conhecimento: 'Conhecimento',
+                  };
 
                   return (
-                    <div
-                      key={tech.id}
-                      data-testid={`tech-card-${tech.id}`}
-                      className={`rounded-xl border p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
-                        unlocked
-                          ? 'bg-emerald-50/80 border-emerald-300'
-                          : isActive
-                            ? 'bg-sky-50/90 border-sky-400'
-                            : 'bg-white border-[#d9ceb8]'
+                    <button
+                      key={pathId}
+                      type="button"
+                      data-testid={`tech-path-tab-${pathId}`}
+                      onClick={() => setSelectedTechPath(pathId)}
+                      className={`min-h-[42px] px-3 py-1.5 rounded-xl border text-xs font-bold whitespace-nowrap inline-flex items-center gap-1.5 shrink-0 cursor-pointer transition-colors ${
+                        isSelected
+                          ? 'bg-[#2a2319] text-white border-[#1f1a12]'
+                          : 'bg-white text-[#2a2319] border-[#d9ceb8] hover:bg-[#f5efe1]'
                       }`}
                     >
-                      <div className="min-w-0 space-y-0.5">
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] font-bold uppercase text-[#6e604a]">
-                            Nível {tech.tier}
-                          </span>
-                          <span className="font-display text-sm font-bold text-[#1f1a12]">
-                            {tech.namePt}
-                          </span>
-                          <span className="text-[11px] font-bold text-[#5c5140] tabular-nums">
-                            {tech.costScience} Ciência
-                          </span>
-                        </div>
-                        <p className="text-xs text-[#3c3426] font-medium">
-                          {tech.effectsSummaryPt}
-                        </p>
-                        {!unlocked && missingPrereqs.length > 0 && (
-                          <p className="text-[11px] text-rose-700 font-medium">
-                            Requer: {missingPrereqs.join(', ')}
-                          </p>
-                        )}
+                      <span>{shortLabel[pathId]}</span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded-md text-[10px] tabular-nums ${
+                          isSelected
+                            ? 'bg-white/20 text-white'
+                            : doneCount === ids.length
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-[#efe8d8] text-[#5c5140]'
+                        }`}
+                      >
+                        {doneCount}/{ids.length}
+                      </span>
+                      {hasActive ? (
+                        <span
+                          className="w-2 h-2 rounded-full bg-sky-400"
+                          title="Pesquisa ativa neste caminho"
+                        />
+                      ) : hasAvail ? (
+                        <span
+                          className="w-2 h-2 rounded-full bg-amber-400"
+                          title="Tecnologia disponível"
+                        />
+                      ) : null}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  data-testid="tech-path-tab-all"
+                  onClick={() => setSelectedTechPath('all')}
+                  className={`min-h-[42px] px-3 py-1.5 rounded-xl border text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    selectedTechPath === 'all'
+                      ? 'bg-[#2a2319] text-white border-[#1f1a12]'
+                      : 'bg-[#efe8d8] text-[#2a2319] border-[#c8ba9f] hover:bg-[#e5dcc7]'
+                  }`}
+                >
+                  Visão Geral ({TECH_TREE.length})
+                </button>
+              </div>
+
+              {/* Structured 4-Tier Tree per Selected Path (or All 6 Paths) */}
+              <div className="space-y-4">
+                {(selectedTechPath === 'all'
+                  ? (Object.keys(TECH_PATHS) as TechPathId[])
+                  : [selectedTechPath]
+                ).map((pathId) => {
+                  const pathTechIds = TECH_PATHS[pathId];
+                  const unlockedInPath = pathTechIds.filter((id) =>
+                    kingdomState.research.unlocked.includes(id)
+                  ).length;
+
+                  return (
+                    <section
+                      key={pathId}
+                      data-testid={`tech-path-section-${pathId}`}
+                      className="bg-white/80 border border-[#d9ceb8] rounded-2xl p-3 space-y-2"
+                    >
+                      <div className="flex items-center justify-between gap-2 pb-1 border-b border-[#e8dfd0]">
+                        <h4 className="font-display text-xs sm:text-sm font-bold text-[#1f1a12]">
+                          {TECH_PATH_LABELS_PT[pathId]}
+                        </h4>
+                        <span className="text-[11px] font-bold text-[#5c5140] tabular-nums">
+                          {unlockedInPath}/{pathTechIds.length} níveis concluídos
+                        </span>
                       </div>
 
-                      <div className="shrink-0">
-                        {unlocked ? (
-                          <span className="inline-flex items-center gap-1 px-3 py-2 rounded-lg bg-emerald-700 text-white text-xs font-bold whitespace-nowrap">
-                            <Check className="w-3.5 h-3.5" aria-hidden="true" />
-                            Concluída
-                          </span>
-                        ) : isActive ? (
-                          <span className="inline-flex items-center gap-1 px-3 py-2 rounded-lg bg-sky-700 text-white text-xs font-bold whitespace-nowrap">
-                            Em Pesquisa
-                          </span>
-                        ) : available ? (
-                          <button
-                            type="button"
-                            data-testid={`tech-select-${tech.id}`}
-                            onClick={() => onSelectTech(tech.id)}
-                            className="min-h-[42px] px-3.5 rounded-xl bg-[#2a2319] text-white text-xs font-bold hover:bg-[#1f1a12] whitespace-nowrap cursor-pointer"
-                          >
-                            Pesquisar
-                          </button>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-3 py-2 rounded-lg bg-[#efe8d8] text-[#6e604a] text-xs font-semibold whitespace-nowrap">
-                            <Lock className="w-3.5 h-3.5" aria-hidden="true" />
-                            Bloqueada
-                          </span>
-                        )}
+                      <div className="space-y-0">
+                        {pathTechIds.map((techId, tierIdx) => {
+                          const tech = TECH_BY_ID[techId];
+                          const unlocked = kingdomState.research.unlocked.includes(tech.id);
+                          const isActive = kingdomState.research.activeTechId === tech.id;
+                          const available = canStartResearch(kingdomState.research, tech.id);
+                          const tierRoman = ['I', 'II', 'III', 'IV'][tech.tier - 1] ?? String(tech.tier);
+
+                          return (
+                            <div key={tech.id}>
+                              {/* Visual Prerequisite Connector Between Tiers */}
+                              {tierIdx > 0 && (
+                                <div className="flex justify-center py-0.5" aria-hidden="true">
+                                  <div
+                                    className={`w-0.5 h-3.5 ${
+                                      unlocked || isActive || available
+                                        ? 'bg-emerald-500'
+                                        : 'bg-[#d4c8b0]'
+                                    }`}
+                                  />
+                                </div>
+                              )}
+
+                              <div
+                                data-testid={`tech-card-${tech.id}`}
+                                className={`rounded-xl border p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                                  unlocked
+                                    ? 'bg-emerald-50/85 border-emerald-300'
+                                    : isActive
+                                      ? 'bg-sky-50/90 border-sky-400 shadow-xs'
+                                      : available
+                                        ? 'bg-amber-50/40 border-amber-300'
+                                        : 'bg-[#faf6ee] border-[#e2d8c5] opacity-90'
+                                }`}
+                              >
+                                <div className="min-w-0 space-y-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                        unlocked
+                                          ? 'bg-emerald-700 text-white'
+                                          : isActive
+                                            ? 'bg-sky-700 text-white'
+                                            : available
+                                              ? 'bg-amber-500 text-[#1f1a12]'
+                                              : 'bg-[#e5dcc7] text-[#5c5140]'
+                                      }`}
+                                    >
+                                      Nível {tierRoman}
+                                    </span>
+                                    <span className="font-display text-sm font-bold text-[#1f1a12]">
+                                      {tech.namePt}
+                                    </span>
+                                    <span className="text-[11px] font-bold text-[#5c5140] tabular-nums">
+                                      {tech.costScience} Ciência
+                                    </span>
+                                  </div>
+
+                                  <p className="text-xs text-[#2a2319] font-medium">
+                                    {tech.effectsSummaryPt}
+                                  </p>
+
+                                  {tech.prerequisites.length > 0 && (
+                                    <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                                      <span className="text-[10px] font-bold uppercase text-[#6e604a]">
+                                        Requisitos:
+                                      </span>
+                                      {tech.prerequisites.map((preId) => {
+                                        const preDef = TECH_BY_ID[preId];
+                                        const preDone =
+                                          kingdomState.research.unlocked.includes(preId);
+                                        return (
+                                          <span
+                                            key={preId}
+                                            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                                              preDone
+                                                ? 'bg-emerald-100 text-emerald-800'
+                                                : 'bg-rose-100 text-rose-800'
+                                            }`}
+                                          >
+                                            {preDone ? '✓' : '•'} {preDef?.namePt ?? preId}
+                                          </span>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="shrink-0">
+                                  {unlocked ? (
+                                    <span className="inline-flex items-center gap-1 px-3 py-2 rounded-lg bg-emerald-700 text-white text-xs font-bold whitespace-nowrap">
+                                      <Check className="w-3.5 h-3.5" aria-hidden="true" />
+                                      Concluída
+                                    </span>
+                                  ) : isActive ? (
+                                    <span className="inline-flex items-center gap-1 px-3 py-2 rounded-lg bg-sky-700 text-white text-xs font-bold whitespace-nowrap">
+                                      Em Pesquisa
+                                    </span>
+                                  ) : available ? (
+                                    <button
+                                      type="button"
+                                      data-testid={`tech-select-${tech.id}`}
+                                      onClick={() => onSelectTech(tech.id)}
+                                      className="min-h-[44px] px-4 rounded-xl bg-[#2a2319] text-white text-xs font-bold hover:bg-[#1f1a12] whitespace-nowrap cursor-pointer"
+                                    >
+                                      Pesquisar
+                                    </button>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 px-3 py-2 rounded-lg bg-[#efe8d8] text-[#6e604a] text-xs font-semibold whitespace-nowrap">
+                                      <Lock className="w-3.5 h-3.5" aria-hidden="true" />
+                                      Bloqueada
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
-                    </div>
+                    </section>
                   );
                 })}
               </div>

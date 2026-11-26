@@ -384,6 +384,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
       gameAudio.playPlace();
+      controllerRef.current?.triggerEventEffect('road', { q, r });
       syncSceneRoadsAndCities(res.nextState);
       if (res.messagePt) showToast(res.messagePt);
     },
@@ -438,6 +439,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       }
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
+      controllerRef.current?.triggerEventEffect('conquest', { q, r });
       gameAudio.playConquest();
       showToast(res.messagePt);
     },
@@ -453,6 +455,15 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
           setSelectedHexSynced({ q, r });
           return;
         }
+        const targetOwnerBefore =
+          kingdomStateRef.current.worldState.hexes[hexKey(q, r)]?.owner;
+        const enemyUnitBefore = getUnitAt(kingdomStateRef.current.units, q, r);
+        const wasAttack =
+          (Boolean(enemyUnitBefore) && enemyUnitBefore!.owner !== 'player') ||
+          (Boolean(targetOwnerBefore) &&
+            targetOwnerBefore !== 'player' &&
+            targetOwnerBefore !== 'neutral');
+
         const cmdRes = commandUnitInKingdom(
           kingdomStateRef.current,
           cmdSrc,
@@ -468,6 +479,14 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
         setKingdomState(cmdRes.nextState);
         clearCommandMode(cmdRes.nextState);
         setSelectedHexSynced({ q, r });
+        if (wasAttack || cmdRes.capturedKey) {
+          controllerRef.current?.triggerCombatEffect(
+            cmdSrc,
+            { q, r },
+            Boolean(cmdRes.capturedKey)
+          );
+          gameAudio.playCombat();
+        }
         if (cmdRes.capturedKey) {
           gameAudio.playConquest();
           const under = getUnderConstructionKeys(cmdRes.nextState);
@@ -481,7 +500,7 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
             upgrading
           );
           syncSceneRoadsAndCities(cmdRes.nextState, under);
-        } else {
+        } else if (!wasAttack) {
           gameAudio.playCycle();
         }
         showToast(cmdRes.messagePt);
@@ -576,7 +595,8 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     }
     kingdomStateRef.current = res.nextState;
     setKingdomState(res.nextState);
-    gameAudio.playPlace();
+    controllerRef.current?.triggerEventEffect('upgrade', coord);
+    gameAudio.playUpgrade();
     const under = getUnderConstructionKeys(res.nextState);
     const upgrading = getUpgradingKeysSet(res.nextState);
     controllerRef.current?.syncWorldState(
@@ -609,7 +629,8 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       }
       kingdomStateRef.current = res.nextState;
       setKingdomState(res.nextState);
-      gameAudio.playPlace();
+      controllerRef.current?.triggerEventEffect('module', coord);
+      gameAudio.playModuleInstall();
       const under = getUnderConstructionKeys(res.nextState);
       const upgrading = getUpgradingKeysSet(res.nextState);
       controllerRef.current?.syncWorldState(
@@ -797,11 +818,13 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     );
     syncSceneRoadsAndCities(res.nextState, under);
 
-    // Trigger restrained 3D visual feedback for key turn completions
+    // Trigger restrained 3D visual feedback for key turn completions & progression
     const parseKeyCoord = (k: string): AxialCoord | null => {
       const tile = res.nextState.worldState.hexes[k] ?? prevWorld.hexes[k];
       return tile ? { q: tile.q, r: tile.r } : null;
     };
+    const capitalCoord = res.nextState.playerCapital ?? { q: 0, r: 0 };
+
     res.completedBuildings.slice(0, 3).forEach((k) => {
       const c = parseKeyCoord(k);
       if (c) controllerRef.current?.triggerEventEffect('build_complete', c);
@@ -818,6 +841,27 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       const city = res.nextState.cities.find((c) => c.name === cityName);
       if (city) controllerRef.current?.triggerEventEffect('city', city.center);
     });
+    res.leveledUpCities.slice(0, 2).forEach((cityName) => {
+      const city = res.nextState.cities.find((c) => c.name === cityName);
+      if (city) controllerRef.current?.triggerEventEffect('city', city.center);
+    });
+    res.incorporatedKeys.slice(0, 2).forEach((k) => {
+      const c = parseKeyCoord(k);
+      if (c) controllerRef.current?.triggerEventEffect('conquest', c);
+    });
+    if (res.completedTech) {
+      controllerRef.current?.triggerEventEffect('research', capitalCoord);
+    }
+    if (res.newEvent) {
+      const isDisc =
+        res.newEvent.kind === 'discovery' ||
+        res.newEvent.kind === 'exploration' ||
+        res.newEvent.kind === 'rare';
+      controllerRef.current?.triggerEventEffect(
+        isDisc ? 'discovery' : 'event',
+        res.newEvent.targetCoord ?? capitalCoord
+      );
+    }
 
     const victory = getKingdomVictoryProgress(res.nextState, HEX_ASSETS);
     if (victory.status === 'victory') {
@@ -825,11 +869,20 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     } else if (victory.status === 'defeat') {
       gameAudio.playDefeat();
     } else if (res.newEvent) {
-      gameAudio.playDecision();
+      if (
+        res.newEvent.kind === 'discovery' ||
+        res.newEvent.kind === 'exploration' ||
+        res.newEvent.kind === 'rare'
+      ) {
+        gameAudio.playDiscovery();
+      } else {
+        gameAudio.playDecision();
+      }
+    } else if (res.completedTech) {
+      gameAudio.playResearchComplete();
     } else if (res.nextState.calendar?.season && res.nextState.calendar.season !== prevSeason) {
       gameAudio.playSeasonChange();
     } else if (
-      res.completedTech ||
       res.incorporatedKeys.length > 0 ||
       res.foundedCities.length > 0 ||
       res.leveledUpCities.length > 0

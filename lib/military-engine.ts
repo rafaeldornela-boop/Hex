@@ -6,7 +6,7 @@ import { hexKey, type AxialCoord, type HexOwner, type HexWorldState, type Placed
 import type { RoadConnectivitySummary, RoadMap } from './road-engine';
 import { getHexTerrainAndResource, getTerrainDefenseBonus } from './terrain-engine';
 import { AXIAL_DIRECTIONS, axialDistance } from './territory-engine';
-import type { TechId } from './tech-engine';
+import { getTechModifiers, type TechId } from './tech-engine';
 
 export type UnitType = 'infantry' | 'archer' | 'knight' | 'warship';
 export type UnitSupplyStatus = 'supplied' | 'strained' | 'unsupplied';
@@ -229,7 +229,8 @@ export function getUnitMovementAllowance(
   roads?: RoadMap
 ): number {
   const def = UNIT_CATALOG[unit.type];
-  let range = def.baseMoveRange;
+  const techMods = getTechModifiers(unlockedTechs);
+  let range = def.baseMoveRange + techMods.unitMovementBonus;
   const currentRoad = roads?.[hexKey(unit.q, unit.r)];
   if (unit.type === 'infantry' && currentRoad && currentRoad.owner === unit.owner && currentRoad.level >= 2) {
     range += 1;
@@ -726,7 +727,12 @@ export function evaluateHexFortification(params: {
   }
 
   const defender = getUnitAt(units, q, r);
-  const techBonus = defenderTechs.includes('metallurgy') ? 4 : 0;
+  const defTechMods = getTechModifiers(defenderTechs);
+  const techBonus = defTechMods.militaryCombatBonus;
+  if (defTechMods.defenseBonus > 0 && tile && tile.owner && tile.owner !== 'neutral') {
+    structuralDefense += defTechMods.defenseBonus;
+    notesPt.push(`Doutrina defensiva +${defTechMods.defenseBonus}`);
+  }
   let garrisonUnitBonus = 0;
   if (defender) {
     const def = UNIT_CATALOG[defender.type];
@@ -862,9 +868,10 @@ export function computeFactionMilitaryPower(
   unitCount: number;
   unitMaintenanceGold: number;
 } {
-  const techBonus = unlockedTechs.includes('metallurgy') ? 4 : 0;
+  const techMods = getTechModifiers(unlockedTechs);
+  const techBonus = techMods.militaryCombatBonus;
   let attackPower = 0;
-  let defensePower = 0;
+  let defensePower = techMods.defenseBonus;
   let unitCount = 0;
   let unitMaintenanceGold = 0;
 
@@ -875,7 +882,7 @@ export function computeFactionMilitaryPower(
     attackPower += Math.round((def.attack + techBonus) * hpRatio);
     defensePower += Math.round((def.defense + techBonus) * hpRatio);
     unitCount += 1;
-    unitMaintenanceGold += def.maintenanceGold;
+    unitMaintenanceGold += Math.max(1, Math.round(def.maintenanceGold * techMods.unitUpkeepMultiplier));
   }
 
   for (const tile of Object.values(worldState.hexes)) {
@@ -1219,7 +1226,7 @@ export function resolveHexCombat(
   }
 ): CombatResolution {
   const attDef = UNIT_CATALOG[attacker.type];
-  const attTechBonus = attackerTechs.includes('metallurgy') ? 4 : 0;
+  const attTechBonus = getTechModifiers(attackerTechs).militaryCombatBonus;
   const supplyMult =
     options?.attackerSupplyStatus === 'unsupplied'
       ? 0.7

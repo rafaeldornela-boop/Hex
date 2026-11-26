@@ -14,7 +14,6 @@ import {
 import {
   createInitialNarrativeState,
   generateContextualEvent,
-  generateTurnEvent,
   type EventWorldContext,
   type ActiveKingdomEvent,
   type ActiveWorldEffect,
@@ -383,23 +382,29 @@ export function processKingdomTurn(
     (t) => t.owner === 'player'
   );
   const narrativeState = working.narrativeState ?? createInitialNarrativeState();
+  const playerTilesList = Object.values(aiResult.worldState.hexes).filter(
+    (tile) => tile.owner === 'player'
+  );
   const eventContext: Omit<EventWorldContext, 'turn' | 'borderTarget'> = {
     season: nextCalendar.season,
     weatherId: weatherStep.weather.id,
-    farmCount: Object.values(aiResult.worldState.hexes).filter(
-      (tile) => tile.owner === 'player' && assets[tile.structureIndex]?.name === 'building-farm'
+    farmCount: playerTilesList.filter(
+      (tile) => assets[tile.structureIndex]?.name === 'building-farm'
     ).length,
-    mineCount: Object.values(aiResult.worldState.hexes).filter(
-      (tile) => tile.owner === 'player' && assets[tile.structureIndex]?.name === 'building-mine'
+    mineCount: playerTilesList.filter(
+      (tile) => assets[tile.structureIndex]?.name === 'building-mine'
     ).length,
-    portCount: Object.values(aiResult.worldState.hexes).filter(
-      (tile) => tile.owner === 'player' && assets[tile.structureIndex]?.name === 'building-port'
+    portCount: playerTilesList.filter(
+      (tile) => assets[tile.structureIndex]?.name === 'building-port'
     ).length,
+    territoryCount: playerTilesList.length,
     hasTradeTech: working.research.unlocked.includes('trade'),
     hasMilitaryTech: working.research.unlocked.includes('military'),
+    unlockedTechCount: working.research.unlocked.length,
     foodDeficit: econ.population.hasFoodDeficit,
     foodStock: nextResources.food,
     gold: nextCash,
+    goldNet: econ.goldNet,
     population: nextPop,
     conflictActive: working.factions.some((f) => f.relation === 'hostile'),
     history: working.eventHistory,
@@ -411,12 +416,11 @@ export function processKingdomTurn(
   const borderTarget = playerBorderHex
     ? { q: playerBorderHex.q, r: playerBorderHex.r }
     : undefined;
-  const hasDueScheduledEvent = Object.values(narrativeState.scheduled).some(
-    (scheduledTurn) => scheduledTurn <= nextTurn
-  );
-  const newEvent = hasDueScheduledEvent
-    ? generateContextualEvent({ ...eventContext, turn: nextTurn, borderTarget })
-    : generateTurnEvent(nextTurn, borderTarget, eventContext);
+  const newEvent = generateContextualEvent({
+    ...eventContext,
+    turn: nextTurn,
+    borderTarget,
+  });
 
   // Concise causal turn headline
   const summaryParts: string[] = [

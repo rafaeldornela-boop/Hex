@@ -471,18 +471,37 @@ function createTintedMaterialVariant(
   return Array.isArray(mat) ? mat.map(cloneOne) : cloneOne(mat);
 }
 
+const TERRAIN_WIND_UNIFORMS = {
+  uWindTime: { value: 0 },
+  uWindAmp: { value: 1.0 },
+};
+
 function createSeasonalTerrainMaterialVariant(
   mat: THREE.Material | THREE.Material[]
 ): THREE.Material | THREE.Material[] {
   const cloneOne = (m: THREE.Material): THREE.Material => {
     const cloned = m.clone();
-    cloned.customProgramCacheKey = () => 'hex-seasonal-terrain-v1';
+    cloned.customProgramCacheKey = () => 'hex-seasonal-terrain-v2-wind';
     cloned.onBeforeCompile = (shader) => {
+      shader.uniforms.uWindTime = TERRAIN_WIND_UNIFORMS.uWindTime;
+      shader.uniforms.uWindAmp = TERRAIN_WIND_UNIFORMS.uWindAmp;
       shader.vertexShader =
-        `attribute vec4 aSeasonData;\nvarying vec3 vLocalSeasonPos;\nvarying vec4 vSeasonData;\n` +
+        `attribute vec4 aSeasonData;\nuniform float uWindTime;\nuniform float uWindAmp;\nvarying vec3 vLocalSeasonPos;\nvarying vec4 vSeasonData;\n` +
         shader.vertexShader.replace(
           '#include <begin_vertex>',
-          `#include <begin_vertex>\nvLocalSeasonPos = position;\nvSeasonData = aSeasonData;\n`
+          `#include <begin_vertex>
+          vLocalSeasonPos = position;
+          vSeasonData = aSeasonData;
+          if (position.y > 0.24 && uWindAmp > 0.001) {
+            float swayMask = clamp((position.y - 0.24) * 2.2, 0.0, 1.0);
+            float phase = position.x * 3.1 + position.z * 2.7;
+            #ifdef USE_INSTANCING
+              phase += instanceMatrix[3][0] * 0.45 + instanceMatrix[3][2] * 0.45;
+            #endif
+            float gust = sin(uWindTime * 1.65 + phase) + 0.45 * sin(uWindTime * 3.1 + phase * 1.7);
+            transformed.x += gust * 0.015 * swayMask * uWindAmp;
+            transformed.z += cos(uWindTime * 1.35 + phase) * 0.01 * swayMask * uWindAmp;
+          }\n`
         );
       shader.fragmentShader =
         `varying vec3 vLocalSeasonPos;\nvarying vec4 vSeasonData;\n` +
@@ -726,6 +745,40 @@ export class HexSceneController {
   private activeParticleCount = 0;
   private reduceAnimations = false;
   private reduceEffects = false;
+
+  // Living world ambient layers (ultra-lightweight InstancedMeshes)
+  private ambientMoteCount = 0;
+  private ambientMotesMesh!: THREE.InstancedMesh;
+  private ambientMotesMat!: THREE.MeshBasicMaterial;
+  private ambientMotes: Array<{
+    ox: number;
+    oy: number;
+    oz: number;
+    speed: number;
+    phase: number;
+    scale: number;
+  }> = [];
+
+  private smokeMesh!: THREE.InstancedMesh;
+  private smokeAnchors: Array<{ x: number; y: number; z: number; phase: number; isForge: boolean }> = [];
+
+  private forgeLightsMesh!: THREE.InstancedMesh;
+  private forgeAnchors: Array<{ x: number; y: number; z: number; phase: number; nightOnly: boolean }> = [];
+
+  private bannersMesh!: THREE.InstancedMesh;
+  private bannerAnchors: Array<{ x: number; y: number; z: number; phase: number; colorHex: number }> = [];
+
+  // Smooth unit movement interpolation (replaces teleporting between hexes)
+  private unitLastWorldPos = new Map<string, { x: number; z: number }>();
+  private unitMoveAnims: Array<{
+    group: THREE.Group;
+    fromX: number;
+    fromZ: number;
+    toX: number;
+    toZ: number;
+    baseY: number;
+    progress: number;
+  }> = [];
 
   // Loop management
   private disposed = false;
@@ -1327,6 +1380,112 @@ export class HexSceneController {
     this.particlesMesh.instanceMatrix.needsUpdate = true;
     this.scene.add(this.particlesMesh);
 
+    // Living world Layer 1: Ambient seasonal wind / rain / snow / firefly motes
+    this.ambientMoteCount =
+      this.quality.tier === 'desktop-high'
+        ? 24
+        : this.quality.tier === 'mobile-balanced'
+          ? 12
+          : 6;
+    const moteGeo = new THREE.OctahedronGeometry(0.055 * HEX_WORLD_SCALE, 0);
+    this.ambientMotesMat = new THREE.MeshBasicMaterial({
+      color: 0xfef3c7,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    });
+    this.ambientMotesMesh = new THREE.InstancedMesh(
+      moteGeo,
+      this.ambientMotesMat,
+      this.ambientMoteCount
+    );
+    this.ambientMotesMesh.frustumCulled = false;
+    for (let i = 0; i < this.ambientMoteCount; i++) {
+      this.ambientMotes.push({
+        ox: (Math.sin(i * 12.7 + 1.3) * 0.5) * 20,
+        oy: 0.7 + ((i * 0.43) % 2.4),
+        oz: (Math.cos(i * 9.1 + 0.7) * 0.5) * 20,
+        speed: 0.35 + ((i * 0.17) % 0.45),
+        phase: i * 1.37,
+        scale: 0.65 + ((i * 0.23) % 0.6),
+      });
+      _dummy.position.set(0, -10, 0);
+      _dummy.scale.setScalar(0);
+      _dummy.updateMatrix();
+      this.ambientMotesMesh.setMatrixAt(i, _dummy.matrix);
+    }
+    this.ambientMotesMesh.instanceMatrix.needsUpdate = true;
+    this.scene.add(this.ambientMotesMesh);
+
+    // Living world Layer 2: Chimney smoke wisps (32 pooled instances)
+    const smokeGeo = new THREE.IcosahedronGeometry(0.068 * HEX_WORLD_SCALE, 0);
+    const smokeMat = new THREE.MeshStandardMaterial({
+      color: 0xe2e8f0,
+      roughness: 0.95,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.48,
+      depthWrite: false,
+    });
+    this.smokeMesh = new THREE.InstancedMesh(smokeGeo, smokeMat, 32);
+    this.smokeMesh.frustumCulled = false;
+    for (let i = 0; i < 32; i++) {
+      _dummy.position.set(0, -10, 0);
+      _dummy.scale.setScalar(0);
+      _dummy.updateMatrix();
+      this.smokeMesh.setMatrixAt(i, _dummy.matrix);
+    }
+    this.smokeMesh.instanceMatrix.needsUpdate = true;
+    this.scene.add(this.smokeMesh);
+
+    // Living world Layer 3: Forge embers & dusk/night warm window lanterns (48 pooled instances)
+    const lightOrbGeo = new THREE.BoxGeometry(
+      0.075 * HEX_WORLD_SCALE,
+      0.075 * HEX_WORLD_SCALE,
+      0.075 * HEX_WORLD_SCALE
+    );
+    const lightOrbMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.88,
+      depthWrite: false,
+    });
+    this.forgeLightsMesh = new THREE.InstancedMesh(lightOrbGeo, lightOrbMat, 48);
+    this.forgeLightsMesh.frustumCulled = false;
+    for (let i = 0; i < 48; i++) {
+      _dummy.position.set(0, -10, 0);
+      _dummy.scale.setScalar(0);
+      _dummy.updateMatrix();
+      this.forgeLightsMesh.setMatrixAt(i, _dummy.matrix);
+      this.forgeLightsMesh.setColorAt(i, _colorTmp.setHex(0xfbbf24));
+    }
+    this.forgeLightsMesh.instanceMatrix.needsUpdate = true;
+    this.scene.add(this.forgeLightsMesh);
+
+    // Living world Layer 4: Gently waving banners / pennants on castles, towers & barracks (32 pooled instances)
+    const bannerGeo = new THREE.BoxGeometry(
+      0.16 * HEX_WORLD_SCALE,
+      0.08 * HEX_WORLD_SCALE,
+      0.018 * HEX_WORLD_SCALE
+    );
+    bannerGeo.translate(0.08 * HEX_WORLD_SCALE, 0, 0);
+    const bannerMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.65,
+      metalness: 0.05,
+    });
+    this.bannersMesh = new THREE.InstancedMesh(bannerGeo, bannerMat, 32);
+    this.bannersMesh.frustumCulled = false;
+    for (let i = 0; i < 32; i++) {
+      _dummy.position.set(0, -10, 0);
+      _dummy.scale.setScalar(0);
+      _dummy.updateMatrix();
+      this.bannersMesh.setMatrixAt(i, _dummy.matrix);
+      this.bannersMesh.setColorAt(i, _colorTmp.setHex(0x059669));
+    }
+    this.bannersMesh.instanceMatrix.needsUpdate = true;
+    this.scene.add(this.bannersMesh);
+
     // Asset loader (shared cache across all placed tiles)
     THREE.Cache.enabled = true;
     this.gltfLoader = new GLTFLoader();
@@ -1827,7 +1986,9 @@ export class HexSceneController {
       | 'city'
       | 'discovery'
       | 'conquest'
-      | 'event',
+      | 'event'
+      | 'research'
+      | 'combat',
     coord: AxialCoord
   ) {
     const pos = axialToWorld(coord.q, coord.r);
@@ -1841,16 +2002,20 @@ export class HexSceneController {
       discovery: 0x22d3ee,
       conquest: 0xfbbf24,
       event: 0xa78bfa,
+      research: 0x38bdf8,
+      combat: 0xf87171,
     };
     const countByKind: Record<typeof kind, number> = {
       build_complete: 8,
       upgrade: 10,
       module: 6,
       road: 5,
-      city: 10,
-      discovery: 10,
+      city: 12,
+      discovery: 12,
       conquest: 12,
       event: 8,
+      research: 12,
+      combat: 10,
     };
     const color = colorByKind[kind];
     this.spawnConquestWave(pos.x, pos.z, color);
@@ -1865,6 +2030,21 @@ export class HexSceneController {
       );
       this.popAnims.push({ mesh: placed.group, progress: 0 });
     }
+    this.wakeRenderLoop();
+  }
+
+  public triggerCombatEffect(
+    fromCoord: AxialCoord,
+    toCoord: AxialCoord,
+    captured: boolean
+  ) {
+    const fromPos = axialToWorld(fromCoord.q, fromCoord.r);
+    const toPos = axialToWorld(toCoord.q, toCoord.r);
+    const midX = (fromPos.x + toPos.x) * 0.5;
+    const midZ = (fromPos.z + toPos.z) * 0.5;
+    this.spawnParticleBurst(midX, TILE_SURFACE_Y + 0.16, midZ, 0xfef08a, 8);
+    this.spawnParticleBurst(toPos.x, TILE_SURFACE_Y + 0.14, toPos.z, captured ? 0xfbbf24 : 0xef4444, 10);
+    this.spawnConquestWave(toPos.x, toPos.z, captured ? 0xfbbf24 : 0xef4444);
     this.wakeRenderLoop();
   }
 
@@ -4287,14 +4467,38 @@ export class HexSceneController {
       });
     }
 
+    this.unitMoveAnims = [];
+    const seenUnitIds = new Set<string>();
+
     for (const unit of units) {
       if (unit.hp <= 0) continue;
+      seenUnitIds.add(unit.id);
       const unitGroup = new THREE.Group();
       unitGroup.scale.setScalar(HEX_WORLD_SCALE);
       const pos = axialToWorld(unit.q, unit.r);
       const hasTile = Boolean(this.currentWorldState.hexes[hexKey(unit.q, unit.r)]);
       const baseY = hasTile ? TILE_SURFACE_Y + 0.03 * HEX_WORLD_SCALE : 0.045;
-      unitGroup.position.set(pos.x, baseY, pos.z);
+      const prevPos = this.unitLastWorldPos.get(unit.id);
+      const movedDist = prevPos
+        ? Math.hypot(pos.x - prevPos.x, pos.z - prevPos.z)
+        : 0;
+
+      if (prevPos && movedDist > 0.05 && !this.reduceAnimations) {
+        unitGroup.position.set(prevPos.x, baseY, prevPos.z);
+        unitGroup.rotation.y = Math.atan2(pos.x - prevPos.x, pos.z - prevPos.z);
+        this.unitMoveAnims.push({
+          group: unitGroup,
+          fromX: prevPos.x,
+          fromZ: prevPos.z,
+          toX: pos.x,
+          toZ: pos.z,
+          baseY,
+          progress: 0,
+        });
+      } else {
+        unitGroup.position.set(pos.x, baseY, pos.z);
+      }
+      this.unitLastWorldPos.set(unit.id, { x: pos.x, z: pos.z });
 
       const primaryColor =
         unit.owner === 'player'
@@ -4377,13 +4581,19 @@ export class HexSceneController {
         unitGroup.add(body, helm, shield);
       }
 
-      if (unit.owner === 'player' && !unit.movedThisTurn) {
-        unitGroup.userData.readyBob = true;
-        unitGroup.userData.baseY = baseY;
-        unitGroup.userData.phase = (unit.q + unit.r) * 0.9;
-      }
+      unitGroup.userData.baseY = baseY;
+      unitGroup.userData.phase = (unit.q * 1.3 + unit.r * 0.9);
+      unitGroup.userData.unitType = unit.type;
+      unitGroup.userData.readyBob = unit.owner === 'player' && !unit.movedThisTurn;
+      unitGroup.userData.isMoving = prevPos && movedDist > 0.05 && !this.reduceAnimations;
 
       this.unitsGroup.add(unitGroup);
+    }
+
+    for (const id of Array.from(this.unitLastWorldPos.keys())) {
+      if (!seenUnitIds.has(id)) {
+        this.unitLastWorldPos.delete(id);
+      }
     }
     this.wakeRenderLoop();
   }
@@ -4773,7 +4983,101 @@ export class HexSceneController {
       }
     }
 
+    this.rebuildLivingBuildingAnchors(this.currentWorldState, underSet);
     this.wakeRenderLoop();
+  }
+
+  private rebuildLivingBuildingAnchors(
+    worldState: HexWorldState,
+    underSet: Set<string>
+  ) {
+    this.smokeAnchors = [];
+    this.forgeAnchors = [];
+    this.bannerAnchors = [];
+
+    const smokeAssets = new Set([
+      'building-house',
+      'building-village',
+      'unit-mansion',
+      'building-castle',
+      'building-smelter',
+      'building-mill',
+    ]);
+    const forgeAssets = new Set(['building-smelter', 'building-mine']);
+    const lanternAssets = new Set([
+      'building-house',
+      'building-village',
+      'unit-mansion',
+      'building-castle',
+      'building-market',
+      'building-wizard-tower',
+      'building-port',
+      'building-tower',
+    ]);
+    const bannerAssets = new Set([
+      'building-castle',
+      'building-tower',
+      'building-archery',
+      'unit-wall-tower',
+      'building-port',
+    ]);
+
+    for (const [key, tile] of Object.entries(worldState.hexes)) {
+      if (underSet.has(key)) continue;
+      const assetName = HEX_ASSETS[tile.structureIndex]?.name ?? '';
+      if (!assetName) continue;
+      const pos = axialToWorld(tile.q, tile.r);
+      const phase = (tile.q * 1.73 + tile.r * 2.11) % 6.28;
+
+      if (smokeAssets.has(assetName) && this.smokeAnchors.length < 32) {
+        const yOff = assetName === 'building-castle' ? 0.62 : assetName === 'building-smelter' ? 0.48 : 0.38;
+        this.smokeAnchors.push({
+          x: pos.x + 0.08 * HEX_WORLD_SCALE,
+          y: TILE_SURFACE_Y + yOff * HEX_WORLD_SCALE,
+          z: pos.z - 0.06 * HEX_WORLD_SCALE,
+          phase,
+          isForge: assetName === 'building-smelter',
+        });
+      }
+
+      if (forgeAssets.has(assetName) && this.forgeAnchors.length < 48) {
+        this.forgeAnchors.push({
+          x: pos.x - 0.08 * HEX_WORLD_SCALE,
+          y: TILE_SURFACE_Y + 0.16 * HEX_WORLD_SCALE,
+          z: pos.z + 0.1 * HEX_WORLD_SCALE,
+          phase,
+          nightOnly: false,
+        });
+      } else if (lanternAssets.has(assetName) && this.forgeAnchors.length < 48) {
+        const yOff = assetName === 'building-castle' || assetName === 'building-wizard-tower' ? 0.34 : 0.18;
+        this.forgeAnchors.push({
+          x: pos.x + 0.06 * HEX_WORLD_SCALE,
+          y: TILE_SURFACE_Y + yOff * HEX_WORLD_SCALE,
+          z: pos.z + 0.14 * HEX_WORLD_SCALE,
+          phase,
+          nightOnly: true,
+        });
+      }
+
+      if (bannerAssets.has(assetName) && this.bannerAnchors.length < 32) {
+        const yOff = assetName === 'building-castle' ? 0.68 : assetName === 'building-tower' || assetName === 'unit-wall-tower' ? 0.56 : 0.44;
+        const ownerColor =
+          tile.owner === 'player'
+            ? 0x10b981
+            : tile.owner === 'iron_clan'
+              ? 0xdc2626
+              : tile.owner === 'azure_league'
+                ? 0x2563eb
+                : 0xf59e0b;
+        this.bannerAnchors.push({
+          x: pos.x,
+          y: TILE_SURFACE_Y + yOff * HEX_WORLD_SCALE,
+          z: pos.z,
+          phase,
+          colorHex: ownerColor,
+        });
+      }
+    }
   }
 
   private spawnParticleBurst(
@@ -4925,9 +5229,194 @@ export class HexSceneController {
     this.elapsedSec += dt;
     this.updateAtmosphereStep(atmosDt);
 
-    // Gentle ocean drift
-    this.waterTexture.offset.x = (this.elapsedSec * 0.015) % 1;
-    this.waterTexture.offset.y = (this.elapsedSec * 0.01) % 1;
+    const weatherId = this.currentWeather;
+    const seasonId = this.currentSeason;
+    const nightFactor = this.currentAtmosTarget.cityNightGlow;
+    const isNightish = nightFactor >= 0.35;
+    const windSpeedMult =
+      weatherId === 'storm' ? 2.4 : weatherId === 'rain' ? 1.55 : 1.0;
+
+    // 1. GPU Foliage wind sway (zero extra draw calls!)
+    TERRAIN_WIND_UNIFORMS.uWindTime.value = this.elapsedSec * windSpeedMult;
+    TERRAIN_WIND_UNIFORMS.uWindAmp.value = this.reduceAnimations
+      ? 0
+      : weatherId === 'storm'
+        ? 1.7
+        : weatherId === 'rain'
+          ? 1.25
+          : 0.9;
+
+    // 2. Visible ocean wave drift & gentle tidal heave
+    if (!this.reduceAnimations) {
+      this.waterTexture.offset.x = (this.elapsedSec * 0.032 * windSpeedMult) % 1;
+      this.waterTexture.offset.y =
+        (this.elapsedSec * 0.02 + Math.sin(this.elapsedSec * 0.65) * 0.015) % 1;
+      this.waterMesh.position.y =
+        -0.025 * HEX_WORLD_SCALE + Math.sin(this.elapsedSec * 1.15) * 0.018;
+    }
+
+    // 3. Living world: Ambient wind/seasonal/weather motes around camera focus
+    if (this.reduceAnimations || this.reduceEffects) {
+      if (this.ambientMotesMesh.visible) this.ambientMotesMesh.visible = false;
+    } else {
+      if (!this.ambientMotesMesh.visible) this.ambientMotesMesh.visible = true;
+      const isRainOrStorm = weatherId === 'rain' || weatherId === 'storm';
+      const isWinter = seasonId === 'winter' || weatherId === 'frost';
+      const isNight = isNightish;
+
+      if (isRainOrStorm) {
+        this.ambientMotesMat.color.setHex(0xcbe8ff);
+        this.ambientMotesMat.opacity = 0.62;
+      } else if (isWinter) {
+        this.ambientMotesMat.color.setHex(0xf8fafc);
+        this.ambientMotesMat.opacity = 0.72;
+      } else if (isNight) {
+        this.ambientMotesMat.color.setHex(0xfde047); // Warm fireflies
+        this.ambientMotesMat.opacity = 0.68;
+      } else if (seasonId === 'autumn') {
+        this.ambientMotesMat.color.setHex(0xea580c); // Drifting autumn leaves
+        this.ambientMotesMat.opacity = 0.65;
+      } else {
+        this.ambientMotesMat.color.setHex(0xfef3c7); // Gentle sunlit petals/pollen
+        this.ambientMotesMat.opacity = 0.5;
+      }
+
+      const cx = this.camTarget.x;
+      const cz = this.camTarget.z;
+      for (let i = 0; i < this.ambientMoteCount; i++) {
+        const m = this.ambientMotes[i]!;
+        if (isRainOrStorm) {
+          const dropY = 3.6 - ((this.elapsedSec * (4.2 * windSpeedMult) + m.phase) % 3.6);
+          const wx = cx + m.ox + Math.sin(m.phase) * 1.2 - dropY * 0.25;
+          const wz = cz + m.oz + Math.cos(m.phase) * 1.2;
+          _dummy.position.set(wx, Math.max(0.1, dropY), wz);
+          _dummy.rotation.set(0, 0, 0.22);
+          _dummy.scale.set(0.28, 2.2, 0.28);
+        } else if (isWinter) {
+          const snowY = 3.2 - ((this.elapsedSec * 0.65 + m.phase) % 3.1);
+          const wx = cx + m.ox + Math.sin(this.elapsedSec * 0.9 + m.phase) * 1.3;
+          const wz = cz + m.oz + Math.cos(this.elapsedSec * 0.7 + m.phase) * 1.3;
+          _dummy.position.set(wx, Math.max(0.12, snowY), wz);
+          _dummy.rotation.set(this.elapsedSec, this.elapsedSec * 0.8, 0);
+          _dummy.scale.setScalar(m.scale * 0.85);
+        } else {
+          const driftX = ((this.elapsedSec * m.speed * 1.15 + m.ox + 12) % 24) - 12;
+          const driftZ = m.oz + Math.sin(this.elapsedSec * 0.65 + m.phase) * 1.8;
+          const driftY = m.oy + Math.sin(this.elapsedSec * 1.3 + m.phase) * 0.35;
+          _dummy.position.set(cx + driftX, driftY, cz + driftZ);
+          _dummy.rotation.set(this.elapsedSec * 0.9, this.elapsedSec * 1.2 + m.phase, 0);
+          const pulse = isNight ? 0.55 + 0.45 * Math.sin(this.elapsedSec * 3.4 + m.phase) : 1;
+          _dummy.scale.setScalar(m.scale * 0.72 * pulse);
+        }
+        _dummy.updateMatrix();
+        this.ambientMotesMesh.setMatrixAt(i, _dummy.matrix);
+      }
+      this.ambientMotesMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    // 4. Living buildings: Chimney smoke wisps
+    if (this.reduceAnimations || this.reduceEffects || this.smokeAnchors.length === 0) {
+      if (this.smokeMesh.visible) this.smokeMesh.visible = false;
+    } else {
+      if (!this.smokeMesh.visible) this.smokeMesh.visible = true;
+      for (let i = 0; i < 32; i++) {
+        if (i >= this.smokeAnchors.length) {
+          _dummy.position.set(0, -10, 0);
+          _dummy.scale.setScalar(0);
+          _dummy.updateMatrix();
+          this.smokeMesh.setMatrixAt(i, _dummy.matrix);
+          continue;
+        }
+        const anc = this.smokeAnchors[i]!;
+        const cycle = (this.elapsedSec * (anc.isForge ? 0.48 : 0.34) + anc.phase) % 1;
+        const riseY = anc.y + cycle * 0.58 * HEX_WORLD_SCALE;
+        const driftX = anc.x + Math.sin(cycle * 4.2 + anc.phase) * 0.08 * HEX_WORLD_SCALE + cycle * 0.14 * windSpeedMult;
+        const driftZ = anc.z + Math.cos(cycle * 3.1 + anc.phase) * 0.06 * HEX_WORLD_SCALE;
+        const s = Math.sin(cycle * Math.PI) * (anc.isForge ? 1.15 : 0.85);
+        _dummy.position.set(driftX, riseY, driftZ);
+        _dummy.rotation.set(cycle * 2, anc.phase, 0);
+        _dummy.scale.setScalar(Math.max(0.001, s));
+        _dummy.updateMatrix();
+        this.smokeMesh.setMatrixAt(i, _dummy.matrix);
+      }
+      this.smokeMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    // 5. Living buildings: Forge embers & Dusk/Night warm window lanterns
+    if (this.reduceEffects || this.forgeAnchors.length === 0) {
+      if (this.forgeLightsMesh.visible) this.forgeLightsMesh.visible = false;
+    } else {
+      if (!this.forgeLightsMesh.visible) this.forgeLightsMesh.visible = true;
+      let anyColorUpdated = false;
+      for (let i = 0; i < 48; i++) {
+        if (i >= this.forgeAnchors.length) {
+          _dummy.position.set(0, -10, 0);
+          _dummy.scale.setScalar(0);
+          _dummy.updateMatrix();
+          this.forgeLightsMesh.setMatrixAt(i, _dummy.matrix);
+          continue;
+        }
+        const anc = this.forgeAnchors[i]!;
+        if (anc.nightOnly && !isNightish) {
+          _dummy.position.set(0, -10, 0);
+          _dummy.scale.setScalar(0);
+          _dummy.updateMatrix();
+          this.forgeLightsMesh.setMatrixAt(i, _dummy.matrix);
+          continue;
+        }
+        const flicker = this.reduceAnimations
+          ? 1.0
+          : 0.78 + 0.28 * Math.sin(this.elapsedSec * (anc.nightOnly ? 2.4 : 6.2) + anc.phase);
+        const nightScale = anc.nightOnly ? 0.65 + nightFactor * 0.45 : 1.15;
+        _dummy.position.set(anc.x, anc.y, anc.z);
+        _dummy.rotation.set(0, anc.phase, 0);
+        _dummy.scale.setScalar(flicker * nightScale);
+        _dummy.updateMatrix();
+        this.forgeLightsMesh.setMatrixAt(i, _dummy.matrix);
+        this.forgeLightsMesh.setColorAt(
+          i,
+          _colorTmp.setHex(anc.nightOnly ? 0xfde68a : 0xf97316)
+        );
+        anyColorUpdated = true;
+      }
+      this.forgeLightsMesh.instanceMatrix.needsUpdate = true;
+      if (anyColorUpdated && this.forgeLightsMesh.instanceColor) {
+        this.forgeLightsMesh.instanceColor.needsUpdate = true;
+      }
+    }
+
+    // 6. Living buildings: Waving banners / pennants
+    if (this.bannerAnchors.length === 0) {
+      if (this.bannersMesh.visible) this.bannersMesh.visible = false;
+    } else {
+      if (!this.bannersMesh.visible) this.bannersMesh.visible = true;
+      for (let i = 0; i < 32; i++) {
+        if (i >= this.bannerAnchors.length) {
+          _dummy.position.set(0, -10, 0);
+          _dummy.scale.setScalar(0);
+          _dummy.updateMatrix();
+          this.bannersMesh.setMatrixAt(i, _dummy.matrix);
+          continue;
+        }
+        const anc = this.bannerAnchors[i]!;
+        const waveYaw = this.reduceAnimations
+          ? 0.25
+          : Math.sin(this.elapsedSec * 3.4 * windSpeedMult + anc.phase) * 0.42;
+        const waveRoll = this.reduceAnimations
+          ? 0
+          : Math.cos(this.elapsedSec * 2.6 * windSpeedMult + anc.phase) * 0.12;
+        _dummy.position.set(anc.x, anc.y, anc.z);
+        _dummy.rotation.set(waveRoll, waveYaw, 0);
+        _dummy.scale.setScalar(1);
+        _dummy.updateMatrix();
+        this.bannersMesh.setMatrixAt(i, _dummy.matrix);
+        this.bannersMesh.setColorAt(i, _colorTmp.setHex(anc.colorHex));
+      }
+      this.bannersMesh.instanceMatrix.needsUpdate = true;
+      if (this.bannersMesh.instanceColor) {
+        this.bannersMesh.instanceColor.needsUpdate = true;
+      }
+    }
 
     // Gentle preview float & frontier pulse
     if (this.selectorGroup.visible && this.selectorPreviewGroup.visible) {
@@ -4950,6 +5439,26 @@ export class HexSceneController {
       this.influenceOverlayMat.opacity = 0.12;
     }
 
+    // 7. Smooth unit glide interpolation (hex-to-hex walking/sailing)
+    for (let i = this.unitMoveAnims.length - 1; i >= 0; i--) {
+      const anim = this.unitMoveAnims[i]!;
+      anim.progress += dt * 2.8;
+      if (anim.progress >= 1 || this.reduceAnimations) {
+        anim.group.position.set(anim.toX, anim.baseY, anim.toZ);
+        anim.group.userData.isMoving = false;
+        this.unitMoveAnims.splice(i, 1);
+      } else {
+        const t = anim.progress;
+        const ease = 1 - Math.pow(1 - t, 3);
+        const hop = Math.sin(t * Math.PI) * 0.14 * HEX_WORLD_SCALE;
+        anim.group.position.set(
+          THREE.MathUtils.lerp(anim.fromX, anim.toX, ease),
+          anim.baseY + hop,
+          THREE.MathUtils.lerp(anim.fromZ, anim.toZ, ease)
+        );
+      }
+    }
+
     if (!this.reduceAnimations) {
       for (const child of this.rareMarkersGroup.children) {
         const baseY =
@@ -4960,11 +5469,21 @@ export class HexSceneController {
       }
 
       for (const unitGroup of this.unitsGroup.children) {
-        if (unitGroup.userData.readyBob) {
-          const baseY =
-            (unitGroup.userData.baseY as number | undefined) ?? TILE_SURFACE_Y + 0.05;
-          const phase = (unitGroup.userData.phase as number | undefined) ?? 0;
-          unitGroup.position.y = baseY + Math.sin(this.elapsedSec * 3.2 + phase) * 0.02;
+        if (unitGroup.userData.isMoving) continue;
+        const baseY =
+          (unitGroup.userData.baseY as number | undefined) ?? TILE_SURFACE_Y + 0.05;
+        const phase = (unitGroup.userData.phase as number | undefined) ?? 0;
+        const isShip = unitGroup.userData.unitType === 'warship';
+        if (isShip) {
+          unitGroup.position.y = baseY + Math.sin(this.elapsedSec * 2.1 + phase) * 0.025;
+          unitGroup.rotation.z = Math.sin(this.elapsedSec * 1.7 + phase) * 0.06;
+        } else if (unitGroup.userData.readyBob) {
+          unitGroup.position.y = baseY + Math.sin(this.elapsedSec * 3.1 + phase) * 0.026;
+          unitGroup.rotation.y = Math.sin(this.elapsedSec * 1.1 + phase) * 0.12;
+        } else {
+          // Subtle living idle breathing for all stationed/exhausted units
+          unitGroup.position.y = baseY + Math.sin(this.elapsedSec * 1.8 + phase) * 0.01;
+          unitGroup.rotation.y = Math.sin(this.elapsedSec * 0.7 + phase) * 0.06;
         }
       }
     }
@@ -5098,6 +5617,7 @@ export class HexSceneController {
       this.keysHeld.size > 0 ||
       this.isOrbitDragging ||
       this.popAnims.length > 0 ||
+      this.unitMoveAnims.length > 0 ||
       this.conquestWaves.length > 0 ||
       this.activeParticleCount > 0 ||
       this.isCameraSettling()
@@ -5229,8 +5749,18 @@ export class HexSceneController {
     this.farmCropStalksMesh.dispose();
     this.farmCropHeadsMesh.dispose();
     this.winterIceMesh.dispose();
+    this.ambientMotesMesh.dispose();
+    this.smokeMesh.dispose();
+    this.forgeLightsMesh.dispose();
+    this.bannersMesh.dispose();
+    this.particlesMesh.dispose();
 
     this.conquestWaves = [];
+    this.unitMoveAnims = [];
+    this.unitLastWorldPos.clear();
+    this.smokeAnchors = [];
+    this.forgeAnchors = [];
+    this.bannerAnchors = [];
     this.terrainInstanceEntries = [];
     this.seasonalTerrainMats.clear();
     this.upgradeGeoCache.clear();

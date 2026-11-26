@@ -105,7 +105,7 @@ export const VICTORY_THRESHOLDS = {
     minActiveRoutesOrVolume: { routes: 2, exportVolumeGold: 1200 },
   },
   technological: {
-    totalTechs: TECH_TREE.length,
+    totalTechs: Math.min(TECH_TREE.length, 16),
     minScienceNetPerTurn: 24,
     minAcademicHubs: 1,
   },
