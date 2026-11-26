@@ -12,7 +12,10 @@ import {
   type KingdomResources,
 } from './economy-engine';
 import {
+  createInitialNarrativeState,
+  generateContextualEvent,
   generateTurnEvent,
+  type EventWorldContext,
   type ActiveKingdomEvent,
   type ActiveWorldEffect,
 } from './events-engine';
@@ -57,6 +60,7 @@ export interface TurnAdvanceResult {
   newEvent: ActiveKingdomEvent | null;
   conqueredByAiKeys: string[];
   headlinePt: string;
+  blockedByActiveEvent?: boolean;
 }
 
 function safeClampStock(current: number, delta: number, cap: number): number {
@@ -378,10 +382,41 @@ export function processKingdomTurn(
   const playerBorderHex = Object.values(aiResult.worldState.hexes).find(
     (t) => t.owner === 'player'
   );
-  const newEvent = generateTurnEvent(
-    nextTurn,
-    playerBorderHex ? { q: playerBorderHex.q, r: playerBorderHex.r } : undefined
+  const narrativeState = working.narrativeState ?? createInitialNarrativeState();
+  const eventContext: Omit<EventWorldContext, 'turn' | 'borderTarget'> = {
+    season: nextCalendar.season,
+    weatherId: weatherStep.weather.id,
+    farmCount: Object.values(aiResult.worldState.hexes).filter(
+      (tile) => tile.owner === 'player' && assets[tile.structureIndex]?.name === 'building-farm'
+    ).length,
+    mineCount: Object.values(aiResult.worldState.hexes).filter(
+      (tile) => tile.owner === 'player' && assets[tile.structureIndex]?.name === 'building-mine'
+    ).length,
+    portCount: Object.values(aiResult.worldState.hexes).filter(
+      (tile) => tile.owner === 'player' && assets[tile.structureIndex]?.name === 'building-port'
+    ).length,
+    hasTradeTech: working.research.unlocked.includes('trade'),
+    hasMilitaryTech: working.research.unlocked.includes('military'),
+    foodDeficit: econ.population.hasFoodDeficit,
+    foodStock: nextResources.food,
+    gold: nextCash,
+    population: nextPop,
+    conflictActive: working.factions.some((f) => f.relation === 'hostile'),
+    history: working.eventHistory,
+    flags: narrativeState.flags,
+    scheduled: narrativeState.scheduled,
+    cooldowns: narrativeState.cooldowns,
+    worldSeed: working.worldSeed ?? working.worldState.seed,
+  };
+  const borderTarget = playerBorderHex
+    ? { q: playerBorderHex.q, r: playerBorderHex.r }
+    : undefined;
+  const hasDueScheduledEvent = Object.values(narrativeState.scheduled).some(
+    (scheduledTurn) => scheduledTurn <= nextTurn
   );
+  const newEvent = hasDueScheduledEvent
+    ? generateContextualEvent({ ...eventContext, turn: nextTurn, borderTarget })
+    : generateTurnEvent(nextTurn, borderTarget, eventContext);
 
   // Concise causal turn headline
   const summaryParts: string[] = [
@@ -459,6 +494,7 @@ export function processKingdomTurn(
       activeEffects: nextEffects,
       activeEvent: newEvent,
       eventHistory: working.eventHistory,
+      narrativeState,
       lastTurnSummaryPt: headlinePt,
     },
     completedTech: researchStep.completedTech,
@@ -474,4 +510,3 @@ export function processKingdomTurn(
     headlinePt,
   };
 }
-

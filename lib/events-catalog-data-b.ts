@@ -10,7 +10,7 @@ export const EVENT_CATALOG_DATA_B: readonly EventDefinition[] = [
     weight: 11,
     titlePt: 'Chuvas torrenciais',
     descriptionPt:
-      'Tempestades enchem os rios e alagam campos baixos. A água pode ser canalizada para irrigação ou deixar a natureza seguir — com risco de perda de colheita e estradas.',
+      'Tempestades enchem os rios e alagam campos baixos. As águas podem ser canalizadas para irrigação ou deixadas à própria sorte, com perda de colheitas.',
     imageCategory: 'rain',
     conditions: {
       minTurn: 3,
@@ -26,16 +26,17 @@ export const EVENT_CATALOG_DATA_B: readonly EventDefinition[] = [
         descriptionPt: 'Obras de contenção e irrigação. Custo moderado, benefício agrícola.',
         style: 'balanced',
         requiresGold: 55,
-        outcomePt: 'Canais protegem e irrigam (−55 ouro, +50 comida). Estradas permanecem transitáveis.',
+        outcomePt: 'Irrigação e contenção concluídas (−55 ouro, +50 comida).',
+        fallbackOutcomePt: 'Sem ouro para as obras, as perdas se agravam (−20 comida, −10 madeira).',
         immediate: { goldDelta: -55, foodDelta: 50 },
         fallback: { foodDelta: -20, woodDelta: -10 },
       },
       {
         id: 'let_nature',
         labelPt: 'Deixar a natureza',
-        descriptionPt: 'Sem gastar. Aceitar perdas e possíveis ganhos de fertilidade depois.',
+        descriptionPt: 'Sem gastos; aceitar uma perda imediata em troca de um breve impulso agrícola.',
         style: 'opportunistic',
-        outcomePt: 'Alguns campos inundam. Fertilidade futura possível, prejuízo presente.',
+        outcomePt: 'Campos inundados (−25 comida); a produção de comida aumenta 10% por 2 turnos.',
         immediate: {
           foodDelta: -25,
           effect: {
@@ -72,8 +73,8 @@ export const EVENT_CATALOG_DATA_B: readonly EventDefinition[] = [
         descriptionPt: 'Gastar madeira e um pouco de ouro para aquecer lares.',
         style: 'humanitarian',
         requiresGold: 30,
-        outcomePt: 'Lares aquecidos (−30 ouro, −40 madeira). População preservada.',
-        fallbackOutcomePt: 'Sem ouro, o frio cobra vidas (−18 pop).',
+        outcomePt: 'Lares aquecidos (−30 ouro, até −40 madeira). População preservada.',
+        fallbackOutcomePt: 'Sem ouro, o frio cobra vidas (−18 pop, até −20 madeira).',
         immediate: { goldDelta: -30, woodDelta: -40 },
         fallback: { populationDelta: -18, woodDelta: -20 },
       },
@@ -342,7 +343,7 @@ export const EVENT_CATALOG_DATA_B: readonly EventDefinition[] = [
     weight: 7,
     titlePt: 'Espíritos da floresta',
     descriptionPt:
-      'Lenhadores relatam estranhezas e crescimento anormal. Respeitar o bosque pode render madeira sustentável; explorar agressivamente rende volume imediato.',
+      'Lenhadores relatam estranhezas e crescimento anormal. Respeitar o bosque rende madeira imediata; o corte intensivo concede mais, mas reduz temporariamente a eficiência.',
     imageCategory: 'forest',
     conditions: {
       minTurn: 4,
@@ -354,14 +355,14 @@ export const EVENT_CATALOG_DATA_B: readonly EventDefinition[] = [
       {
         id: 'respect_forest',
         labelPt: 'Respeitar a floresta',
-        descriptionPt: 'Manejo cuidadoso. Produção estável.',
+        descriptionPt: 'Manejo cuidadoso, sem penalidade temporária de eficiência.',
         style: 'balanced',
-        outcomePt: 'A floresta responde com crescimento ordenado (+25 madeira e bônus residual).',
+        outcomePt: 'A floresta responde ao manejo cuidadoso (+25 madeira).',
         immediate: {
           woodDelta: 25,
           effect: {
             titlePt: 'Manejo florestal',
-            descriptionPt: 'Produção de madeira sustentável.',
+            descriptionPt: 'Acordo de manejo respeitoso; sem bônus adicional de produção.',
             turnsRemaining: 4,
           },
         },
@@ -369,14 +370,14 @@ export const EVENT_CATALOG_DATA_B: readonly EventDefinition[] = [
       {
         id: 'clear_cut',
         labelPt: 'Corte intensivo',
-        descriptionPt: 'Máximo de madeira agora. Degradação posterior.',
+        descriptionPt: 'Mais madeira agora, com penalidade geral temporária de eficiência.',
         style: 'aggressive',
-        outcomePt: 'Grandes volumes de madeira (+70 madeira). A floresta fica rarefeita.',
+        outcomePt: 'Grande volume de madeira (+70 madeira); eficiência geral −5% por 5 turnos.',
         immediate: {
           woodDelta: 70,
           effect: {
             titlePt: 'Floresta rarefeita',
-            descriptionPt: 'Produção futura de madeira reduzida.',
+            descriptionPt: 'Eficiência geral reduzida em 5%.',
             turnsRemaining: 5,
             efficiencyPenalty: 0.05,
           },
@@ -393,7 +394,7 @@ export const EVENT_CATALOG_DATA_B: readonly EventDefinition[] = [
     weight: 9,
     titlePt: 'Conselho dividido',
     descriptionPt:
-      'Facções do conselho discordam sobre priorizar defesa ou comércio. Sua decisão molda a orientação do reino por alguns turnos.',
+      'Facções do conselho discordam sobre priorizar defesa ou comércio. Sua decisão registra a orientação política e afeta temporariamente a receita de ouro.',
     imageCategory: 'political',
     conditions: {
       minTurn: 5,
@@ -404,9 +405,9 @@ export const EVENT_CATALOG_DATA_B: readonly EventDefinition[] = [
       {
         id: 'favor_defense',
         labelPt: 'Priorizar defesa',
-        descriptionPt: 'Mais recursos para muros e tropas. Comércio um pouco mais lento.',
+        descriptionPt: 'Registrar prioridade de defesa; receita de ouro 3% menor por 4 turnos.',
         style: 'aggressive',
-        outcomePt: 'A orientação militar se fortalece. Eficiência comercial levemente reduzida.',
+        outcomePt: 'Orientação militar registrada; receita de ouro −3% por 4 turnos.',
         immediate: {
           setFlag: 'policy_defense',
           effect: {
@@ -420,9 +421,9 @@ export const EVENT_CATALOG_DATA_B: readonly EventDefinition[] = [
       {
         id: 'favor_trade',
         labelPt: 'Priorizar comércio',
-        descriptionPt: 'Rotas e feiras. Defesa um pouco mais lenta.',
+        descriptionPt: 'Registrar apoio a rotas e feiras; receita de ouro maior por 4 turnos.',
         style: 'opportunistic',
-        outcomePt: 'Mercados florescem. A prontidão militar fica em segundo plano.',
+        outcomePt: 'Orientação comercial registrada (+35 ouro; receita de ouro +8% por 4 turnos). A defesa não é alterada.',
         immediate: {
           goldDelta: 35,
           setFlag: 'policy_trade',

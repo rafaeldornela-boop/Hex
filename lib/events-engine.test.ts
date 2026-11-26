@@ -14,12 +14,18 @@ import {
   deserializeNarrativeState,
   type EventWorldContext,
 } from './events-engine';
-import { getEventImage, listEventImageCategories } from './event-images';
+import {
+  getEventImage,
+  listEventImageCategories,
+  type EventImageCategory,
+} from './event-images';
 
 test('catalog size, categories and chain', () => {
   const stats = getEventCatalogStats();
-  assert.ok(stats.total >= 18, `events: ${stats.total}`);
-  assert.ok(stats.choiceCount >= 40, `choices: ${stats.choiceCount}`);
+  assert.equal(stats.total, 21, `events: ${stats.total}`);
+  // The imported grok/events-narrative branch currently has 42 choice records;
+  // its accompanying contract says 48, so do not invent six gameplay choices here.
+  assert.equal(stats.choiceCount, 42, `choices: ${stats.choiceCount}`);
   assert.ok(stats.chains.includes('drought_arc'));
   assert.ok((stats.byCategory.crisis ?? 0) >= 2);
   assert.ok((stats.byRarity.rare ?? 0) + (stats.byRarity.legendary ?? 0) >= 2);
@@ -79,21 +85,96 @@ test('drought chain schedules follow-up', () => {
   assert.ok(narrative.scheduled['drought_harvest_fail']);
 });
 
-test('scheduled chain step fires when due', () => {
-  const ctx: EventWorldContext = {
-    turn: 14, worldSeed: 7,
-    history: [{ turn: 10, titlePt: 'Os rios baixam', outcomePt: 'x', kind: 'drought', definitionId: 'drought_early_warning', choiceId: 'accept_drought' }],
-    scheduled: { drought_harvest_fail: 14 }, cooldowns: {}, flags: ['drought_ignored'],
-  };
-  const evt = generateContextualEvent(ctx);
-  assert.ok(evt);
-  assert.equal(evt!.definitionId, 'drought_harvest_fail');
+test('drought warning requires dry weather when contextual conditions are evaluated', () => {
+  const dry = generateContextualEvent({
+    turn: 10, season: 'summer', weatherId: 'drought_weather', farmCount: 1, worldSeed: 7,
+  });
+  const clear = generateContextualEvent({
+    turn: 10, season: 'summer', weatherId: 'clear', farmCount: 1, worldSeed: 7,
+  });
+  assert.equal(dry?.definitionId, 'drought_early_warning');
+  assert.notEqual(clear?.definitionId, 'drought_early_warning');
+
+  const periodicDry = generateTurnEvent(3, undefined, {
+    season: 'summer', weatherId: 'drought_weather', farmCount: 1,
+  });
+  const periodicClear = generateTurnEvent(3, undefined, {
+    season: 'summer', weatherId: 'clear', farmCount: 1,
+  });
+  assert.equal(periodicDry?.definitionId, 'drought_early_warning');
+  assert.notEqual(periodicClear?.definitionId, 'drought_early_warning');
+});
+
+test('drought_arc completes all scheduled stages while sharing the campaign cooldown', () => {
+  let narrative = createInitialNarrativeState();
+  let history: NonNullable<EventWorldContext['history']> = [];
+  const warning = materializeEvent(getEventDefinition('drought_early_warning')!, 10);
+  const warningResolution = resolveEventChoice(warning, 'accept_drought', {
+    turn: 10, gold: 1000, defensePower: 20,
+  });
+  narrative = applyResolutionToNarrative(narrative, warningResolution, 10);
+  history = [warningResolution.historyEntry, ...history];
+  assert.equal(narrative.cooldowns.drought_arc, 10);
+  assert.equal(narrative.scheduled.drought_harvest_fail, 12);
+
+  const contextAt = (turn: number): EventWorldContext => ({
+    turn,
+    season: 'summer',
+    weatherId: 'drought_weather',
+    farmCount: 1,
+    worldSeed: 7,
+    history,
+    flags: narrative.flags,
+    scheduled: narrative.scheduled,
+    cooldowns: narrative.cooldowns,
+  });
+
+  const beforeStepTwo = generateContextualEvent(contextAt(11));
+  assert.notEqual(beforeStepTwo?.definitionId, 'drought_harvest_fail');
+  assert.notEqual(beforeStepTwo?.definitionId, 'drought_early_warning');
+  const harvestFail = generateContextualEvent(contextAt(12));
+  assert.equal(harvestFail?.definitionId, 'drought_harvest_fail');
+  assert.equal(narrative.cooldowns.drought_arc, 10);
+
+  const rationingResolution = resolveEventChoice(harvestFail!, 'ration_strict', {
+    turn: 12, gold: 1000, defensePower: 20,
+  });
+  narrative = applyResolutionToNarrative(narrative, rationingResolution, 12);
+  history = [rationingResolution.historyEntry, ...history];
+  assert.equal(narrative.cooldowns.drought_arc, 12);
+  assert.equal(narrative.scheduled.drought_famine_crisis, 15);
+
+  const beforeStepThree = generateContextualEvent(contextAt(14));
+  assert.notEqual(beforeStepThree?.definitionId, 'drought_famine_crisis');
+  // The due chain stage must win even when an unrelated high-priority invasion is eligible.
+  const famine = generateContextualEvent({
+    ...contextAt(15),
+    conflictActive: true,
+    worldSeed: 3,
+  });
+  assert.equal(famine?.definitionId, 'drought_famine_crisis');
+
+  const reliefResolution = resolveEventChoice(famine!, 'emergency_relief', {
+    turn: 15, gold: 1000, defensePower: 20,
+  });
+  assert.deepEqual(reliefResolution.clearFlags, ['drought_ignored', 'rationing']);
+  narrative = applyResolutionToNarrative(narrative, reliefResolution, 15);
+  assert.ok(!narrative.flags.includes('drought_ignored'));
+  assert.ok(!narrative.flags.includes('rationing'));
 });
 
 test('defense gate on invasion', () => {
   const event = materializeEvent(getEventDefinition('classic_invasion')!, 15, { q: 1, r: 0 });
-  assert.equal(resolveEventChoice(event, 'defend_borders', { turn: 15, gold: 500, defensePower: 20 }).goldDelta, 180);
-  assert.equal(resolveEventChoice(event, 'defend_borders', { turn: 15, gold: 500, defensePower: 5 }).goldDelta, -160);
+  const success = resolveEventChoice(event, 'defend_borders', {
+    turn: 15, gold: 500, defensePower: 20,
+  });
+  assert.equal(success.goldDelta, 180);
+  const failure = resolveEventChoice(event, 'defend_borders', {
+    turn: 15, gold: 500, defensePower: 5,
+  });
+  assert.equal(failure.goldDelta, -160);
+  assert.equal(failure.populationDelta, -15);
+  assert.match(failure.outcomePt, /−160 ouro, −15 pop/);
 });
 
 test('narrative persistence round-trip', () => {
@@ -125,7 +206,7 @@ test('chronicle only records worthy events', () => {
 test('image library covers catalog categories', () => {
   const cats = new Set(listEventImageCategories());
   for (const def of listEventDefinitions()) {
-    assert.ok(cats.has(def.imageCategory), def.imageCategory);
+    assert.ok(cats.has(def.imageCategory as EventImageCategory), def.imageCategory);
     assert.ok(getEventImage(def.imageCategory).src.startsWith('/event-images/'));
   }
 });

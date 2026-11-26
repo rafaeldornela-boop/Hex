@@ -136,7 +136,8 @@ function hashTurnSeed(turn: number, seed: number): number {
 function conditionsMet(def: EventDefinition, ctx: EventWorldContext): boolean {
   const c = def.conditions;
   if (c.minTurn !== undefined && ctx.turn < c.minTurn) return false;
-  if (c.seasons && ctx.season && !c.seasons.includes(ctx.season)) return false;
+  if (c.seasons && (!ctx.season || !c.seasons.includes(ctx.season))) return false;
+  if (c.weatherIds && (!ctx.weatherId || !c.weatherIds.includes(ctx.weatherId))) return false;
   if (c.minFarms !== undefined && (ctx.farmCount ?? 0) < c.minFarms) return false;
   if (c.minMines !== undefined && (ctx.mineCount ?? 0) < c.minMines) return false;
   if (c.requiresTrade && !ctx.hasTradeTech && (ctx.portCount ?? 0) < 1) return false;
@@ -152,7 +153,9 @@ function conditionsMet(def: EventDefinition, ctx: EventWorldContext): boolean {
   if (c.cooldownKey) {
     const last = ctx.cooldowns?.[c.cooldownKey];
     const cd = c.cooldownTurns ?? 6;
-    if (typeof last === 'number' && ctx.turn - last < cd) return false;
+    const scheduledFor = ctx.scheduled?.[def.id];
+    const explicitlyDue = typeof scheduledFor === 'number' && scheduledFor <= ctx.turn;
+    if (!explicitlyDue && typeof last === 'number' && ctx.turn - last < cd) return false;
   }
   if (ctx.scheduled && ctx.scheduled[def.id] !== undefined) {
     if (ctx.turn < ctx.scheduled[def.id]!) return false;
@@ -213,7 +216,8 @@ export function materializeEvent(
 /** Legacy entry used by turn-engine - cadence every 3 turns from turn 3. */
 export function generateTurnEvent(
   turn: number,
-  borderTarget?: { q: number; r: number }
+  borderTarget?: { q: number; r: number },
+  context?: Omit<EventWorldContext, 'turn' | 'borderTarget'>
 ): ActiveKingdomEvent | null {
   if (turn < 3 || turn % 3 !== 0) return null;
   const classicOrder = [
@@ -228,9 +232,20 @@ export function generateTurnEvent(
     'classic_invasion',
   ];
   const pick = turn === 3 ? 0 : hashTurnSeed(turn, 42026) % classicOrder.length;
-  const def = DEFINITION_BY_ID[classicOrder[pick]!];
-  if (!def) return null;
-  return materializeEvent(def, turn, borderTarget);
+  if (!context) {
+    const def = DEFINITION_BY_ID[classicOrder[pick]!];
+    return def ? materializeEvent(def, turn, borderTarget) : null;
+  }
+
+  const eventContext: EventWorldContext = { ...context, turn, borderTarget };
+  for (let offset = 0; offset < classicOrder.length; offset += 1) {
+    const id = classicOrder[(pick + offset) % classicOrder.length]!;
+    const def = DEFINITION_BY_ID[id];
+    if (def && conditionsMet(def, eventContext)) {
+      return materializeEvent(def, turn, borderTarget);
+    }
+  }
+  return null;
 }
 
 export function generateContextualEvent(ctx: EventWorldContext): ActiveKingdomEvent | null {
@@ -245,9 +260,7 @@ export function generateContextualEvent(ctx: EventWorldContext): ActiveKingdomEv
   const candidates: { def: EventDefinition; weight: number }[] = [];
   for (const def of EVENT_CATALOG) {
     if (!conditionsMet(def, ctx)) continue;
-    if (dueScheduled.length > 0 && !dueScheduled.includes(def.id) && def.priority < 90) {
-      continue;
-    }
+    if (dueScheduled.length > 0 && !dueScheduled.includes(def.id)) continue;
     const w = computeWeight(def, ctx);
     if (w > 0) candidates.push({ def, weight: w });
   }
@@ -312,7 +325,7 @@ function applyConsequence(
     populationDelta: cons.populationDelta ?? 0,
     effectsToAdd,
     setFlags: cons.setFlag ? [cons.setFlag] : [],
-    clearFlags: cons.clearFlag ? [cons.clearFlag] : [],
+    clearFlags: cons.clearFlags ? [...cons.clearFlags] : [],
     schedule,
   };
 }
@@ -335,15 +348,13 @@ export function resolveEventChoice(
     scienceDelta: 0,
     populationDelta: 0,
     effectsToAdd: [],
-    outcomePt: 'Evento resolvido.',
+    outcomePt: 'Escolha de evento desconhecida.',
     historyEntry: {
       turn: event.turn,
       titlePt: event.titlePt,
-      outcomePt: 'Evento resolvido.',
+      outcomePt: 'Escolha de evento desconhecida.',
       kind: event.kind,
       choiceId,
-      definitionId: event.definitionId,
-      chainId: event.chainId,
     },
     setFlags: [],
     clearFlags: [],

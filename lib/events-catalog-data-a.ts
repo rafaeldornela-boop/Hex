@@ -18,6 +18,7 @@ export const EVENT_CATALOG_DATA_A: readonly EventDefinition[] = [
     conditions: {
       minTurn: 3,
       seasons: ['summer', 'autumn'],
+      weatherIds: ['drought_weather'],
       minFarms: 1,
       cooldownKey: 'drought_arc',
       cooldownTurns: 10,
@@ -102,7 +103,7 @@ export const EVENT_CATALOG_DATA_A: readonly EventDefinition[] = [
         immediate: {
           goldDelta: -120,
           foodDelta: 80,
-          clearFlag: 'drought_ignored',
+          clearFlags: ['drought_ignored'],
           setFlag: 'grain_imported',
         },
         fallback: {
@@ -167,8 +168,7 @@ export const EVENT_CATALOG_DATA_A: readonly EventDefinition[] = [
           goldDelta: -200,
           foodDelta: 100,
           populationDelta: -10,
-          clearFlag: 'drought_ignored',
-          clearFlag: 'rationing',
+          clearFlags: ['drought_ignored', 'rationing'],
           setFlag: 'famine_survived',
         },
         fallback: {
@@ -188,7 +188,7 @@ export const EVENT_CATALOG_DATA_A: readonly EventDefinition[] = [
         labelPt: 'Abandonar periferia',
         descriptionPt: 'Concentrar recursos no núcleo. Aldeias distantes sofrem.',
         style: 'aggressive',
-        outcomePt: 'O centro sobrevive. A periferia esvazia (−30 pop, estabilidade no núcleo).',
+        outcomePt: 'O centro sobrevive com +20 comida; a periferia esvazia (−30 pop).',
         immediate: {
           populationDelta: -30,
           foodDelta: 20,

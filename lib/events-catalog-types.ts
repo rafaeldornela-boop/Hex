@@ -69,6 +69,8 @@ export interface ActiveKingdomEvent {
   priority?: number;
   imageCategory?: string;
   imageSrc?: string;
+  goldMultiplierMod?: number;
+  foodMultiplierMod?: number;
   durationTurns?: number;
   chainId?: string;
   chainStep?: number;
@@ -121,7 +123,7 @@ export interface EventConsequence {
     efficiencyPenalty?: number;
   };
   setFlag?: string;
-  clearFlag?: string;
+  clearFlags?: string[];
   scheduleDefinitionId?: string;
   scheduleInTurns?: number;
 }
