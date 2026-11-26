@@ -191,6 +191,17 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   const toastTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
+    if (
+      !initialAutostart &&
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('autostart') === '1'
+    ) {
+      document.body.dataset.state = 'playing';
+      setGameState('playing');
+    }
+  }, [initialAutostart]);
+
+  useEffect(() => {
     const syncPrefs = (prefs: GameAudioPreferences) => {
       setAudioPrefs(prefs);
       setMuted(prefs.muted);
@@ -1655,12 +1666,17 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     );
     const hasCrisis =
       kingdomState.activeEffects.some((e) => (e.efficiencyPenalty ?? 0) > 0) ||
-      kingdomState.activeEvent?.kind === 'economic_crisis' ||
+      kingdomState.activeEvent?.kind === 'economic' ||
+      kingdomState.activeEvent?.kind === 'crisis' ||
       kingdomState.activeEvent?.kind === 'revolt' ||
-      kingdomState.activeEvent?.kind === 'epidemic';
+      kingdomState.activeEvent?.kind === 'epidemic' ||
+      kingdomState.activeEvent?.kind === 'drought' ||
+      kingdomState.activeEvent?.kind === 'invasion';
     const recentDiscovery =
       kingdomState.activeEvent?.kind === 'discovery' ||
-      kingdomState.activeEvent?.kind === 'tech_breakthrough';
+      kingdomState.activeEvent?.kind === 'tech' ||
+      kingdomState.activeEvent?.kind === 'exploration' ||
+      kingdomState.activeEvent?.kind === 'rare';
 
     const musicState = resolveAdaptiveMusicState({
       atWar,

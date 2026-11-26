@@ -157,13 +157,19 @@ export const EVENT_IMAGE_LIBRARY: Record<EventImageCategory, EventImageAsset> = 
   },
 };
 
+import { withBasePath } from './base-path';
+
 export function getEventImage(
   category: EventImageCategory | string | undefined
 ): EventImageAsset {
-  if (category && category in EVENT_IMAGE_LIBRARY) {
-    return EVENT_IMAGE_LIBRARY[category as EventImageCategory];
-  }
-  return EVENT_IMAGE_LIBRARY.political;
+  const base =
+    category && category in EVENT_IMAGE_LIBRARY
+      ? EVENT_IMAGE_LIBRARY[category as EventImageCategory]
+      : EVENT_IMAGE_LIBRARY.political;
+  return {
+    ...base,
+    src: withBasePath(base.src),
+  };
 }
 
 export function listEventImageCategories(): EventImageCategory[] {

@@ -17,6 +17,7 @@ import {
   detectDeviceQualityProfile,
   type RenderQualityProfile,
 } from '@/lib/device-profile';
+import { withBasePath } from '@/lib/base-path';
 import {
   TOUCH_TAP_MAX_MOVEMENT_PX,
   computeTwoFingerGestureDelta,
@@ -1971,7 +1972,7 @@ export class HexSceneController {
     const existingPromise = this.loadingPromises.get(assetName);
     if (existingPromise) return existingPromise;
 
-    const url = `/godot-assets/models/${assetName}.glb`;
+    const url = withBasePath(`/godot-assets/models/${assetName}.glb`);
     const promise = new Promise<THREE.Group>((resolve, reject) => {
       this.gltfLoader.load(
         url,

@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import Image from 'next/image';
+import { withBasePath } from '@/lib/base-path';
 import {
   Check,
   Copy,
@@ -90,7 +91,7 @@ export default function OverviewSetupView({
 
             <div className="flex flex-wrap items-center gap-3 pt-1">
               <a
-                href="/downloads/hexagon-world-starter.zip"
+                href={withBasePath('/downloads/hexagon-world-starter.zip')}
                 download="hexagon-world-starter.zip"
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-700 text-white text-sm font-medium hover:bg-emerald-800 transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700"
               >
@@ -120,7 +121,7 @@ export default function OverviewSetupView({
           <div className="lg:w-[390px] shrink-0 flex flex-col justify-center">
             <div className="relative w-full aspect-[4/3] rounded-lg overflow-hidden border border-slate-200 bg-slate-100">
               <Image
-                src="/images/hexagon-world-preview.png"
+                src={withBasePath('/images/hexagon-world-preview.png')}
                 alt="Captura original incluída no repositório Starter-Kit-Hexagon-World"
                 fill
                 sizes="(max-width: 1024px) 100vw, 390px"

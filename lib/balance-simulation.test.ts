@@ -36,7 +36,10 @@ test('automated 192-turn simulations across all 5 strategies and multiple seeds 
         assert.ok(Number.isFinite(cp.food), `${strategy} T${cp.turn} food finite`);
         assert.ok(Number.isFinite(cp.population) && cp.population >= 0, `${strategy} T${cp.turn} pop valid`);
         assert.ok(Number.isFinite(cp.militaryPower), `${strategy} T${cp.turn} militaryPower finite`);
-        assert.ok(cp.territoryCount >= 1, `${strategy} T${cp.turn} territory >= 1`);
+        assert.ok(
+          cp.victoryStatus === 'defeat' || cp.territoryCount >= 1,
+          `${strategy} T${cp.turn} territory >= 1 while ongoing`
+        );
       }
 
       // Early pacing check: player should NOT have all 7 techs unlocked by turn 24
