@@ -408,6 +408,9 @@ test('military recruitment, movement, and combat capture of enemy territory', ()
 
   let capturedEnemyTile = false;
   for (let turnStep = 0; turnStep < 14; turnStep++) {
+    if (state.activeEvent) {
+      state = resolveKingdomEvent(state, state.activeEvent.choices[0]!.id, HEX_ASSETS).nextState;
+    }
     state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
     const unitNow = state.units.find((u) => u.owner === 'player');
     assert.ok(unitNow, 'Player knight should still be active');

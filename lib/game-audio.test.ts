@@ -1,11 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
+  AMBIENT_TRACK_PATHS,
   DEFAULT_AUDIO_PREFERENCES,
+  MUSIC_TRACK_PATHS,
+  SFX_ASSET_PATHS,
   gameAudio,
   normalizeAudioPreferences,
   resolveAdaptiveMusicState,
 } from './game-audio';
+
+test('all referenced music, ambient, and SFX audio files exist under public/ and are non-empty', () => {
+  const publicDir = path.join(process.cwd(), 'public');
+  const allPaths = [
+    ...Object.values(MUSIC_TRACK_PATHS),
+    ...Object.values(AMBIENT_TRACK_PATHS),
+    ...Object.values(SFX_ASSET_PATHS),
+  ];
+
+  assert.equal(Object.keys(MUSIC_TRACK_PATHS).length, 5);
+  assert.equal(Object.keys(AMBIENT_TRACK_PATHS).length, 8);
+  assert.equal(Object.keys(SFX_ASSET_PATHS).length, 11);
+
+  for (const relPath of allPaths) {
+    const absPath = path.join(publicDir, relPath.replace(/^\//, ''));
+    assert.ok(fs.existsSync(absPath), `Missing audio asset: ${relPath}`);
+    const stat = fs.statSync(absPath);
+    assert.ok(stat.size > 2000, `Audio asset unexpectedly small (${stat.size} bytes): ${relPath}`);
+  }
+
+  assert.ok(
+    fs.existsSync(path.join(publicDir, 'audio/LICENSES.md')),
+    'Missing public/audio/LICENSES.md'
+  );
+});
 
 test('normalizeAudioPreferences clamps volumes and preserves valid accessibility flags', () => {
   const normalized = normalizeAudioPreferences({
@@ -103,7 +133,7 @@ test('resolveAdaptiveMusicState transitions coherently by global kingdom state',
   );
 });
 
-test('gameAudio preferences update, notify subscribers, and SFX methods are safe headless', () => {
+test('gameAudio preferences update, notify subscribers, and all SFX methods are safe headless', () => {
   const observed: boolean[] = [];
   const unsub = gameAudio.subscribePreferences((p) => observed.push(p.muted));
 
@@ -124,6 +154,8 @@ test('gameAudio preferences update, notify subscribers, and SFX methods are safe
   gameAudio.playBuildComplete();
   gameAudio.playUpgrade();
   gameAudio.playModuleInstall();
+  gameAudio.playResearchComplete();
+  gameAudio.playCombat();
   gameAudio.playDiscovery();
   gameAudio.playConquest();
   gameAudio.playTrade();

@@ -660,10 +660,10 @@ export function computeTurnEconomyBreakdown(params: {
   }
   const effectFactor = Math.max(0.5, 1 - effectEffPenalty);
 
-  let capacity = BASE_HOUSING_CAPACITY + regionalHousingBonus;
+  let capacity = BASE_HOUSING_CAPACITY + regionalHousingBonus + mods.housingBonus;
   let storageBonus = mods.bonusStorage + regionalStorageBonus;
   let moduleFoodStorageBonus = 0;
-  let urbanQualityScore = 0;
+  let urbanQualityScore = mods.urbanQualityBonus;
 
   let baseGoldGross = 8; // royal base tax
   let buildingMaint = 0;
@@ -1337,21 +1337,25 @@ export function computeTurnEconomyBreakdown(params: {
   const networkTradeGold = owner === 'player' ? roadConnectivity.networkTradeGold : 0;
   const corridorTradeGold = owner === 'player' ? regionalSummary.corridorTradeGold : 0;
 
+  const tradeRouteMult = seasonTradeMult * (1 + mods.tradeRouteBonus);
   const finalGoldGross =
     Math.round(
       (baseGoldGross * mods.goldMultiplier +
-        tradePactGoldBonus +
+        tradePactGoldBonus * (1 + mods.tradeRouteBonus) +
         regionalBonusGold +
-        (networkTradeGold + corridorTradeGold) * seasonTradeMult) *
+        (networkTradeGold + corridorTradeGold) * tradeRouteMult) *
         effectGoldMult *
         weatherGoldMult
     ) + buildingGoldGross;
   const totalMaint = Math.round(
-    (buildingMaint + milPower.unitMaintenanceGold + roadMaint) * seasonUpkeepMult
+    (buildingMaint * mods.maintenanceMultiplier +
+      milPower.unitMaintenanceGold +
+      roadMaint) *
+      seasonUpkeepMult
   );
 
   const finalWood =
-    Math.round(baseWoodProd * seasonWoodMult * weatherWoodMult) + buildingWoodProd;
+    Math.round((baseWoodProd * seasonWoodMult * weatherWoodMult + buildingWoodProd) * mods.woodMultiplier);
   const finalStone =
     Math.round(baseStoneProd * mods.stoneOreMultiplier) + buildingStoneProd;
   const finalFoodProd =
@@ -1367,10 +1371,13 @@ export function computeTurnEconomyBreakdown(params: {
     buildingOreProd;
   const roundedOreConsumed = Math.round(totalOreConsumed);
   const finalOreNet = finalOreProd - roundedOreConsumed;
-  const finalMetalProd = buildingMetalProd;
+  const finalMetalProd = Math.round(buildingMetalProd * mods.metalMultiplier);
   const finalScience = Math.max(
     1,
-    Math.round(baseScienceProd) + buildingScienceProd + effectScienceBonus + regionalBonusScience
+    Math.round(
+      (Math.round(baseScienceProd) + buildingScienceProd + effectScienceBonus + regionalBonusScience + mods.flatScienceBonus) *
+        mods.scienceMultiplier
+    )
   );
 
   // Final population dynamics check using exact foodProduced
@@ -1382,8 +1389,8 @@ export function computeTurnEconomyBreakdown(params: {
     foodProduced: finalFoodProd,
     foodDeficitTurns,
     activeEffects,
-    foodDemandMult: seasonFoodDemandMult,
-    seasonalPopGrowthBonusMod: seasonPopGrowthMod,
+    foodDemandMult: seasonFoodDemandMult * mods.foodDemandMultiplier,
+    seasonalPopGrowthBonusMod: seasonPopGrowthMod + mods.popGrowthBonus,
     urbanQualityScore,
     roadConnectivityScore: roadConnectivity.networks.filter((n) => n.connectedCityIds.length >= 2).length,
     stabilityBonus: activeCities.some((c) => c.connectedCityIds.length > 0) ? 1 : 0,

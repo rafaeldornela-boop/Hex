@@ -116,11 +116,11 @@ const STRATEGY_BUILD_PRIORITIES: Record<SimulationStrategy, string[]> = {
 };
 
 const STRATEGY_TECH_PRIORITIES: Record<SimulationStrategy, TechId[]> = {
-  agricola: ['agriculture', 'construction', 'trade', 'mining', 'engineering', 'military', 'metallurgy'],
-  minerador: ['mining', 'military', 'metallurgy', 'agriculture', 'construction', 'engineering', 'trade'],
-  comercial: ['agriculture', 'trade', 'construction', 'mining', 'engineering', 'military', 'metallurgy'],
-  militar: ['mining', 'military', 'metallurgy', 'agriculture', 'construction', 'engineering', 'trade'],
-  urbano: ['agriculture', 'construction', 'engineering', 'trade', 'mining', 'military', 'metallurgy'],
+  agricola: ['agriculture', 'irrigation', 'crop_rotation', 'construction', 'mining', 'engineering', 'agronomy', 'scouting', 'cartography', 'academies', 'enlightenment'],
+  minerador: ['mining', 'smelting', 'militia', 'military', 'metallurgy', 'steel_forging', 'masonry', 'agriculture', 'construction', 'engineering'],
+  comercial: ['barter', 'agriculture', 'trade', 'guilds', 'scouting', 'cartography', 'maritime_empire', 'construction', 'mining', 'engineering'],
+  militar: ['mining', 'militia', 'military', 'masonry', 'metallurgy', 'fortifications', 'smelting', 'steel_forging', 'tactics', 'agriculture'],
+  urbano: ['agriculture', 'masonry', 'construction', 'irrigation', 'scouting', 'mining', 'engineering', 'barter', 'trade', 'guilds', 'urban_planning', 'academies'],
 };
 
 import { computeFactionMilitaryPower } from './military-engine';

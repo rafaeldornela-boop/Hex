@@ -5,7 +5,7 @@ import type { FactionState } from './faction-engine';
 import { hexKey, type HexWorldState } from './hex-engine';
 import type { RegionalWorldSummary } from './regional-engine';
 import type { RoadConnectivitySummary } from './road-engine';
-import type { TechId } from './tech-engine';
+import { getTechModifiers, type TechId } from './tech-engine';
 
 export type TradableResource = 'wood' | 'stone' | 'food' | 'ore' | 'metal';
 export type MarketSupplyState = 'excedente' | 'equilibrado' | 'escassez';
@@ -82,6 +82,7 @@ export function computeMarketSummary(params: {
 
   const marketCount = countTradeStructures(worldState, assets, underConstructionKeys);
   const hasTradeTech = unlockedTechs.includes('trade');
+  const techTradeMods = getTechModifiers(unlockedTechs);
   const activePacts = factions.filter((f) => f.relation === 'trade_pact').length;
   const connectedCityPairs =
     roadConnectivity?.networks.reduce(
@@ -92,10 +93,14 @@ export function computeMarketSummary(params: {
   const corridorCount = regionalSummary?.tradeCorridors.length ?? 0;
   const roadNetworkBonusPct = Math.min(10, connectedCityPairs * 4 + corridorCount * 3);
 
-  // Trade bonus lowers buy prices and raises sell prices cleanly (up to +38%)
+  // Trade bonus lowers buy prices and raises sell prices cleanly (up to +48%)
   const bonusPct = Math.min(
-    38,
-    marketCount * 6 + (hasTradeTech ? 10 : 0) + activePacts * 5 + roadNetworkBonusPct
+    48,
+    marketCount * 6 +
+      (hasTradeTech ? 10 : 0) +
+      Math.round(techTradeMods.tradeFeeReduction * 40) +
+      activePacts * 5 +
+      roadNetworkBonusPct
   );
   const buyDiscount = 1 - bonusPct / 150;
   const sellBonus = 1 + bonusPct / 100;
