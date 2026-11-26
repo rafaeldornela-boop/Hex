@@ -176,7 +176,7 @@ export default function KingdomModal({
       />
 
       <div
-        className="relative z-10 w-full max-w-2xl max-h-[86dvh] flex flex-col bg-[#fcf9f2] border-t-2 sm:border-2 border-[#3c3426] rounded-t-3xl sm:rounded-2xl shadow-[0_8px_0_#3c3426] overflow-hidden"
+        className="relative z-10 w-full max-w-2xl max-h-[86dvh] flex flex-col hex-panel-enter bg-[#fcf9f2] border-t-2 sm:border-2 border-[#3c3426] rounded-t-3xl sm:rounded-2xl shadow-[0_8px_0_#3c3426] overflow-hidden"
         style={{
           paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
         }}
@@ -1163,37 +1163,45 @@ export default function KingdomModal({
               {kingdomState.activeEvent && (
                 <section
                   data-testid="active-event-card"
-                  className="bg-amber-50 border-2 border-amber-500 rounded-xl p-4 space-y-3"
+                  className="bg-gradient-to-br from-amber-50 to-[#fcf9f2] border-2 border-amber-500 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-sm"
                 >
-                  <div className="flex items-start gap-2">
-                    <Sparkles className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" aria-hidden="true" />
-                    <div>
-                      <p className="text-[10px] font-bold uppercase text-amber-900">
-                        Evento do Turno {kingdomState.activeEvent.turn}
-                      </p>
-                      <h3 className="font-display text-base font-bold text-[#1f1a12]">
+                  <div className="flex items-start gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border-2 border-amber-500 flex items-center justify-center shrink-0">
+                      <Sparkles className="w-6 h-6 text-amber-800" aria-hidden="true" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-2 py-0.5 rounded-full bg-amber-200/80 text-[10px] font-bold uppercase tracking-wide text-amber-950">
+                          Decisão · Turno {kingdomState.activeEvent.turn}
+                        </span>
+                      </div>
+                      <h3 className="font-display text-lg font-bold text-[#1f1a12] mt-1 leading-snug">
                         {kingdomState.activeEvent.titlePt}
                       </h3>
-                      <p className="text-xs text-[#3c3426] mt-0.5">
+                      <p className="text-xs sm:text-sm text-[#3c3426] mt-1 leading-relaxed">
                         {kingdomState.activeEvent.descriptionPt}
                       </p>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {kingdomState.activeEvent.choices.map((choice) => (
+                  <div className="grid grid-cols-1 gap-2.5">
+                    {kingdomState.activeEvent.choices.map((choice, idx) => (
                       <button
                         key={choice.id}
                         type="button"
                         data-testid={`event-choice-${choice.id}`}
                         onClick={() => onResolveEvent(choice.id)}
-                        className="min-h-[48px] p-2.5 rounded-xl bg-white border-2 border-[#3c3426] text-left hover:bg-[#fcf9f2] cursor-pointer"
+                        className={`min-h-[58px] p-3.5 rounded-xl border-2 text-left transition-colors cursor-pointer ${
+                          idx === 0
+                            ? 'bg-white border-[#3c3426] hover:bg-amber-50/70 shadow-[0_2px_0_#3c3426]'
+                            : 'bg-[#f7f1e3] border-[#a89b82] hover:bg-white'
+                        }`}
                       >
-                        <span className="block text-xs font-bold text-[#1f1a12]">
+                        <span className="block text-sm font-bold text-[#1f1a12]">
                           {choice.labelPt}
                         </span>
-                        <span className="block text-[11px] text-[#5c5140] mt-0.5">
-                          {choice.descriptionPt}
+                        <span className="block text-xs text-[#5c5140] mt-0.5 leading-snug">
+                          Consequência: {choice.descriptionPt}
                         </span>
                       </button>
                     ))}

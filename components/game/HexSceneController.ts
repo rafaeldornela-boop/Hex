@@ -723,6 +723,8 @@ export class HexSceneController {
   private particles: ParticleState[] = [];
   private particleCursor = 0;
   private activeParticleCount = 0;
+  private reduceAnimations = false;
+  private reduceEffects = false;
 
   // Loop management
   private disposed = false;
@@ -1793,6 +1795,75 @@ export class HexSceneController {
   public setSelectedHex(coord: AxialCoord | null) {
     this.selectedCoord = coord;
     this.refreshSelectorAnchor();
+    this.wakeRenderLoop();
+  }
+
+  public setAccessibilityOptions(opts: {
+    reduceAnimations?: boolean;
+    reduceEffects?: boolean;
+  }) {
+    if (typeof opts.reduceAnimations === 'boolean') {
+      this.reduceAnimations = opts.reduceAnimations;
+      if (this.reduceAnimations) {
+        for (const anim of this.popAnims) {
+          anim.mesh.scale.setScalar(HEX_WORLD_SCALE);
+        }
+        this.popAnims = [];
+      }
+    }
+    if (typeof opts.reduceEffects === 'boolean') {
+      this.reduceEffects = opts.reduceEffects;
+    }
+    this.wakeRenderLoop();
+  }
+
+  public triggerEventEffect(
+    kind:
+      | 'build_complete'
+      | 'upgrade'
+      | 'module'
+      | 'road'
+      | 'city'
+      | 'discovery'
+      | 'conquest'
+      | 'event',
+    coord: AxialCoord
+  ) {
+    const pos = axialToWorld(coord.q, coord.r);
+    const key = hexKey(coord.q, coord.r);
+    const colorByKind: Record<typeof kind, number> = {
+      build_complete: 0x34d399,
+      upgrade: 0xfbbf24,
+      module: 0x38bdf8,
+      road: 0xd6d3d1,
+      city: 0xf59e0b,
+      discovery: 0x22d3ee,
+      conquest: 0xfbbf24,
+      event: 0xa78bfa,
+    };
+    const countByKind: Record<typeof kind, number> = {
+      build_complete: 8,
+      upgrade: 10,
+      module: 6,
+      road: 5,
+      city: 10,
+      discovery: 10,
+      conquest: 12,
+      event: 8,
+    };
+    const color = colorByKind[kind];
+    this.spawnConquestWave(pos.x, pos.z, color);
+    this.spawnParticleBurst(pos.x, TILE_SURFACE_Y + 0.08, pos.z, color, countByKind[kind]);
+
+    const placed = this.placedMeshes.get(key);
+    if (placed && !this.reduceAnimations) {
+      placed.group.scale.set(
+        1.08 * HEX_WORLD_SCALE,
+        0.78 * HEX_WORLD_SCALE,
+        1.08 * HEX_WORLD_SCALE
+      );
+      this.popAnims.push({ mesh: placed.group, progress: 0 });
+    }
     this.wakeRenderLoop();
   }
 
@@ -4316,9 +4387,10 @@ export class HexSceneController {
     this.wakeRenderLoop();
   }
 
-  private spawnConquestWave(x: number, z: number) {
+  private spawnConquestWave(x: number, z: number, colorHex = 0xfbbf24) {
+    if (this.reduceEffects) return;
     const mat = new THREE.MeshBasicMaterial({
-      color: 0xfbbf24,
+      color: colorHex,
       transparent: true,
       opacity: 0.95,
       side: THREE.DoubleSide,
@@ -4710,6 +4782,7 @@ export class HexSceneController {
     hexColor: number,
     count: number
   ) {
+    if (this.reduceEffects) return;
     const cappedCount = Math.min(count, this.particlePoolSize);
     for (let i = 0; i < cappedCount; i++) {
       const idx = this.particleCursor;
@@ -4857,34 +4930,41 @@ export class HexSceneController {
 
     // Gentle preview float & frontier pulse
     if (this.selectorGroup.visible && this.selectorPreviewGroup.visible) {
-      this.selectorPreviewGroup.position.y =
-        TILE_SURFACE_Y + 0.04 + Math.sin(this.elapsedSec * 4) * 0.035;
+      this.selectorPreviewGroup.position.y = this.reduceAnimations
+        ? TILE_SURFACE_Y + 0.04
+        : TILE_SURFACE_Y + 0.04 + Math.sin(this.elapsedSec * 4) * 0.035;
     }
 
-    this.expandingOverlayMat.opacity = 0.56 + Math.sin(this.elapsedSec * 4.2) * 0.24;
+    this.expandingOverlayMat.opacity = this.reduceAnimations
+      ? 0.62
+      : 0.56 + Math.sin(this.elapsedSec * 4.2) * 0.24;
 
     if (this.toolMode === 'expand') {
-      this.frontierOverlayMat.opacity = 0.36 + Math.sin(this.elapsedSec * 2.6) * 0.12;
+      this.frontierOverlayMat.opacity = this.reduceAnimations
+        ? 0.4
+        : 0.36 + Math.sin(this.elapsedSec * 2.6) * 0.12;
       this.influenceOverlayMat.opacity = 0.24;
     } else {
       this.frontierOverlayMat.opacity = 0.2;
       this.influenceOverlayMat.opacity = 0.12;
     }
 
-    for (const child of this.rareMarkersGroup.children) {
-      const baseY =
-        (child.userData.baseY as number | undefined) ?? TILE_SURFACE_Y + 0.24;
-      const phase = (child.userData.phase as number | undefined) ?? 0;
-      child.position.y = baseY + Math.sin(this.elapsedSec * 2.5 + phase) * 0.04;
-      child.rotation.y = this.elapsedSec * 1.1 + phase;
-    }
-
-    for (const unitGroup of this.unitsGroup.children) {
-      if (unitGroup.userData.readyBob) {
+    if (!this.reduceAnimations) {
+      for (const child of this.rareMarkersGroup.children) {
         const baseY =
-          (unitGroup.userData.baseY as number | undefined) ?? TILE_SURFACE_Y + 0.05;
-        const phase = (unitGroup.userData.phase as number | undefined) ?? 0;
-        unitGroup.position.y = baseY + Math.sin(this.elapsedSec * 3.2 + phase) * 0.02;
+          (child.userData.baseY as number | undefined) ?? TILE_SURFACE_Y + 0.24;
+        const phase = (child.userData.phase as number | undefined) ?? 0;
+        child.position.y = baseY + Math.sin(this.elapsedSec * 2.5 + phase) * 0.04;
+        child.rotation.y = this.elapsedSec * 1.1 + phase;
+      }
+
+      for (const unitGroup of this.unitsGroup.children) {
+        if (unitGroup.userData.readyBob) {
+          const baseY =
+            (unitGroup.userData.baseY as number | undefined) ?? TILE_SURFACE_Y + 0.05;
+          const phase = (unitGroup.userData.phase as number | undefined) ?? 0;
+          unitGroup.position.y = baseY + Math.sin(this.elapsedSec * 3.2 + phase) * 0.02;
+        }
       }
     }
 
@@ -4892,7 +4972,7 @@ export class HexSceneController {
     for (let i = this.conquestWaves.length - 1; i >= 0; i--) {
       const wave = this.conquestWaves[i];
       wave.progress += dt * 2.2;
-      if (wave.progress >= 1) {
+      if (wave.progress >= 1 || this.reduceEffects) {
         this.scene.remove(wave.mesh);
         wave.material.dispose();
         this.conquestWaves.splice(i, 1);
@@ -4909,7 +4989,7 @@ export class HexSceneController {
     for (let i = this.popAnims.length - 1; i >= 0; i--) {
       const anim = this.popAnims[i];
       anim.progress += dt * 5.8;
-      if (anim.progress >= 1) {
+      if (anim.progress >= 1 || this.reduceAnimations) {
         anim.mesh.scale.setScalar(HEX_WORLD_SCALE);
         this.popAnims.splice(i, 1);
       } else {
