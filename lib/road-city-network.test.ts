@@ -13,6 +13,7 @@ import {
   getKingdomEconomy,
   getKingdomMarket,
   getKingdomTerritoryCapacity,
+  resolveKingdomEvent,
   serializeKingdomState,
   type KingdomState,
 } from './kingdom-engine';
@@ -23,6 +24,15 @@ function idxOf(name: string): number {
   const idx = HEX_ASSETS.findIndex((a) => a.name === name);
   assert.ok(idx >= 0, `Missing asset ${name}`);
   return idx;
+}
+
+function advanceAfterPlayerDecision(state: KingdomState): ReturnType<typeof advanceKingdomTurn> {
+  if (state.activeEvent) {
+    const choiceId = state.activeEvent.choices[0]?.id;
+    assert.ok(choiceId, 'A pending event must offer a choice before the next turn');
+    state = resolveKingdomEvent(state, choiceId, HEX_ASSETS).nextState;
+  }
+  return advanceKingdomTurn(state, HEX_ASSETS);
 }
 
 function getFreeOwnedLandCoord(state: KingdomState): AxialCoord {
@@ -186,9 +196,9 @@ test('multi-city founding, city-to-city road network, trade gold, districts, log
   state = villageBuild.nextState;
 
   // Advance turns until Vila completes (3 turns)
-  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
-  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
-  const t4 = advanceKingdomTurn(state, HEX_ASSETS);
+  state = advanceAfterPlayerDecision(state).nextState;
+  state = advanceAfterPlayerDecision(state).nextState;
+  const t4 = advanceAfterPlayerDecision(state);
   state = t4.nextState;
 
   assert.equal(state.cities.length, 2, 'Completing Vila at dist >= 3 should automatically found a 2nd city');

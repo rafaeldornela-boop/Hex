@@ -10,9 +10,14 @@ import {
   type TurnProductionBreakdown,
 } from './economy-engine';
 import {
+  applyResolutionToNarrative,
+  createInitialNarrativeState,
+  deserializeNarrativeState,
+  resolveEventChoice,
   type ActiveKingdomEvent,
   type ActiveWorldEffect,
   type EventHistoryEntry,
+  type NarrativeState,
 } from './events-engine';
 import {
   createInitialFactions,
@@ -262,6 +267,7 @@ export interface KingdomState {
   activeEffects: ActiveWorldEffect[];
   activeEvent: ActiveKingdomEvent | null;
   eventHistory: EventHistoryEntry[];
+  narrativeState?: NarrativeState;
   lastTurnSummaryPt: string | null;
   diplomacyByFactionId?: Record<string, FactionDiplomacyState>;
   interfactionTrade?: InterfactionTradeState;
@@ -726,6 +732,7 @@ export function createStarterKingdomState(
     activeEffects: [],
     activeEvent: null,
     eventHistory: [],
+    narrativeState: createInitialNarrativeState(),
     lastTurnSummaryPt: null,
     diplomacyByFactionId: createInitialDiplomacyMap(generated.factions),
     interfactionTrade: createInitialInterfactionTradeState(),
@@ -755,6 +762,7 @@ export function createSandboxKingdomState(): KingdomState {
     activeEffects: [],
     activeEvent: null,
     eventHistory: [],
+    narrativeState: createInitialNarrativeState(),
     lastTurnSummaryPt: null,
     diplomacyByFactionId: createInitialDiplomacyMap(initialFactions),
     interfactionTrade: createInitialInterfactionTradeState(),
@@ -3006,224 +3014,64 @@ export function getKingdomVictoryProgress(
   });
 }
 
+/**
+ * Compatibility entry point retained for UI callers and older active-event saves.
+ * Catalog choice IDs are resolved by Events Narrative 2.0 so consequences have
+ * a single source of truth; unknown legacy IDs are left pending rather than lost.
+ */
 export function resolveKingdomEvent(
   state: KingdomState,
   choiceId: string,
   assets: HexAssetEntry[]
 ): { nextState: KingdomState; outcomePt: string } {
-  const evt = state.activeEvent;
-  if (!evt) {
-    return { nextState: state, outcomePt: '' };
-  }
+  const event = state.activeEvent;
+  if (!event) return { nextState: state, outcomePt: '' };
 
-  const econ = getKingdomEconomy(state, assets);
+  const economy = getKingdomEconomy(state, assets);
   const { military } = getKingdomProgression(state, assets);
-  let nextCash = state.worldState.cash;
-  const nextRes = { ...state.resources };
-  let nextResearch = state.research;
-  let nextPop = state.population;
-  const nextEffects = [...state.activeEffects];
-  let outcomePt = 'Evento resolvido.';
-
-  switch (choiceId) {
-    case 'irrigate_fields':
-      if (nextCash >= 500) {
-        nextCash -= 500;
-        outcomePt = 'Irrigação emergencial concluída (-$500). Colheitas protegidas.';
-      } else {
-        nextEffects.push({
-          id: `eff-drought-${evt.turn}`,
-          titlePt: 'Seca Severa',
-          descriptionPt: '-30% produção agrícola',
-          turnsRemaining: 3,
-          foodMultiplierMod: 0.7,
-        });
-        outcomePt = 'Saldo insuficiente ($500): seca reduzirá alimentos em 30% por 3 turnos.';
-      }
-      break;
-    case 'accept_drought':
-      nextEffects.push({
-        id: `eff-drought-${evt.turn}`,
-        titlePt: 'Seca Severa',
-        descriptionPt: '-30% produção agrícola',
-        turnsRemaining: 3,
-        foodMultiplierMod: 0.7,
-      });
-      outcomePt = 'Seca ativa por 3 turnos (-30% Alimento/turno).';
-      break;
-    case 'store_food':
-      nextRes.food = Math.min(econ.storageCaps.food, nextRes.food + 35);
-      outcomePt = '+35 Alimento estocado.';
-      break;
-    case 'sell_surplus':
-      nextCash += 160;
-      outcomePt = 'Excedente vendido por +$160.';
-      break;
-    case 'extract_minerals':
-      nextRes.stone = Math.min(econ.storageCaps.stone, nextRes.stone + 25);
-      nextRes.ore = Math.min(econ.storageCaps.ore, nextRes.ore + 20);
-      outcomePt = '+25 Pedra e +20 Minério extraídos.';
-      break;
-    case 'study_findings': {
-      const adv = advanceResearchProgress(nextResearch, 15);
-      nextResearch = adv.nextResearch;
-      outcomePt = adv.completedTech
-        ? `Pesquisa ${adv.completedTech.namePt} concluída!`
-        : '+15 Ciência aplicada à pesquisa.';
-      break;
-    }
-    case 'invest_caravan':
-      if (nextCash >= 120) {
-        nextCash += 160; // -120 + 280
-        nextRes.wood = Math.min(econ.storageCaps.wood, nextRes.wood + 20);
-        outcomePt = 'Caravana rendeu +$160 líquidos e +20 Madeira!';
-      } else {
-        outcomePt = 'Saldo insuficiente para investir; caravana partiu.';
-      }
-      break;
-    case 'decline_caravan':
-      outcomePt = 'Oferta recusada.';
-      break;
-    case 'fund_healers':
-      if (nextCash >= 240) {
-        nextCash -= 240;
-        outcomePt = 'Boticários contiveram a epidemia (-$240). População preservada.';
-      } else {
-        nextPop = Math.max(4, nextPop - 2);
-        nextEffects.push({
-          id: `eff-epidemic-${evt.turn}`,
-          titlePt: 'Epidemia',
-          descriptionPt: '-15% produtividade',
-          turnsRemaining: 2,
-          efficiencyPenalty: 0.15,
-        });
-        outcomePt = 'Sem ouro suficiente: -2 moradores e -15% eficiência por 2 turnos.';
-      }
-      break;
-    case 'quarantine_only':
-      nextPop = Math.max(4, nextPop - 1);
-      nextEffects.push({
-        id: `eff-epidemic-${evt.turn}`,
-        titlePt: 'Epidemia',
-        descriptionPt: '-15% produtividade',
-        turnsRemaining: 2,
-        efficiencyPenalty: 0.15,
-      });
-      outcomePt = 'Quarentena aplicada (-1 morador, -15% eficiência por 2 turnos).';
-      break;
-    case 'stabilize_treasury':
-      if (nextCash >= 140) {
-        nextCash -= 140;
-        const adv = advanceResearchProgress(nextResearch, 10);
-        nextResearch = adv.nextResearch;
-        outcomePt = 'Reforma comercial estabilizou o reino (-$140, +10 Ciência).';
-      } else {
-        nextEffects.push({
-          id: `eff-crisis-${evt.turn}`,
-          titlePt: 'Crise Econômica',
-          descriptionPt: '-20% receita em ouro',
-          turnsRemaining: 2,
-          goldMultiplierMod: 0.8,
-        });
-        outcomePt = 'Crise econômica reduzirá ouro em 20% por 2 turnos.';
-      }
-      break;
-    case 'absorb_crisis':
-      nextEffects.push({
-        id: `eff-crisis-${evt.turn}`,
-        titlePt: 'Crise Econômica',
-        descriptionPt: '-20% receita em ouro',
-        turnsRemaining: 2,
-        goldMultiplierMod: 0.8,
-      });
-      outcomePt = 'Retração econômica ativa por 2 turnos (-20% Ouro).';
-      break;
-    case 'tax_relief':
-      if (nextCash >= 180) {
-        nextCash -= 180;
-        outcomePt = 'Alívio fiscal concedido (-$180). Ordem restaurada.';
-      } else {
-        nextEffects.push({
-          id: `eff-revolt-${evt.turn}`,
-          titlePt: 'Greve Tributária',
-          descriptionPt: '-15% produtividade',
-          turnsRemaining: 2,
-          efficiencyPenalty: 0.15,
-        });
-        outcomePt = 'Sem ouro para alívio: agitação reduz eficiência por 2 turnos.';
-      }
-      break;
-    case 'suppress_revolt':
-      if (military.defensePower >= 14) {
-        outcomePt = `Guarda real pacificou a região (Defesa ${military.defensePower}).`;
-      } else {
-        nextEffects.push({
-          id: `eff-revolt-${evt.turn}`,
-          titlePt: 'Greve Tributária',
-          descriptionPt: '-15% produtividade',
-          turnsRemaining: 2,
-          efficiencyPenalty: 0.15,
-        });
-        outcomePt = `Defesa insuficiente (${military.defensePower}/14): -15% produtividade por 2 turnos.`;
-      }
-      break;
-    case 'sponsor_academy':
-      if (nextCash >= 180) {
-        nextCash -= 180;
-        const adv = advanceResearchProgress(nextResearch, 22);
-        nextResearch = adv.nextResearch;
-        outcomePt = adv.completedTech
-          ? `Pesquisa ${adv.completedTech.namePt} concluída (-$180)!`
-          : 'Experimentos financiados (-$180, +22 Ciência)!';
-      } else {
-        const adv = advanceResearchProgress(nextResearch, 6);
-        nextResearch = adv.nextResearch;
-        outcomePt = 'Sem ouro para patrocínio integral (+6 Ciência).';
-      }
-      break;
-    case 'sell_manuscripts': {
-      nextCash += 140;
-      const adv = advanceResearchProgress(nextResearch, 6);
-      nextResearch = adv.nextResearch;
-      outcomePt = 'Tratados vendidos (+$140, +6 Ciência).';
-      break;
-    }
-    case 'defend_borders':
-      if (military.defensePower >= 12) {
-        nextCash += 180;
-        outcomePt = `Fronteira defendida (Defesa ${military.defensePower})! Saqueadores derrotados (+$180).`;
-      } else {
-        nextCash = Math.max(0, nextCash - 160);
-        outcomePt = `Defesa insuficiente (${military.defensePower}/12): saqueadores levaram $160.`;
-      }
-      break;
-    case 'pay_tribute':
-      nextCash = Math.max(0, nextCash - 140);
-      outcomePt = 'Tributo pago (-$140). Fronteira preservada.';
-      break;
-    default:
-      break;
+  const resolution = resolveEventChoice(event, choiceId, {
+    turn: state.turn,
+    gold: state.worldState.cash,
+    defensePower: military.defensePower,
+  });
+  if (!resolution.historyEntry.definitionId) {
+    return { nextState: state, outcomePt: 'Escolha de evento desconhecida.' };
   }
 
-  const historyEntry: EventHistoryEntry = {
-    turn: evt.turn,
-    titlePt: evt.titlePt,
-    outcomePt,
-    kind: evt.kind,
+  const addStock = (current: number, delta: number, cap: number) =>
+    Math.min(cap, Math.max(0, Math.round(current + delta)));
+  const nextResources: KingdomResources = {
+    ...state.resources,
+    food: addStock(state.resources.food, resolution.foodDelta, economy.storageCaps.food),
+    wood: addStock(state.resources.wood, resolution.woodDelta, economy.storageCaps.wood),
+    ore: addStock(state.resources.ore, resolution.oreDelta, economy.storageCaps.ore),
+    stone: addStock(state.resources.stone, resolution.stoneDelta, economy.storageCaps.stone),
   };
+  const nextResearch = resolution.scienceDelta > 0
+    ? advanceResearchProgress(state.research, resolution.scienceDelta).nextResearch
+    : state.research;
+  const nextNarrative = applyResolutionToNarrative(
+    state.narrativeState ?? createInitialNarrativeState(),
+    resolution,
+    state.turn
+  );
 
   return {
     nextState: {
       ...state,
-      worldState: { ...state.worldState, cash: nextCash },
-      resources: nextRes,
-      population: nextPop,
+      worldState: {
+        ...state.worldState,
+        cash: Math.max(0, Math.round(state.worldState.cash + resolution.goldDelta)),
+      },
+      resources: nextResources,
+      population: Math.max(4, Math.round(state.population + resolution.populationDelta)),
       research: nextResearch,
-      activeEffects: nextEffects,
+      activeEffects: [...state.activeEffects, ...resolution.effectsToAdd],
       activeEvent: null,
-      eventHistory: [historyEntry, ...state.eventHistory].slice(0, 12),
+      eventHistory: [resolution.historyEntry, ...state.eventHistory].slice(0, 12),
+      narrativeState: nextNarrative,
     },
-    outcomePt,
+    outcomePt: resolution.outcomePt,
   };
 }
 
@@ -3531,12 +3379,24 @@ export function advanceKingdomTurn(
   state: KingdomState,
   assets: HexAssetEntry[]
 ): TurnAdvanceResult {
-  let working = state;
-  if (working.activeEvent && working.activeEvent.choices.length > 0) {
-    const fallbackChoice =
-      working.activeEvent.choices[working.activeEvent.choices.length - 1];
-    working = resolveKingdomEvent(working, fallbackChoice.id, assets).nextState;
+  if (state.activeEvent) {
+    return {
+      nextState: state,
+      completedTech: null,
+      completedBuildings: [],
+      completedUpgrades: [],
+      completedModules: [],
+      incorporatedKeys: [],
+      foundedCities: [],
+      leveledUpCities: [],
+      seasonChangedToPt: null,
+      newEvent: null,
+      conqueredByAiKeys: [],
+      headlinePt: 'Resolva o evento ativo antes de avançar o turno.',
+      blockedByActiveEvent: true,
+    };
   }
+  const working = state;
 
   const preDipMap = getDiplomacyMapForState(working);
   const preFactions = syncFactionsFromDiplomacy(working.factions, preDipMap);
@@ -3805,6 +3665,7 @@ export function serializeKingdomState(state: KingdomState): string {
     activeEffects: state.activeEffects,
     activeEvent: state.activeEvent,
     eventHistory: state.eventHistory,
+    narrativeState: state.narrativeState ?? createInitialNarrativeState(),
     diplomacyByFactionId: state.diplomacyByFactionId ?? createInitialDiplomacyMap(state.factions),
     interfactionTrade: state.interfactionTrade ?? createInitialInterfactionTradeState(),
     damagedHexes: state.damagedHexes ?? {},
@@ -4004,6 +3865,9 @@ export function deserializeKingdomState(
       activeEffects: cleanEffects,
       activeEvent: parsed.activeEvent ?? null,
       eventHistory: Array.isArray(parsed.eventHistory) ? parsed.eventHistory : [],
+      narrativeState: parsed.narrativeState
+        ? deserializeNarrativeState(JSON.stringify(parsed.narrativeState)) ?? createInitialNarrativeState()
+        : createInitialNarrativeState(),
       lastTurnSummaryPt: null,
       diplomacyByFactionId,
       interfactionTrade,
