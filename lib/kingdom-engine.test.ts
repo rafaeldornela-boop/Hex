@@ -9,6 +9,7 @@ import {
 } from './territory-engine';
 import { getStrategicRegionInfo } from './terrain-engine';
 import { getAvailableTechs } from './tech-engine';
+import { listEventDefinitions, materializeEvent } from './events-engine';
 import {
   advanceKingdomTurn,
   buildInKingdom,
@@ -295,13 +296,17 @@ test('research progression, multi-turn event effects, trade market, and rival AI
   assert.equal(uni.built, true);
   state = uni.nextState;
 
-  // Turn 2 & Turn 3: University finishes on T3, Turn 3 triggers Seca Severa (multi-turn event)
+  // Turn 2 & Turn 3: University finishes on T3. The drought event is attached
+  // explicitly here because the campaign weather/season gates are not met.
   state = advanceKingdomTurn(state, HEX_ASSETS).nextState; // T2 (uni 1t left)
   state = advanceKingdomTurn(state, HEX_ASSETS).nextState; // T3 (uni completes)
   assert.equal(state.turn, 3);
-  assert.ok(state.activeEvent !== null, 'Turn 3 must generate a kingdom event');
+  const droughtDefinition = listEventDefinitions().find(
+    (event) => event.id === 'drought_early_warning'
+  )!;
+  state = { ...state, activeEvent: materializeEvent(droughtDefinition, state.turn) };
 
-  // Accept drought (second choice) -> attaches 3-turn active world effect reducing food by 30%
+  // Accept drought -> attaches the three-turn food production effect.
   const econBeforeDrought = getKingdomEconomy(state, HEX_ASSETS);
   const droughtChoice = state.activeEvent!.choices[state.activeEvent!.choices.length - 1].id;
   state = resolveKingdomEvent(state, droughtChoice, HEX_ASSETS).nextState;
@@ -426,6 +431,23 @@ test('military recruitment, movement, and combat capture of enemy territory', ()
 
 test('serializeKingdomState and deserializeKingdomState round-trip v8 state with calendar/levels/expansions/roads/cities and support v7/v6/v1 fallback', () => {
   let starter = createStarterKingdomState(HEX_ASSETS, 987654);
+  starter = {
+    ...starter,
+    narrativeState: {
+      flags: ['drought_ignored', 'rationing'],
+      cooldowns: { drought_arc: 10 },
+      scheduled: { drought_harvest_fail: 12 },
+      chronicle: [
+        {
+          turn: 10,
+          titlePt: 'Os rios baixam',
+          bodyPt: 'A seca foi aceita.',
+          kind: 'drought',
+          importance: 'major',
+        },
+      ],
+    },
+  };
   starter = setActiveResearchInKingdom(starter, 'mining').nextState;
   const freeCoord = getFreeOwnedCoord(starter);
   starter = buildInKingdom(starter, freeCoord.q, freeCoord.r, idxOf('building-house'), 90, HEX_ASSETS).nextState;
@@ -449,6 +471,7 @@ test('serializeKingdomState and deserializeKingdomState round-trip v8 state with
   assert.equal(loaded.dayPhase, 'morning');
   assert.equal(loaded.population, 18);
   assert.equal(loaded.research.activeTechId, 'mining');
+  assert.deepEqual(loaded.narrativeState, starter.narrativeState);
   assert.equal(loaded.constructions.length, 1);
   assert.equal(loaded.constructions[0].turnsRemaining, 1);
   assert.equal(loaded.expansions.length, 1);
@@ -463,8 +486,12 @@ test('serializeKingdomState and deserializeKingdomState round-trip v8 state with
   delete v7Payload.calendar;
   delete v7Payload.dayPhase;
   delete v7Payload.climateWeather;
+  delete v7Payload.narrativeState;
   const loadedV7 = deserializeKingdomState(JSON.stringify(v7Payload), HEX_ASSETS.length);
   assert.ok(loadedV7 !== null);
+  assert.deepEqual(loadedV7.narrativeState, {
+    flags: [], cooldowns: {}, scheduled: {}, chronicle: [],
+  });
   assert.equal(loadedV7.calendar.year, 1);
   assert.equal(loadedV7.calendar.season, 'spring');
   assert.equal(loadedV7.climateWeather.id, 'clear');
@@ -498,3 +525,125 @@ function savedJsonOrThrow(raw: string): string {
   assert.ok(raw.length > 0);
   return raw;
 }
+test('pending narrative event blocks turn advancement without selecting an arbitrary choice', () => {
+  const starter = createStarterKingdomState(HEX_ASSETS, 4401);
+  const definition = listEventDefinitions().find((event) => event.id === 'classic_trade')!;
+  const activeEvent = materializeEvent(definition, starter.turn);
+  const state = { ...starter, activeEvent };
+
+  const result = advanceKingdomTurn(state, HEX_ASSETS);
+  assert.equal(result.blockedByActiveEvent, true);
+  assert.equal(result.nextState.turn, starter.turn);
+  assert.equal(result.nextState.activeEvent, activeEvent);
+  assert.deepEqual(result.nextState.eventHistory, starter.eventHistory);
+  assert.equal(result.nextState.narrativeState?.cooldowns.trade_caravan, undefined);
+
+  const invalidChoice = resolveKingdomEvent(state, 'removed_or_stale_choice', HEX_ASSETS);
+  assert.strictEqual(invalidChoice.nextState, state);
+  assert.equal(invalidChoice.outcomePt, 'Escolha de evento desconhecida.');
+  assert.equal(invalidChoice.nextState.activeEvent, activeEvent);
+});
+
+test('resolveKingdomEvent recognizes preserved legacy choice IDs through the catalog adapter', () => {
+  const starter = createStarterKingdomState(HEX_ASSETS, 4402);
+  const legacyChoiceIds = [
+    'irrigate_fields', 'accept_drought', 'store_food', 'sell_surplus',
+    'extract_minerals', 'study_findings', 'invest_caravan', 'decline_caravan',
+    'fund_healers', 'quarantine_only', 'stabilize_treasury', 'absorb_crisis',
+    'tax_relief', 'suppress_revolt', 'sponsor_academy', 'sell_manuscripts',
+    'defend_borders', 'pay_tribute',
+  ];
+  const definitions = listEventDefinitions();
+
+  for (const choiceId of legacyChoiceIds) {
+    const definition = definitions.find((event) =>
+      event.choices.some((choice) => choice.id === choiceId)
+    );
+    assert.ok(definition, `Missing catalog mapping for ${choiceId}`);
+    const generated = materializeEvent(definition!, starter.turn);
+    const legacyEvent = { ...generated, definitionId: undefined };
+    const result = resolveKingdomEvent(
+      { ...starter, activeEvent: legacyEvent, worldState: { ...starter.worldState, cash: 10000 } },
+      choiceId,
+      HEX_ASSETS
+    );
+    assert.equal(result.nextState.activeEvent, null, choiceId);
+    assert.equal(result.nextState.eventHistory[0]?.choiceId, choiceId);
+  }
+});
+
+test('kingdom adapter applies invest_caravan net gold and wood outcome', () => {
+  const starter = createStarterKingdomState(HEX_ASSETS, 4403);
+  const definitions = listEventDefinitions();
+  const trade = materializeEvent(definitions.find((event) => event.id === 'classic_trade')!, 9);
+  const beforeWood = starter.resources.wood;
+  const invested = resolveKingdomEvent(
+    {
+      ...starter,
+      worldState: { ...starter.worldState, cash: 500 },
+      activeEvent: trade,
+    },
+    'invest_caravan',
+    HEX_ASSETS
+  );
+  assert.equal(invested.nextState.worldState.cash, 660);
+  assert.equal(invested.nextState.resources.wood, beforeWood + 20);
+});
+
+test('campaign advances drought_arc on due turns despite its shared cooldown and save/load', () => {
+  const starter = createStarterKingdomState(HEX_ASSETS, 4410);
+  const warning = materializeEvent(
+    listEventDefinitions().find((event) => event.id === 'drought_early_warning')!,
+    9
+  );
+  let state: KingdomState = {
+    ...starter,
+    turn: 9,
+    worldState: { ...starter.worldState, cash: 1000 },
+    activeEvent: warning,
+  };
+
+  state = resolveKingdomEvent(state, 'accept_drought', HEX_ASSETS).nextState;
+  assert.equal(state.narrativeState?.cooldowns.drought_arc, 9);
+  assert.equal(state.narrativeState?.scheduled.drought_harvest_fail, 11);
+
+  const savedAfterWarning = deserializeKingdomState(
+    serializeKingdomState(state),
+    HEX_ASSETS.length
+  );
+  assert.ok(savedAfterWarning);
+  state = savedAfterWarning!;
+
+  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
+  assert.equal(state.turn, 10);
+  assert.notEqual(state.activeEvent?.definitionId, 'drought_harvest_fail');
+  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
+  assert.equal(state.turn, 11);
+  assert.equal(state.activeEvent?.definitionId, 'drought_harvest_fail');
+
+  state = resolveKingdomEvent(state, 'ration_strict', HEX_ASSETS).nextState;
+  assert.equal(state.narrativeState?.cooldowns.drought_arc, 11);
+  assert.equal(state.narrativeState?.scheduled.drought_famine_crisis, 14);
+  const savedAfterHarvest = deserializeKingdomState(
+    serializeKingdomState(state),
+    HEX_ASSETS.length
+  );
+  assert.ok(savedAfterHarvest);
+  state = savedAfterHarvest!;
+
+  while (state.turn < 14) {
+    const result = advanceKingdomTurn(state, HEX_ASSETS);
+    assert.notEqual(result.blockedByActiveEvent, true);
+    state = result.nextState;
+    if (state.activeEvent && state.turn < 14) {
+      state = resolveKingdomEvent(
+        state,
+        state.activeEvent.choices[0]!.id,
+        HEX_ASSETS
+      ).nextState;
+    }
+  }
+  assert.equal(state.turn, 14);
+  assert.equal(state.activeEvent?.definitionId, 'drought_famine_crisis');
+  assert.equal(state.narrativeState?.cooldowns.drought_arc, 11);
+});

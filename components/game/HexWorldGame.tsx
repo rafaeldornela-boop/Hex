@@ -730,7 +730,15 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
   );
 
   const handleAdvanceTurn = useCallback(() => {
+    if (kingdomStateRef.current.activeEvent) {
+      showToast('Resolva o evento ativo antes de avançar o turno.');
+      return;
+    }
     const res = advanceKingdomTurn(kingdomStateRef.current, HEX_ASSETS);
+    if (res.blockedByActiveEvent) {
+      showToast(res.headlinePt);
+      return;
+    }
     kingdomStateRef.current = res.nextState;
     setKingdomState(res.nextState);
     if (commandSourceRef.current) {
@@ -776,12 +784,23 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
 
   // Optional auto-turn timer
   useEffect(() => {
-    if (!autoTurnEnabled || gameState !== 'playing' || kingdomModalOpen) return;
+    if (
+      !autoTurnEnabled ||
+      gameState !== 'playing' ||
+      kingdomModalOpen ||
+      kingdomState.activeEvent
+    ) return;
     const timer = window.setInterval(() => {
       handleAdvanceTurn();
     }, 12000);
     return () => window.clearInterval(timer);
-  }, [autoTurnEnabled, gameState, handleAdvanceTurn, kingdomModalOpen]);
+  }, [
+    autoTurnEnabled,
+    gameState,
+    handleAdvanceTurn,
+    kingdomModalOpen,
+    kingdomState.activeEvent,
+  ]);
 
   const handleSelectTech = useCallback(
     (techId: TechId) => {
