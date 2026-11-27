@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+
+jobs:
+  validate:
+    name: Validation & Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit Tests
+        run: npm test
+
+      - name: Build static export
+        env:
+          NEXT_PUBLIC_BASE_PATH: /Hex
+        run: npm run build
+
+      - name: River & Map ASCII QA (Seeds 42026, 42027, 11111, 22222, 33333, 99999)
+        run: node --import tsx scripts/map-ascii-dump.mjs 42026 42027 11111 22222 33333 99999
+
+      - name: Upload ASCII Map Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: map-ascii-dump
+          path: artifacts/map-ascii-dump.txt
