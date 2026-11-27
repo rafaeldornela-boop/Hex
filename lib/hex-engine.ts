@@ -1,5 +1,7 @@
 import type { HexAssetEntry } from './godot-docs';
 import {
+  DEFAULT_FOREST_WOOD_STOCK,
+  DEPLETED_FOREST_ASSET_NAME,
   TERRAIN_METADATA,
   canBuildStructureOnTerrain,
   getHexTerrainAndResource,
@@ -41,6 +43,10 @@ export interface PlacedHex {
   terrainType?: TerrainType;
   resourceType?: ResourceType;
   resourceAmount?: number;
+  /** Finite remaining wood stock on forest tiles */
+  woodStock?: number;
+  /** True when a forest reached wood depletion threshold and transitioned to dirt-lumber */
+  forestDepleted?: boolean;
   /** Persistent rare strategic feature on procedural worlds */
   rareFeature?: RareFeatureType;
   /** Building upgrade tier (1 = base, 2..4 = upgraded) */
@@ -129,12 +135,15 @@ export function cycleStructureIndex(
 }
 
 export function hasHexConstruction(
-  tile: Pick<PlacedHex, 'structureIndex'> | null | undefined,
+  tile: Pick<PlacedHex, 'structureIndex' | 'forestDepleted'> | null | undefined,
   assets: HexAssetEntry[]
 ): boolean {
   if (!tile) return false;
   const asset = assets[tile.structureIndex];
   if (!asset) return false;
+  if (tile.forestDepleted && asset.name === DEPLETED_FOREST_ASSET_NAME) {
+    return false;
+  }
   return !isNaturalTerrainAssetName(asset.name);
 }
 
@@ -219,6 +228,8 @@ export function placeHexInState(
       terrainType: terrainInfo.terrainType,
       resourceType: terrainInfo.resourceType,
       resourceAmount: terrainInfo.resourceAmount,
+      ...(typeof previous?.woodStock === 'number' ? { woodStock: previous.woodStock } : {}),
+      ...(previous?.forestDepleted ? { forestDepleted: true } : {}),
       ...(previous?.rareFeature ? { rareFeature: previous.rareFeature } : {}),
       ...(previous?.meta ? { meta: previous.meta } : {}),
     },
@@ -266,7 +277,10 @@ export function demolishHexInState(
   }
 
   const terrainInfo = getHexTerrainAndResource(q, r, existing);
-  const baseAssetName = TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
+  const baseAssetName =
+    existing.forestDepleted && terrainInfo.terrainType === 'forest'
+      ? DEPLETED_FOREST_ASSET_NAME
+      : TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
   const baseAssetIndex = assets.findIndex((a) => a.name === baseAssetName);
   const nextStructureIndex =
     baseAssetIndex >= 0 ? baseAssetIndex : existing.structureIndex;
@@ -371,6 +385,13 @@ export function deserializeWorldState(
               tile.modules = cleanModules;
             }
           }
+          const rawWoodStock = (item as PlacedHex).woodStock;
+          if (typeof rawWoodStock === 'number' && Number.isFinite(rawWoodStock)) {
+            tile.woodStock = Math.max(0, Math.round(rawWoodStock));
+          }
+          if ((item as PlacedHex).forestDepleted === true) {
+            tile.forestDepleted = true;
+          }
           if (isValidRareFeatureType(rawRare)) {
             tile.rareFeature = rawRare;
           }
@@ -474,6 +495,9 @@ export function createStarterWorldState(assets: HexAssetEntry[]): HexWorldState 
         terrainType: terrainInfo.terrainType,
         resourceType: terrainInfo.resourceType,
         resourceAmount: terrainInfo.resourceAmount,
+        ...(terrainInfo.terrainType === 'forest'
+          ? { woodStock: DEFAULT_FOREST_WOOD_STOCK }
+          : {}),
       };
     }
   }

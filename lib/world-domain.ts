@@ -35,6 +35,7 @@ export interface TileDomainMetadata {
   ownerTerritoryId?: string;
   level?: number;
   assignedWorkers?: number;
+  localPopulation?: number;
   discovered?: boolean;
   modules?: string[];
 }

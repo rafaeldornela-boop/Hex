@@ -11,6 +11,7 @@ import {
   type PlacedHex,
 } from './hex-engine';
 import {
+  DEFAULT_FOREST_WOOD_STOCK,
   TERRAIN_METADATA,
   getResourceForTerrain,
   type RareFeatureType,
@@ -579,6 +580,9 @@ export function generateProceduralKingdomWorld(
       terrainType: cell.terrainType,
       resourceType: resInfo.resourceType,
       resourceAmount: resInfo.resourceAmount,
+      ...(cell.terrainType === 'forest'
+        ? { woodStock: DEFAULT_FOREST_WOOD_STOCK }
+        : {}),
       ...(cell.rareFeature !== 'none' ? { rareFeature: cell.rareFeature } : {}),
     };
   }

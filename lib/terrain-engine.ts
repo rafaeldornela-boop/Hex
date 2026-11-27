@@ -30,6 +30,19 @@ export interface PlayerResourceSummary {
 export const INCOMPATIBLE_TERRAIN_MESSAGE =
   'Este edifício não pode ser construído neste terreno.';
 
+export const DEFAULT_FOREST_WOOD_STOCK = 100;
+export const DEFAULT_FOREST_DEPLETION_THRESHOLD = 0;
+export const DEPLETED_FOREST_ASSET_NAME = 'dirt-lumber';
+
+export function resolveTerrainTypeFromAssetName(assetName: string): TerrainType | null {
+  if (assetName === 'dirt') return 'fertile';
+  if (assetName === 'grass' || assetName === 'grass-hill') return 'plains';
+  if (assetName === 'grass-forest' || assetName === 'dirt-lumber') return 'forest';
+  if (assetName.startsWith('stone-') || assetName === 'stone') return 'mountain';
+  if (assetName.startsWith('water-') || assetName === 'water') return 'water';
+  return null;
+}
+
 export const TERRAIN_METADATA: Record<
   TerrainType,
   Omit<TerrainDescriptor, 'type'>
@@ -328,7 +341,9 @@ export function calculatePlayerResources(
   for (const tile of Object.values(state.hexes)) {
     if (tile.owner !== 'player') continue;
     const info = getHexTerrainAndResource(tile.q, tile.r, tile);
-    if (info.resourceType === 'wood') summary.wood += info.resourceAmount;
+    if (info.resourceType === 'wood') {
+      if (!tile.forestDepleted) summary.wood += info.resourceAmount;
+    }
     else if (info.resourceType === 'ore') summary.ore += info.resourceAmount;
     else if (info.resourceType === 'food') summary.food += info.resourceAmount;
     else if (info.resourceType === 'water') summary.water += info.resourceAmount;

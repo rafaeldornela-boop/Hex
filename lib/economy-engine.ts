@@ -14,10 +14,16 @@ import {
   type BuildingWorkOrder,
 } from './population-engine';
 import {
+  DEPLETED_FOREST_ASSET_NAME,
   getHexTerrainAndResource,
   getStrategicRegionInfo,
 } from './terrain-engine';
-import { AXIAL_DIRECTIONS } from './territory-engine';
+import {
+  computeAdjacencyScaledEffect,
+  evaluateWorldAdjacencyPools,
+  getHexNeighbors,
+  type WorldAdjacencySummary,
+} from './adjacency-engine';
 import { getTechModifiers, type TechId } from './tech-engine';
 import { computeFactionMilitaryPower, type UnitEntity } from './military-engine';
 import type { ActiveWorldEffect } from './events-engine';
@@ -101,6 +107,7 @@ export interface BuildingOperationReport {
   } | null;
   workersAssigned: number;
   workersRequired: number;
+  localWorkersFromVillages?: number;
   locationEfficiencyPct: number;
   effectiveEfficiencyPct: number;
   locationBonusNotesPt: string[];
@@ -169,6 +176,7 @@ export interface TurnProductionBreakdown {
   citySummaryCount: number;
   roadConnectivity: RoadConnectivitySummary;
   regionalSummary: RegionalWorldSummary;
+  adjacencyPools: WorldAdjacencySummary;
   buildingsByKey: Record<string, BuildingOperationReport>;
   attentionHexKeys: string[];
   season: SeasonId | null;
@@ -267,35 +275,20 @@ export function computeBuildingLocationEfficiency(
   let factor = 1.0;
   const notesPt: string[] = [];
 
-  const neighborTiles: Array<{
-    tile: PlacedHex | undefined;
-    terrain: string;
-    assetName: string;
-    isCompleteBuilding: boolean;
-  }> = [];
-
-  for (const dir of AXIAL_DIRECTIONS) {
-    const nq = tile.q + dir.q;
-    const nr = tile.r + dir.r;
-    const nKey = hexKey(nq, nr);
-    const nTile = worldState.hexes[nKey];
-    const terrain = getHexTerrainAndResource(nq, nr, nTile).terrainType;
-    const nAsset = nTile ? (assets[nTile.structureIndex]?.name ?? '') : '';
-    const isComplete = Boolean(nTile) && !underConstructionKeys?.has(nKey);
-    neighborTiles.push({
-      tile: nTile,
-      terrain,
-      assetName: nAsset,
-      isCompleteBuilding: isComplete,
-    });
-  }
+  const neighborTiles = getHexNeighbors(
+    worldState,
+    tile.q,
+    tile.r,
+    assets,
+    underConstructionKeys
+  );
 
   const countTerrain = (t: string) =>
-    neighborTiles.filter((n) => n.terrain === t).length;
+    neighborTiles.filter((n) => n.exists && n.terrainType === t).length;
   const hasCompleteNeighborAsset = (names: string[]) =>
-    neighborTiles.some((n) => n.isCompleteBuilding && names.includes(n.assetName));
-  const countCompleteNeighborAsset = (names: string[]) =>
-    neighborTiles.filter((n) => n.isCompleteBuilding && names.includes(n.assetName)).length;
+    neighborTiles.some(
+      (n) => n.exists && n.isCompleteBuilding && names.includes(n.assetName)
+    );
 
   const strategic = getStrategicRegionInfo(tile.q, tile.r, tile);
 
@@ -325,7 +318,9 @@ export function computeBuildingLocationEfficiency(
     }
     case 'building-watermill':
     case 'building-dock': {
-      const landCount = neighborTiles.filter((n) => n.terrain !== 'water').length;
+      const landCount = neighborTiles.filter(
+        (n) => n.exists && n.terrainType !== 'water'
+      ).length;
       if (landCount > 0) {
         factor += 0.15;
         notesPt.push('Margem acessível (+15%)');
@@ -337,7 +332,12 @@ export function computeBuildingLocationEfficiency(
       break;
     }
     case 'dirt-lumber': {
-      const forestNeighbors = countTerrain('forest');
+      const forestScaled = computeAdjacencyScaledEffect(
+        neighborTiles,
+        (n) => n.exists && n.terrainType === 'forest' && !n.isForestDepleted,
+        { baseValue: 0, perNeighborBonus: 1, maxBonus: 6 }
+      );
+      const forestNeighbors = forestScaled.matchingNeighborCount;
       if (forestNeighbors >= 3) {
         factor += 0.25;
         notesPt.push('Mata densa vizinha (+25%)');
@@ -351,7 +351,12 @@ export function computeBuildingLocationEfficiency(
       break;
     }
     case 'building-mine': {
-      const mountainNeighbors = countTerrain('mountain');
+      const mountainScaled = computeAdjacencyScaledEffect(
+        neighborTiles,
+        (n) => n.exists && n.terrainType === 'mountain',
+        { baseValue: 0, perNeighborBonus: 1, maxBonus: 6 }
+      );
+      const mountainNeighbors = mountainScaled.matchingNeighborCount;
       if (mountainNeighbors >= 2) {
         factor += 0.25;
         notesPt.push('Cordilheira vizinha (+25%)');
@@ -381,17 +386,21 @@ export function computeBuildingLocationEfficiency(
     }
     case 'building-market':
     case 'building-port': {
-      const housingCount = countCompleteNeighborAsset([
+      const housingAssets = new Set([
         'building-house',
         'building-cabin',
         'building-village',
         'unit-mansion',
         'building-castle',
       ]);
-      if (housingCount > 0) {
-        const bonus = Math.min(0.25, housingCount * 0.1);
-        factor += bonus;
-        notesPt.push(`Moradias próximas (+${Math.round(bonus * 100)}%)`);
+      const housingScaled = computeAdjacencyScaledEffect(
+        neighborTiles,
+        (n) => n.exists && n.isCompleteBuilding && housingAssets.has(n.assetName),
+        { baseValue: 0, perNeighborBonus: 0.1, maxBonus: 0.25 }
+      );
+      if (housingScaled.cappedBonus > 0) {
+        factor += housingScaled.cappedBonus;
+        notesPt.push(`Moradias próximas (+${Math.round(housingScaled.cappedBonus * 100)}%)`);
       }
       if (
         assetName === 'building-market' &&
@@ -415,6 +424,7 @@ export function computeBuildingLocationEfficiency(
         strategic.rareFeature === 'arcane_crystal' ||
         neighborTiles.some(
           (n) =>
+            n.exists &&
             n.tile &&
             getStrategicRegionInfo(n.tile.q, n.tile.r, n.tile).rareFeature === 'arcane_crystal'
         );
@@ -711,10 +721,16 @@ export function computeTurnEconomyBreakdown(params: {
   }> = [];
   const buildingsByKey: Record<string, BuildingOperationReport> = {};
 
+  const villagePopulationsByKey: Record<string, number> = {};
+  const structureWorkerDemandsByKey: Record<string, number> = {};
+
   for (const tile of Object.values(worldState.hexes)) {
     if (tile.owner !== owner) continue;
     const key = hexKey(tile.q, tile.r);
     const assetName = assets[tile.structureIndex]?.name ?? '';
+    const isDepletedNaturalForest = Boolean(
+      tile.forestDepleted && assetName === DEPLETED_FOREST_ASSET_NAME
+    );
     const isUnderConstruction = Boolean(underConstructionKeys?.has(key));
     const level = getBuildingLevel(tile);
     const stats = getEffectiveBuildingStats(assetName, level);
@@ -735,7 +751,7 @@ export function computeTurnEconomyBreakdown(params: {
     const strategic = getStrategicRegionInfo(tile.q, tile.r, tile);
 
     // Natural tile baseline yield + strategic rare node bonus
-    if (terrainInfo.resourceType === 'wood') baseWoodProd += 1;
+    if (terrainInfo.resourceType === 'wood' && !tile.forestDepleted) baseWoodProd += 1;
     if (terrainInfo.resourceType === 'food') baseFoodProd += 1;
     if (terrainInfo.resourceType === 'water') baseFoodProd += 1;
     if (terrainInfo.resourceType === 'ore') baseStoneProd += 2;
@@ -767,6 +783,7 @@ export function computeTurnEconomyBreakdown(params: {
         moduleConstructionInProgress,
         workersAssigned: 0,
         workersRequired: stats.workersRequired,
+        localWorkersFromVillages: 0,
         locationEfficiencyPct: 100,
         effectiveEfficiencyPct: 0,
         locationBonusNotesPt: [],
@@ -790,14 +807,25 @@ export function computeTurnEconomyBreakdown(params: {
 
     const bDef = stats.baseDef;
     const isConstructedAsset =
-      stats.housingCapacity > 0 ||
-      stats.workersRequired > 0 ||
-      stats.storageBonus > 0 ||
-      stats.defenseBonus > 0 ||
-      stats.maintenanceGold > 0 ||
-      hasAnyPositiveOutput(stats.production);
+      !isDepletedNaturalForest &&
+      (stats.housingCapacity > 0 ||
+        stats.workersRequired > 0 ||
+        stats.storageBonus > 0 ||
+        stats.defenseBonus > 0 ||
+        stats.maintenanceGold > 0 ||
+        hasAnyPositiveOutput(stats.production));
 
     if (!isConstructedAsset) continue;
+
+    if (assetName === 'building-village') {
+      villagePopulationsByKey[key] =
+        typeof tile.meta?.localPopulation === 'number' && Number.isFinite(tile.meta.localPopulation)
+          ? Math.max(1, tile.meta.localPopulation)
+          : stats.housingCapacity + modEff.housingBonus;
+    }
+    if (stats.workersRequired > 0) {
+      structureWorkerDemandsByKey[key] = stats.workersRequired;
+    }
 
     capacity += stats.housingCapacity + modEff.housingBonus;
     storageBonus += stats.storageBonus + modEff.storageGeneralBonus;
@@ -832,14 +860,9 @@ export function computeTurnEconomyBreakdown(params: {
 
     const hasWaterNeighbor =
       terrainInfo.terrainType === 'water' ||
-      AXIAL_DIRECTIONS.some((dir) => {
-        const nq = tile.q + dir.q;
-        const nr = tile.r + dir.r;
-        return (
-          getHexTerrainAndResource(nq, nr, worldState.hexes[hexKey(nq, nr)])
-            .terrainType === 'water'
-        );
-      });
+      getHexNeighbors(worldState, tile.q, tile.r, assets, underConstructionKeys).some(
+        (n) => n.exists && n.terrainType === 'water'
+      );
 
     workOrders.push({
       key,
@@ -879,6 +902,15 @@ export function computeTurnEconomyBreakdown(params: {
       roadBonusNotesPt: logistics.notesPt,
     });
   }
+
+  const adjacencyPools = evaluateWorldAdjacencyPools({
+    worldState,
+    assets,
+    owner,
+    underConstructionKeys,
+    villagePopulationsByKey,
+    structureWorkerDemandsByKey,
+  });
 
   // Military unit maintenance & population slot usage
   const milPower = computeFactionMilitaryPower(
@@ -1311,6 +1343,8 @@ export function computeTurnEconomyBreakdown(params: {
       moduleConstructionInProgress: item.moduleConstructionInProgress,
       workersAssigned,
       workersRequired,
+      localWorkersFromVillages:
+        adjacencyPools.workers.consumersByKey[item.key]?.allocated ?? 0,
       locationEfficiencyPct: Math.round(item.locationFactor * 100),
       effectiveEfficiencyPct: Math.round(combinedFactor * 100),
       locationBonusNotesPt: item.locationNotesPt,
@@ -1457,6 +1491,7 @@ export function computeTurnEconomyBreakdown(params: {
     citySummaryCount: activeCities.length,
     roadConnectivity,
     regionalSummary,
+    adjacencyPools,
     buildingsByKey,
     attentionHexKeys,
     season: season ?? null,

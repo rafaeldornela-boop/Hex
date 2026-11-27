@@ -26,9 +26,11 @@ import { DEFAULT_ROTATION_DEG, hexKey } from './hex-engine';
 import type { ActiveConstruction, KingdomState } from './kingdom-engine';
 import { MIN_KINGDOM_POPULATION } from './population-engine';
 import {
+  DEFAULT_FOREST_WOOD_STOCK,
   TERRAIN_METADATA,
   getHexTerrainAndResource,
 } from './terrain-engine';
+import { syncForestDepletionState } from './adjacency-engine';
 import type { ActiveExpansion } from './territory-engine';
 import {
   advanceResearchProgress,
@@ -231,6 +233,9 @@ export function processKingdomTurn(
               terrainType: terrainInfo.terrainType,
               resourceType: terrainInfo.resourceType,
               resourceAmount: terrainInfo.resourceAmount,
+              ...(terrainInfo.terrainType === 'forest'
+                ? { woodStock: DEFAULT_FOREST_WOOD_STOCK }
+                : {}),
             };
         hexesMutated = true;
         incorporatedKeys.push(key);
@@ -246,6 +251,11 @@ export function processKingdomTurn(
       hexes: nextHexes,
     };
   }
+
+  worldAfterExpansions = syncForestDepletionState(
+    worldAfterExpansions,
+    assets
+  ).nextState;
 
   const expansionWorkersUsed = nextExpansions
     .filter((e) => e.owner === 'player')
