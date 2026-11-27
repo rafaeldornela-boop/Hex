@@ -20,9 +20,11 @@ import {
 } from './terrain-engine';
 import {
   DEFAULT_ADJACENCY_CONFIG,
+  PRODUCER_COMMERCE_CATEGORY,
   computeAdjacencyScaledEffect,
   computeBuildingChainAdjacency,
   evaluateWorldAdjacencyPools,
+  getForestWoodStock,
   getHexNeighbors,
   resolveForestTimberChain,
   solveGrainProcessingChain,
@@ -30,6 +32,7 @@ import {
   type ChainAdjacencyEffectReport,
   type GrainProcessingChainResult,
   type LocalCommerceChainResult,
+  type LocalCommerceProductCategory,
   type WorldAdjacencySummary,
 } from './adjacency-engine';
 import { getTechModifiers, type TechId } from './tech-engine';
@@ -91,6 +94,19 @@ export type BuildingOperationStatus =
   | 'idle'
   | 'under_construction';
 
+export interface MarketInspectionDetails {
+  producers: Array<{
+    key: string;
+    labelPt: string;
+    categoryPt: string;
+  }>;
+  distinctProductsPt: string[];
+  varietyMultiplierPct: number;
+  varietyBonusPt: string;
+  sharedWithMarketsCount: number;
+  sharedDemandNotePt: string | null;
+}
+
 export interface BuildingOperationReport {
   key: string;
   assetName: string;
@@ -133,6 +149,14 @@ export interface BuildingOperationReport {
   effectiveDefenseBonus: number;
   effectiveMaintenanceGold: number;
   inputConsumed: Partial<Record<InputResourceKey, number>>;
+  positiveNeighborKeys: string[];
+  penaltyNeighborKeys: string[];
+  capacitySummaryPt: string | null;
+  resourceOriginPt: string | null;
+  workerOriginPt: string | null;
+  bonusSummaryPt: string[];
+  penaltySummaryPt: string[];
+  marketDetails?: MarketInspectionDetails;
 }
 
 export interface PopulationSummary {
@@ -1930,6 +1954,258 @@ export function computeTurnEconomyBreakdown(params: {
       attentionHexKeys.push(item.key);
     }
 
+    const COMMERCE_CATEGORY_LABELS_PT: Record<LocalCommerceProductCategory, string> = {
+      grain: 'Grãos',
+      flour: 'Farinha',
+      livestock: 'Pecuária',
+      lumber: 'Madeira',
+      minerals: 'Minerais',
+      metal: 'Metal',
+      fish: 'Pescado',
+      maritime: 'Comércio Marítimo',
+    };
+
+    const localWorkers = adjacencyPools.workers.consumersByKey[item.key]?.allocated ?? 0;
+    const positiveSet = new Set<string>(item.chainAdj.positiveNeighborKeys);
+    const penaltySet = new Set<string>(item.chainAdj.penaltyNeighborKeys);
+
+    // Worker origin summary
+    let workerOriginPt: string | null = null;
+    if (workersRequired > 0) {
+      if (workersAssigned === 0) {
+        workerOriginPt = `Sem trabalhadores (0/${workersRequired})`;
+      } else if (localWorkers >= workersAssigned) {
+        workerOriginPt = `Vila adjacente (${workersAssigned}/${workersRequired})`;
+      } else if (localWorkers > 0) {
+        workerOriginPt = `Vila adj. (${Math.round(localWorkers * 10) / 10}) + Reino (${workersAssigned}/${workersRequired})`;
+      } else {
+        workerOriginPt = `População do reino (${workersAssigned}/${workersRequired})`;
+      }
+    }
+
+    // Chain-specific capacity, resource origin & neighbor highlights
+    let capacitySummaryPt: string | null = null;
+    let resourceOriginPt: string | null = null;
+    const bonusSummaryPt: string[] = [...item.chainAdj.bonusNotesPt];
+    const penaltySummaryPt: string[] = [...item.chainAdj.penaltyNotesPt];
+    let marketDetails: MarketInspectionDetails | undefined;
+
+    if (item.assetName === 'building-farm') {
+      const consumedGrain = grainChain.grainConsumedByFarmKey[item.key] ?? 0;
+      const excessGrain = grainChain.excessGrainByFarmKey[item.key] ?? 0;
+      const irr = adjacencyPools.irrigationByKey[item.key];
+      resourceOriginPt =
+        getHexTerrainAndResource(item.tile.q, item.tile.r, item.tile).terrainType === 'fertile'
+          ? 'Solo Fértil (100%)'
+          : 'Planície (68%)';
+      capacitySummaryPt =
+        consumedGrain > 0
+          ? `Grão: ${Math.round(consumedGrain)} moído · ${Math.round(excessGrain)} bruto`
+          : irr?.isIrrigated
+            ? `Irrigação: ${irr.irrigationCapacity}/${irr.maxCap}`
+            : null;
+    } else if (
+      item.assetName === 'building-mill' ||
+      item.assetName === 'building-watermill'
+    ) {
+      const millSpec = finalMills.find((m) => m.key === item.key);
+      const procGrain = grainChain.grainProcessedByMillKey[item.key] ?? 0;
+      const maxCap = Math.round(millSpec?.processingCapacity ?? 0);
+      capacitySummaryPt = `Capacidade: ${Math.round(procGrain)}/${maxCap} grão/t`;
+      resourceOriginPt =
+        procGrain > 0
+          ? 'Grão: Fazenda adjacente'
+          : item.assetName === 'building-watermill' && !item.chainAdj.hasWaterAccess
+            ? 'Grão/Água: exige Água adjacente'
+            : 'Grão: sem Fazenda adjacente';
+    } else if (item.assetName === 'building-sheep') {
+      const pAlloc = adjacencyPools.pasture.consumersByKey[item.key];
+      const alloc = pAlloc?.allocated ?? 0;
+      const dem = pAlloc?.demand ?? DEFAULT_ADJACENCY_CONFIG.sheep.pastureDemand;
+      capacitySummaryPt = `Pasto: ${Math.round(alloc * 10) / 10}/${dem}`;
+      resourceOriginPt =
+        alloc > 0 ? 'Pasto: Planície adjacente' : 'Pasto: sem Planície aberta';
+      if ((pAlloc?.sharedWithConsumerKeys.length ?? 0) > 0) {
+        penaltySummaryPt.push(
+          `Pasto dividido com ${pAlloc!.sharedWithConsumerKeys.length} estrutura(s)`
+        );
+      }
+    } else if (item.assetName === 'dirt-lumber') {
+      const timberSupplied = forestTimber.timberSuppliedByConsumerKey[item.key] ?? 0;
+      const activeForestStocks = item.chainAdj.activeForestNeighborKeys
+        .map((fk) => getForestWoodStock(worldState.hexes[fk]))
+        .reduce((a, b) => a + b, 0);
+      const ownStock = getForestWoodStock(item.tile);
+      const availableTotal = activeForestStocks > 0 ? activeForestStocks : ownStock;
+      capacitySummaryPt = `Estoque florestal: ${Math.round(availableTotal)} mad. (${Math.round(timberSupplied)}/t)`;
+      resourceOriginPt =
+        item.chainAdj.activeForestNeighborKeys.length > 0
+          ? 'Madeira: Floresta adjacente'
+          : ownStock > 0
+            ? 'Madeira: Floresta local'
+            : 'Madeira: Floresta esgotada';
+    } else if (item.assetName === 'building-mine') {
+      const depLabel =
+        item.chainAdj.mountainDeposit === 'stone'
+          ? 'Depósito de Pedra (Pedreira)'
+          : item.chainAdj.mountainDeposit === 'ore'
+            ? 'Veio de Minério'
+            : 'Veio Misto (Pedra & Minério)';
+      resourceOriginPt = `${depLabel} · Montanha`;
+    } else if (item.assetName === 'building-smelter') {
+      const fuelInfo = smelterFuelByKey[item.key];
+      const hasAdjMine = positiveSet.size > 0 && item.chainAdj.positiveNeighborKeys.some((k) => {
+        const nt = worldState.hexes[k];
+        return nt && assets[nt.structureIndex]?.name === 'building-mine';
+      });
+      const oreSrc = hasAdjMine ? 'Mina adjacente' : 'Estoque de minério';
+      const fuelSrc = fuelInfo?.usedForestFuel
+        ? 'Floresta adjacente'
+        : (fuelInfo?.kingdomFuelUsed ?? 0) > 0
+          ? 'Reserva de madeira do reino'
+          : 'Sem combustível';
+      resourceOriginPt = `Minério: ${oreSrc} · Combustível: ${fuelSrc}`;
+      capacitySummaryPt = `Consumo/t: ${inputConsumed.ore ?? 0} Min · ${inputConsumed.wood ?? 0} Mad`;
+    } else if (item.assetName === 'building-dock') {
+      const fAlloc = adjacencyPools.fishing.consumersByKey[item.key];
+      const alloc = fAlloc?.allocated ?? 0;
+      const dem = fAlloc?.demand ?? DEFAULT_ADJACENCY_CONFIG.dock.fishingDemand;
+      capacitySummaryPt = `Pesca: ${Math.round(alloc * 10) / 10}/${dem}`;
+      resourceOriginPt = alloc > 0 ? 'Pesca: Água adjacente' : 'Pesca: sem Água produtiva';
+      if ((fAlloc?.sharedWithConsumerKeys.length ?? 0) > 0) {
+        penaltySummaryPt.push(
+          `Pesca dividida com ${fAlloc!.sharedWithConsumerKeys.length} estrutura(s)`
+        );
+      }
+      for (const nKey of item.chainAdj.positiveNeighborKeys) {
+        const wRep = adjacencyPools.waterByKey[nKey];
+        if (wRep && wRep.pollutionPenaltyPct > 0) {
+          penaltySummaryPt.push(`Água poluída (-${wRep.pollutionPenaltyPct}%)`);
+          break;
+        }
+      }
+    } else if (item.assetName === 'building-village') {
+      const vRep = adjacencyPools.villagesByKey[item.key];
+      if (vRep) {
+        const huntAlloc = Math.round((vRep.hunting?.allocated ?? 0) * 10) / 10;
+        const fishAlloc = Math.round((vRep.fishing?.allocated ?? 0) * 10) / 10;
+        const pastAlloc = Math.round((vRep.pasture?.allocated ?? 0) * 10) / 10;
+        capacitySummaryPt = `Oferta trab.: ${Math.round(vRep.workerSupply * 10) / 10} (aloc. ${Math.round(vRep.workersSuppliedTotal * 10) / 10})`;
+        resourceOriginPt = `Pools: Caça ${huntAlloc} · Pesca ${fishAlloc} · Pasto ${pastAlloc}`;
+        if (vRep.pollutionPenaltyPct > 0) {
+          penaltySummaryPt.push(`Poluição da Fundição (-${vRep.pollutionPenaltyPct}% trab.)`);
+        }
+        for (const consumerKey of Object.keys(vRep.workerConsumersByKey)) {
+          if ((vRep.workerConsumersByKey[consumerKey] ?? 0) > 0) {
+            positiveSet.add(consumerKey);
+          }
+        }
+      }
+    } else if (item.assetName === 'building-market') {
+      const mRep = commerceChain.marketsByKey[item.key];
+      if (mRep) {
+        const producersList: Array<{ key: string; labelPt: string; categoryPt: string }> = [];
+        for (const pKey of mRep.suppliedProducerKeys) {
+          positiveSet.add(pKey);
+          const pItem = completedBuildings.find((cb) => cb.key === pKey);
+          if (pItem) {
+            const cat = PRODUCER_COMMERCE_CATEGORY[pItem.assetName];
+            const catPt = cat ? COMMERCE_CATEGORY_LABELS_PT[cat] : 'Produto';
+            producersList.push({
+              key: pKey,
+              labelPt: pItem.stats.labelPt,
+              categoryPt: catPt,
+            });
+          }
+        }
+        for (const dKey of mRep.demandProviderKeys) {
+          positiveSet.add(dKey);
+        }
+        for (const peerKey of mRep.sharedWithMarketKeys) {
+          const peerTile = worldState.hexes[peerKey];
+          if (
+            peerTile &&
+            Math.max(
+              Math.abs(peerTile.q - item.tile.q),
+              Math.abs(peerTile.r - item.tile.r),
+              Math.abs(peerTile.q + peerTile.r - (item.tile.q + item.tile.r))
+            ) <= 2
+          ) {
+            penaltySet.add(peerKey);
+          }
+        }
+        const distinctProductsPt = mRep.distinctProductTypes.map(
+          (c) => COMMERCE_CATEGORY_LABELS_PT[c]
+        );
+        const varietyMultiplierPct = Math.round((mRep.varietyMultiplier - 1) * 100);
+        const varietyBonusPt =
+          distinctProductsPt.length > 1
+            ? `${distinctProductsPt.length} produtos distintos (+${varietyMultiplierPct}% eficiência)`
+            : distinctProductsPt.length === 1
+              ? '1 produto (adicione produtores diferentes para bônus)'
+              : 'Sem produtores adjacentes ativos';
+        const sharedWithMarketsCount = mRep.sharedWithMarketKeys.length;
+        const sharedDemandNotePt =
+          sharedWithMarketsCount > 0
+            ? `Demanda/oferta dividida com ${sharedWithMarketsCount} Mercado(s) vizinho(s)`
+            : null;
+        if (varietyMultiplierPct > 0) {
+          bonusSummaryPt.push(`Variedade local (+${varietyMultiplierPct}%)`);
+        }
+        if (sharedDemandNotePt) {
+          penaltySummaryPt.push(sharedDemandNotePt);
+        }
+        capacitySummaryPt = `Volume local: ${mRep.allocatedSupplyUnits} · Demanda: ${mRep.allocatedDemandUnits}`;
+        resourceOriginPt =
+          producersList.length > 0
+            ? `Abastecido por: ${producersList.map((p) => p.labelPt).join(', ')}`
+            : 'Comércio local sem produtores adjacentes';
+        marketDetails = {
+          producers: producersList,
+          distinctProductsPt,
+          varietyMultiplierPct,
+          varietyBonusPt,
+          sharedWithMarketsCount,
+          sharedDemandNotePt,
+        };
+      }
+    } else if (
+      item.assetName === 'building-archery' ||
+      item.assetName === 'building-tower' ||
+      item.assetName === 'unit-wall-tower'
+    ) {
+      const neighbors = getHexNeighbors(worldState, item.tile.q, item.tile.r, assets, underConstructionKeys);
+      let protectedCount = 0;
+      for (const n of neighbors) {
+        if (n.exists && n.isCompleteBuilding && n.owner === owner) {
+          positiveSet.add(n.key);
+          protectedCount += 1;
+        }
+      }
+      if (
+        (item.assetName === 'building-tower' || item.assetName === 'unit-wall-tower') &&
+        getHexTerrainAndResource(item.tile.q, item.tile.r, item.tile).terrainType === 'mountain'
+      ) {
+        bonusSummaryPt.push('Altitude de Montanha (+3 Def / +Alcance)');
+      }
+      if (protectedCount > 0) {
+        bonusSummaryPt.push(`Protege ${protectedCount} prédio(s) adjacente(s)`);
+      }
+    }
+
+    // Add district/road/upgrade notes to bonusSummaryPt cleanly without duplicates
+    if (item.locationNotesPt.length > 0) {
+      for (const note of item.locationNotesPt) {
+        if (!bonusSummaryPt.includes(note) && !penaltySummaryPt.includes(note)) {
+          if (note.includes('(-')) {
+            penaltySummaryPt.push(note);
+          } else {
+            bonusSummaryPt.push(note);
+          }
+        }
+      }
+    }
+
     buildingsByKey[item.key] = {
       key: item.key,
       assetName: item.assetName,
@@ -1945,8 +2221,7 @@ export function computeTurnEconomyBreakdown(params: {
       moduleConstructionInProgress: item.moduleConstructionInProgress,
       workersAssigned,
       workersRequired,
-      localWorkersFromVillages:
-        adjacencyPools.workers.consumersByKey[item.key]?.allocated ?? 0,
+      localWorkersFromVillages: localWorkers,
       locationEfficiencyPct: Math.round(item.locationFactor * 100),
       effectiveEfficiencyPct: Math.round(combinedFactor * 100),
       locationBonusNotesPt: item.locationNotesPt,
@@ -1964,6 +2239,14 @@ export function computeTurnEconomyBreakdown(params: {
       effectiveDefenseBonus: item.stats.defenseBonus + item.modEff.defenseBonus,
       effectiveMaintenanceGold: Math.max(0, item.stats.maintenanceGold + item.modEff.maintenanceDelta),
       inputConsumed,
+      positiveNeighborKeys: Array.from(positiveSet).sort(),
+      penaltyNeighborKeys: Array.from(penaltySet).sort(),
+      capacitySummaryPt,
+      resourceOriginPt,
+      workerOriginPt,
+      bonusSummaryPt,
+      penaltySummaryPt,
+      ...(marketDetails ? { marketDetails } : {}),
     };
   }
 

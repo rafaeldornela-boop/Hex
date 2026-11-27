@@ -27,6 +27,7 @@ import {
   ALREADY_OCCUPIED_BUILD_MESSAGE,
   NOT_OWNED_BUILD_MESSAGE,
 } from './territory-engine';
+import { getHexNeighbors, isForestDepleted } from './adjacency-engine';
 
 export interface BuildRuleValidationResult {
   allowed: boolean;
@@ -167,6 +168,40 @@ export function validateBuildCandidateOnHex(params: {
     };
   }
 
+  const neighbors = getHexNeighbors(worldState, q, r, assets);
+  if (
+    (asset.name === 'building-watermill' || asset.name === 'building-dock') &&
+    terrainInfo.terrainType !== 'water' &&
+    !neighbors.some((n) => n.exists && n.terrainType === 'water')
+  ) {
+    return {
+      allowed: false,
+      reasonPt:
+        asset.name === 'building-watermill'
+          ? 'Moinho Fluvial exige Água adjacente.'
+          : 'Doca de Pesca exige Água adjacente.',
+      workerWarningPt: null,
+      definition: bDef,
+      effectiveCost: null,
+      terrain,
+    };
+  }
+
+  if (
+    asset.name === 'dirt-lumber' &&
+    isForestDepleted(existing) &&
+    !neighbors.some((n) => n.exists && n.terrainType === 'forest' && !n.isForestDepleted)
+  ) {
+    return {
+      allowed: false,
+      reasonPt: 'Floresta esgotada: não há madeira disponível neste hex ou vizinhos.',
+      workerWarningPt: null,
+      definition: bDef,
+      effectiveCost: null,
+      terrain,
+    };
+  }
+
   const workerWarningPt =
     bDef.workersRequired > 0 && availableWorkers < bDef.workersRequired
       ? `Faltam trabalhadores (${availableWorkers}/${bDef.workersRequired}): operará parcial ou parada até construir Casas.`
@@ -249,6 +284,14 @@ export function evaluateHexBuildOptions(params: {
   const indexByName = new Map<string, number>();
   assets.forEach((a, idx) => indexByName.set(a.name, idx));
 
+  const neighbors = getHexNeighbors(worldState, q, r, assets);
+  const hasAdjacentWater =
+    terrainInfo.terrainType === 'water' ||
+    neighbors.some((n) => n.exists && n.terrainType === 'water');
+  const hasAdjacentActiveForest =
+    (terrainInfo.terrainType === 'forest' && !isForestDepleted(existing)) ||
+    neighbors.some((n) => n.exists && n.terrainType === 'forest' && !n.isForestDepleted);
+
   const options: ContextualBuildOption[] = [];
   let workerShortCount = 0;
 
@@ -260,6 +303,12 @@ export function evaluateHexBuildOptions(params: {
 
     if (!isBuildingAllowedOnTerrain(assetName, terrainInfo.terrainType)) continue;
     if (bDef.requiredTech && !unlockedTechs.includes(bDef.requiredTech)) continue;
+    if ((assetName === 'building-watermill' || assetName === 'building-dock') && !hasAdjacentWater) {
+      continue;
+    }
+    if (assetName === 'dirt-lumber' && !hasAdjacentActiveForest) {
+      continue;
+    }
 
     const workerShort =
       bDef.workersRequired > 0 &&

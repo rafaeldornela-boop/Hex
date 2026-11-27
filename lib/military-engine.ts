@@ -704,11 +704,25 @@ export function evaluateHexFortification(params: {
 
   let structuralDefense = 0;
   let moduleDefense = 0;
+  let mountainTowerBonus = 0;
+  let bridgeExposurePenalty = 0;
   if (tile && isCompleted) {
     structuralDefense = getEffectiveBuildingStats(assetName, getBuildingLevel(tile)).defenseBonus;
     moduleDefense = aggregateTileModuleEffects(assetName, getInstalledModules(tile)).defenseBonus;
     if (structuralDefense > 0) notesPt.push(`Estrutura +${structuralDefense}`);
     if (moduleDefense > 0) notesPt.push(`Módulos +${moduleDefense}`);
+    if (
+      (assetName === 'building-tower' || assetName === 'unit-wall-tower') &&
+      terrainInfo.terrainType === 'mountain'
+    ) {
+      mountainTowerBonus = 3;
+      structuralDefense += mountainTowerBonus;
+      notesPt.push('Torre em montanha: altitude e alcance (+3)');
+    }
+    if (assetName === 'bridge') {
+      bridgeExposurePenalty = 2;
+      notesPt.push('Ponte exposta: ponto vulnerável (-2)');
+    }
   }
 
   const neighborBastionAura = tile
@@ -777,6 +791,7 @@ export function evaluateHexFortification(params: {
       neighborBastionAura +
       garrisonUnitBonus +
       archerSupportBonus -
+      bridgeExposurePenalty -
       damagePenalty
   );
 
@@ -981,10 +996,12 @@ export function computeMilitaryIntelligence(params: {
     const factionTiles = Object.values(worldState.hexes).filter((t) => t.owner === faction.id);
     const factionUnits = units.filter((u) => u.owner === faction.id && u.hp > 0);
 
-    // Scout coverage comes from towers, beacons, nearby player units, and diplomatic relation
-    const nearWatchCount = watchTowers.filter((wt) =>
-      factionTiles.some((ft) => axialDistance(wt, ft) <= 4)
-    ).length;
+    // Scout coverage comes from towers (extended range on mountains), beacons, nearby player units, and diplomatic relation
+    const nearWatchCount = watchTowers.filter((wt) => {
+      const wtTerrain = getHexTerrainAndResource(wt.q, wt.r, wt).terrainType;
+      const range = wtTerrain === 'mountain' ? 6 : 4;
+      return factionTiles.some((ft) => axialDistance(wt, ft) <= range);
+    }).length;
     const nearUnitsCount = units.filter(
       (u) =>
         u.owner === 'player' &&

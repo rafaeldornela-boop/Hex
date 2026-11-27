@@ -1615,6 +1615,10 @@ export interface ChainAdjacencyEffectReport {
   penaltyFactor: number;
   netMultiplier: number;
   notesPt: string[];
+  bonusNotesPt: string[];
+  penaltyNotesPt: string[];
+  positiveNeighborKeys: string[];
+  penaltyNeighborKeys: string[];
   isIrrigated: boolean;
   irrigationCapacity: number;
   hasWaterAccess: boolean;
@@ -1661,6 +1665,10 @@ export function computeBuildingChainAdjacency(params: {
   let bonus = 0;
   let penalty = 0;
   const notesPt: string[] = [];
+  const bonusNotesPt: string[] = [];
+  const penaltyNotesPt: string[] = [];
+  const positiveSet = new Set<string>();
+  const penaltySet = new Set<string>();
 
   const irrigation = computeFertileIrrigation(
     worldState,
@@ -1680,11 +1688,20 @@ export function computeBuildingChainAdjacency(params: {
   let predationPenaltyPct = 0;
   let pollutionPenaltyPct = 0;
 
+  const addBonusNote = (text: string) => {
+    notesPt.push(text);
+    bonusNotesPt.push(text);
+  };
+  const addPenaltyNote = (text: string) => {
+    notesPt.push(text);
+    penaltyNotesPt.push(text);
+  };
+
   switch (assetName) {
     case 'building-farm': {
       if (terrain === 'plains') {
         terrainMultiplier = config.farm.plainsEfficiencyMultiplier;
-        notesPt.push('Planície: rendimento reduzido (-32%)');
+        addPenaltyNote('Planície: rendimento reduzido (-32%)');
       }
       if (irrigation.isIrrigated && irrigation.irrigationCapacity > 0) {
         const irrBonus = Math.min(
@@ -1692,14 +1709,39 @@ export function computeBuildingChainAdjacency(params: {
           irrigation.irrigationCapacity * config.farm.irrigationBonusPerWaterUnit
         );
         bonus += irrBonus;
-        notesPt.push(`Irrigação (+${Math.round(irrBonus * 100)}%)`);
-      } else if (hasWaterNeighbor || neighbors.some((n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-watermill')) {
+        addBonusNote(`Irrigação (+${Math.round(irrBonus * 100)}%)`);
+        for (const n of neighbors) {
+          if (n.exists && n.terrainType === 'water') positiveSet.add(n.key);
+        }
+      } else if (
+        hasWaterNeighbor ||
+        neighbors.some((n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-watermill')
+      ) {
         bonus += 0.15;
-        notesPt.push('Água próxima (+15%)');
+        addBonusNote('Água próxima (+15%)');
+        for (const n of neighbors) {
+          if (
+            n.exists &&
+            (n.terrainType === 'water' ||
+              (n.isCompleteBuilding && n.assetName === 'building-watermill'))
+          ) {
+            positiveSet.add(n.key);
+          }
+        }
+      }
+      for (const n of neighbors) {
+        if (n.exists && n.isCompleteBuilding && n.assetName === 'building-mill') {
+          positiveSet.add(n.key);
+        }
       }
       if (neighbors.some((n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-sheep')) {
         bonus += config.farm.manureBonusFromCurral;
-        notesPt.push(`Esterco do Curral (+${Math.round(config.farm.manureBonusFromCurral * 100)}%)`);
+        addBonusNote(`Esterco do Curral (+${Math.round(config.farm.manureBonusFromCurral * 100)}%)`);
+        for (const n of neighbors) {
+          if (n.exists && n.isCompleteBuilding && n.assetName === 'building-sheep') {
+            positiveSet.add(n.key);
+          }
+        }
       }
       const vmBonus = computeAdjacencyScaledEffect(
         neighbors,
@@ -1715,7 +1757,16 @@ export function computeBuildingChainAdjacency(params: {
       ).cappedBonus;
       if (vmBonus > 0) {
         bonus += vmBonus;
-        notesPt.push(`Demanda Vila/Mercado (+${Math.round(vmBonus * 100)}%)`);
+        addBonusNote(`Demanda Vila/Mercado (+${Math.round(vmBonus * 100)}%)`);
+        for (const n of neighbors) {
+          if (
+            n.exists &&
+            n.isCompleteBuilding &&
+            (n.assetName === 'building-village' || n.assetName === 'building-market')
+          ) {
+            positiveSet.add(n.key);
+          }
+        }
       }
 
       const mineDust = computeAdjacencyScaledEffect(
@@ -1729,7 +1780,12 @@ export function computeBuildingChainAdjacency(params: {
       ).cappedBonus;
       if (mineDust > 0) {
         penalty += mineDust;
-        notesPt.push(`Poeira da Mina (-${Math.round(mineDust * 100)}%)`);
+        addPenaltyNote(`Poeira da Mina (-${Math.round(mineDust * 100)}%)`);
+        for (const n of neighbors) {
+          if (n.exists && n.isCompleteBuilding && n.assetName === 'building-mine') {
+            penaltySet.add(n.key);
+          }
+        }
       }
 
       const smelterSmoke = computeAdjacencyScaledEffect(
@@ -1743,7 +1799,12 @@ export function computeBuildingChainAdjacency(params: {
       ).cappedBonus;
       if (smelterSmoke > 0) {
         penalty += smelterSmoke;
-        notesPt.push(`Fumaça da Fundição (-${Math.round(smelterSmoke * 100)}%)`);
+        addPenaltyNote(`Fumaça da Fundição (-${Math.round(smelterSmoke * 100)}%)`);
+        for (const n of neighbors) {
+          if (n.exists && n.isCompleteBuilding && n.assetName === 'building-smelter') {
+            penaltySet.add(n.key);
+          }
+        }
       }
 
       const forestShade = computeAdjacencyScaledEffect(
@@ -1757,7 +1818,10 @@ export function computeBuildingChainAdjacency(params: {
       ).cappedBonus;
       if (forestShade > 0) {
         penalty += forestShade;
-        notesPt.push(`Pragas/sombra da Floresta (-${Math.round(forestShade * 100)}%)`);
+        addPenaltyNote(`Pragas/sombra da Floresta (-${Math.round(forestShade * 100)}%)`);
+        for (const k of activeForestNeighborKeys) {
+          penaltySet.add(k);
+        }
       }
 
       pollutionPenaltyPct = Math.round((mineDust + smelterSmoke) * 100);
@@ -1766,6 +1830,14 @@ export function computeBuildingChainAdjacency(params: {
 
     case 'building-mill':
     case 'building-watermill': {
+      for (const n of neighbors) {
+        if (n.exists && n.isCompleteBuilding && n.assetName === 'building-farm') {
+          positiveSet.add(n.key);
+        }
+        if (assetName === 'building-watermill' && n.exists && n.terrainType === 'water') {
+          positiveSet.add(n.key);
+        }
+      }
       const vmBonus = computeAdjacencyScaledEffect(
         neighbors,
         (n) =>
@@ -1780,15 +1852,36 @@ export function computeBuildingChainAdjacency(params: {
       ).cappedBonus;
       if (vmBonus > 0) {
         bonus += vmBonus;
-        notesPt.push(`Escoamento Vila/Mercado (+${Math.round(vmBonus * 100)}%)`);
+        addBonusNote(`Escoamento Vila/Mercado (+${Math.round(vmBonus * 100)}%)`);
+        for (const n of neighbors) {
+          if (
+            n.exists &&
+            n.isCompleteBuilding &&
+            (n.assetName === 'building-village' || n.assetName === 'building-market')
+          ) {
+            positiveSet.add(n.key);
+          }
+        }
       }
       break;
     }
 
     case 'building-sheep': {
+      for (const n of neighbors) {
+        if (n.exists && n.terrainType === 'plains' && !n.hasConstruction) {
+          positiveSet.add(n.key);
+        }
+      }
       if (neighbors.some((n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-farm')) {
         bonus += config.sheep.manureFeedBonusFromFarm;
-        notesPt.push(`Ração/Esterco da Fazenda (+${Math.round(config.sheep.manureFeedBonusFromFarm * 100)}%)`);
+        addBonusNote(
+          `Ração/Esterco da Fazenda (+${Math.round(config.sheep.manureFeedBonusFromFarm * 100)}%)`
+        );
+        for (const n of neighbors) {
+          if (n.exists && n.isCompleteBuilding && n.assetName === 'building-farm') {
+            positiveSet.add(n.key);
+          }
+        }
       }
       const rawPredation = computeAdjacencyScaledEffect(
         neighbors,
@@ -1799,7 +1892,7 @@ export function computeBuildingChainAdjacency(params: {
           maxBonus: config.sheep.predationMaxPenalty,
         }
       ).cappedBonus;
-      const hasGuard = neighbors.some(
+      const guardNeighbors = neighbors.filter(
         (n) =>
           n.exists &&
           n.isCompleteBuilding &&
@@ -1808,13 +1901,15 @@ export function computeBuildingChainAdjacency(params: {
             n.assetName === 'unit-wall-tower')
       );
       if (rawPredation > 0) {
-        if (hasGuard) {
+        if (guardNeighbors.length > 0) {
           predationMitigated = true;
-          notesPt.push('Predação neutralizada por Arquearia/Torre');
+          addBonusNote('Predação neutralizada por Arquearia/Torre');
+          for (const g of guardNeighbors) positiveSet.add(g.key);
         } else {
           penalty += rawPredation;
           predationPenaltyPct = Math.round(rawPredation * 100);
-          notesPt.push(`Predação da Floresta (-${predationPenaltyPct}%)`);
+          addPenaltyNote(`Predação da Floresta (-${predationPenaltyPct}%)`);
+          for (const k of activeForestNeighborKeys) penaltySet.add(k);
         }
       }
       const smelterSmoke = computeAdjacencyScaledEffect(
@@ -1829,7 +1924,19 @@ export function computeBuildingChainAdjacency(params: {
       if (smelterSmoke > 0) {
         penalty += smelterSmoke;
         pollutionPenaltyPct = Math.round(smelterSmoke * 100);
-        notesPt.push(`Fumaça da Fundição (-${pollutionPenaltyPct}%)`);
+        addPenaltyNote(`Fumaça da Fundição (-${pollutionPenaltyPct}%)`);
+        for (const n of neighbors) {
+          if (n.exists && n.isCompleteBuilding && n.assetName === 'building-smelter') {
+            penaltySet.add(n.key);
+          }
+        }
+      }
+      break;
+    }
+
+    case 'dirt-lumber': {
+      for (const k of activeForestNeighborKeys) {
+        positiveSet.add(k);
       }
       break;
     }
@@ -1846,13 +1953,103 @@ export function computeBuildingChainAdjacency(params: {
       ).cappedBonus;
       if (shoring > 0) {
         bonus += shoring;
-        notesPt.push(`Escoramento florestal (+${Math.round(shoring * 100)}%)`);
+        addBonusNote(`Escoramento florestal (+${Math.round(shoring * 100)}%)`);
+        for (const k of activeForestNeighborKeys) positiveSet.add(k);
+      }
+      for (const n of neighbors) {
+        if (n.exists && n.isCompleteBuilding && n.assetName === 'building-smelter') {
+          positiveSet.add(n.key);
+        }
+      }
+      break;
+    }
+
+    case 'building-smelter': {
+      for (const n of neighbors) {
+        if (n.exists && n.isCompleteBuilding && n.assetName === 'building-mine') {
+          positiveSet.add(n.key);
+        }
+      }
+      for (const k of activeForestNeighborKeys) {
+        positiveSet.add(k);
+      }
+      if (activeForestNeighborKeys.length > 0) {
+        addBonusNote(`Combustível florestal (+${Math.round(config.smelter.forestFuelBonus * 100)}%)`);
+      }
+      break;
+    }
+
+    case 'building-dock': {
+      for (const n of neighbors) {
+        if (n.exists && n.terrainType === 'water') {
+          positiveSet.add(n.key);
+          const waterNeighbors = getHexNeighbors(
+            worldState,
+            n.coord.q,
+            n.coord.r,
+            assets,
+            underConstructionKeys,
+            config
+          );
+          for (const wn of waterNeighbors) {
+            if (
+              wn.exists &&
+              wn.isCompleteBuilding &&
+              (wn.assetName === 'building-mine' || wn.assetName === 'building-smelter')
+            ) {
+              penaltySet.add(wn.key);
+            }
+          }
+        }
+        if (
+          n.exists &&
+          n.isCompleteBuilding &&
+          (n.assetName === 'building-mine' || n.assetName === 'building-smelter')
+        ) {
+          penaltySet.add(n.key);
+        }
+      }
+      break;
+    }
+
+    case 'building-village': {
+      for (const n of neighbors) {
+        if (
+          n.exists &&
+          ((n.terrainType === 'forest' && !n.isForestDepleted) ||
+            n.terrainType === 'water' ||
+            (n.terrainType === 'plains' && !n.hasConstruction))
+        ) {
+          positiveSet.add(n.key);
+        }
+        if (n.exists && n.isCompleteBuilding && n.assetName === 'building-smelter') {
+          penaltySet.add(n.key);
+        }
       }
       break;
     }
 
     default:
       break;
+  }
+
+  // Common defensive aura & Village worker contribution markers on complete player structures
+  for (const n of neighbors) {
+    if (!n.exists || !n.isCompleteBuilding) continue;
+    if (
+      n.assetName === 'building-village' &&
+      assetName !== 'building-village'
+    ) {
+      positiveSet.add(n.key);
+    }
+    if (
+      (n.assetName === 'building-tower' ||
+        n.assetName === 'unit-wall-tower' ||
+        n.assetName === 'building-archery') &&
+      assetName !== 'building-sheep'
+    ) {
+      positiveSet.add(n.key);
+    }
   }
 
   const netMultiplier = Math.max(0.25, Number((1 + bonus - penalty).toFixed(4)));
@@ -1863,6 +2060,10 @@ export function computeBuildingChainAdjacency(params: {
     penaltyFactor: Number(Math.max(0, 1 - penalty).toFixed(4)),
     netMultiplier,
     notesPt,
+    bonusNotesPt,
+    penaltyNotesPt,
+    positiveNeighborKeys: Array.from(positiveSet).sort(),
+    penaltyNeighborKeys: Array.from(penaltySet).sort(),
     isIrrigated: irrigation.isIrrigated,
     irrigationCapacity: irrigation.irrigationCapacity,
     hasWaterAccess,
@@ -2120,6 +2321,8 @@ export interface MarketCommerceReport {
   varietyMultiplier: number;
   commercialGold: number;
   sharedWithMarketKeys: string[];
+  suppliedProducerKeys: string[];
+  demandProviderKeys: string[];
 }
 
 export interface LocalCommerceChainResult {
@@ -2229,6 +2432,7 @@ export function solveLocalCommerceChain(params: {
 
     // Count distinct product categories among allocated providers and apply diminishing returns to duplicates
     const seenByCat = new Map<LocalCommerceProductCategory, number>();
+    const suppliedProducerKeys: string[] = [];
     let effectiveVolume = 0;
 
     for (const [pKey, amount] of Object.entries(sAlloc?.allocationsByProviderKey ?? {})) {
@@ -2237,11 +2441,17 @@ export function solveLocalCommerceChain(params: {
       if (!prod) continue;
       const cat = PRODUCER_COMMERCE_CATEGORY[prod.assetName];
       if (!cat) continue;
+      suppliedProducerKeys.push(pKey);
       const countSoFar = seenByCat.get(cat) ?? 0;
       const weight = countSoFar === 0 ? 1.0 : config.commerce.duplicateProductWeight;
       effectiveVolume += amount * weight;
       seenByCat.set(cat, countSoFar + 1);
     }
+
+    const demandProviderKeys = Object.entries(dAlloc?.allocationsByProviderKey ?? {})
+      .filter(([, amount]) => amount > 0)
+      .map(([k]) => k)
+      .sort();
 
     const distinctProductTypes = Array.from(seenByCat.keys()).sort();
     varietyTotal += distinctProductTypes.length;
@@ -2283,6 +2493,8 @@ export function solveLocalCommerceChain(params: {
       varietyMultiplier: roundPoolValue(varietyMultiplier),
       commercialGold,
       sharedWithMarketKeys: Array.from(peers).sort(),
+      suppliedProducerKeys: suppliedProducerKeys.sort(),
+      demandProviderKeys,
     };
   }
 

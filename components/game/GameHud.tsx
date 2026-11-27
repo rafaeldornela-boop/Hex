@@ -253,6 +253,101 @@ function formatLiveBuildingYield(
   return parts.length > 0 ? parts.join(' · ') : def.summaryPt;
 }
 
+function formatInputConsumedPt(input: BuildingOperationReport['inputConsumed']): string | null {
+  const parts: string[] = [];
+  if ((input.ore ?? 0) > 0) parts.push(`${input.ore} Minério`);
+  if ((input.wood ?? 0) > 0) parts.push(`${input.wood} Madeira`);
+  if ((input.food ?? 0) > 0) parts.push(`${input.food} Grão`);
+  if ((input.stone ?? 0) > 0) parts.push(`${input.stone} Pedra`);
+  if ((input.metal ?? 0) > 0) parts.push(`${input.metal} Metal`);
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+function BuildingChainInspector({
+  report,
+  compact = false,
+}: {
+  report: BuildingOperationReport;
+  compact?: boolean;
+}) {
+  const inputsPt = formatInputConsumedPt(report.inputConsumed);
+  const bonuses = report.bonusSummaryPt ?? [];
+  const penalties = report.penaltySummaryPt ?? [];
+  const hasAnyDetail =
+    Boolean(report.capacitySummaryPt) ||
+    Boolean(report.resourceOriginPt) ||
+    Boolean(report.workerOriginPt) ||
+    Boolean(inputsPt) ||
+    bonuses.length > 0 ||
+    penalties.length > 0 ||
+    Boolean(report.marketDetails);
+
+  if (!hasAnyDetail) return null;
+
+  return (
+    <div
+      data-testid={compact ? 'desktop-chain-inspector' : 'mobile-chain-inspector'}
+      className={`mt-1 bg-[#f7f2e6] border border-[#d9ceb8] rounded-lg px-2 py-1 ${
+        compact ? 'text-[10px]' : 'text-[10px]'
+      } text-[#3c3426] space-y-0.5`}
+    >
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 tabular-nums">
+        {report.capacitySummaryPt && (
+          <span className="font-semibold text-[#2a2319]">{report.capacitySummaryPt}</span>
+        )}
+        {report.workerOriginPt && (
+          <span className="text-[#5c5140]">Trab.: {report.workerOriginPt}</span>
+        )}
+        {inputsPt && <span className="text-[#5c5140]">Insumos: {inputsPt}</span>}
+      </div>
+
+      {report.resourceOriginPt && (
+        <p className="text-[#4a3f2f] font-medium leading-snug">{report.resourceOriginPt}</p>
+      )}
+
+      {report.marketDetails && (
+        <div className="pt-0.5 border-t border-[#e5dcc9] space-y-0.5">
+          {report.marketDetails.distinctProductsPt.length > 0 && (
+            <p className="text-[#2a2319] font-semibold leading-snug">
+              Produtos: {report.marketDetails.distinctProductsPt.join(', ')} ·{' '}
+              <span className="text-emerald-800">{report.marketDetails.varietyBonusPt}</span>
+            </p>
+          )}
+          {report.marketDetails.distinctProductsPt.length === 0 && (
+            <p className="text-[#6e604a]">{report.marketDetails.varietyBonusPt}</p>
+          )}
+          {report.marketDetails.sharedDemandNotePt && (
+            <p className="text-amber-800 font-semibold leading-snug">
+              {report.marketDetails.sharedDemandNotePt}
+            </p>
+          )}
+        </div>
+      )}
+
+      {(bonuses.length > 0 || penalties.length > 0) && (
+        <div className="flex flex-wrap items-center gap-1 pt-0.5">
+          {bonuses.slice(0, compact ? 3 : 4).map((note) => (
+            <span
+              key={note}
+              className="px-1.5 py-0.5 rounded bg-emerald-100/90 text-emerald-900 font-semibold leading-none"
+            >
+              + {note}
+            </span>
+          ))}
+          {penalties.slice(0, compact ? 2 : 3).map((note) => (
+            <span
+              key={note}
+              className="px-1.5 py-0.5 rounded bg-rose-100/90 text-rose-900 font-semibold leading-none"
+            >
+              - {note}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderDayPhaseIcon(phase: DayPhaseId) {
   if (phase === 'dawn') {
     return <Sunrise className="w-3.5 h-3.5 text-amber-600 shrink-0" aria-hidden="true" />;
@@ -1140,6 +1235,7 @@ const GameHud = memo(function GameHud({
                               {selectedBuildingReport.reasonPt}
                             </p>
                           )}
+                          <BuildingChainInspector report={selectedBuildingReport} />
                         </div>
                       ) : (
                         <p className="text-[11px] font-medium text-[#3c3426] mt-0.5">
@@ -1153,7 +1249,13 @@ const GameHud = memo(function GameHud({
                         data-testid="mobile-terrain-info"
                         className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
                       >
-                        Terreno: {selectedTerrainInfo.labelPt} ·{' '}
+                        Terreno: {selectedTerrainInfo.labelPt}
+                        {selectedTerrainInfo.type === 'forest' &&
+                        !selectedHexHasConstruction &&
+                        selectedTileAssetName === 'dirt-lumber'
+                          ? ' (esgotada)'
+                          : ''}{' '}
+                        ·{' '}
                         {selectedHexHasConstruction
                           ? `Recurso: ${selectedTerrainInfo.resourceLabelPt}`
                           : `Potencial: ${selectedTerrainInfo.potentialPt}`}
@@ -1858,6 +1960,10 @@ const GameHud = memo(function GameHud({
                       </p>
                     )}
 
+                  {selectedBuildingReport && !isNewBuildInProgress && (
+                    <BuildingChainInspector report={selectedBuildingReport} compact />
+                  )}
+
                   {isUpgradeInProgress && selectedHexConstruction && (
                     <p
                       data-testid="desktop-upgrade-status"
@@ -1915,7 +2021,13 @@ const GameHud = memo(function GameHud({
                       data-testid="desktop-terrain-info"
                       className="text-[11px] font-semibold text-[#1f2923] mt-0.5"
                     >
-                      Terreno: {selectedTerrainInfo.labelPt} ·{' '}
+                      Terreno: {selectedTerrainInfo.labelPt}
+                      {selectedTerrainInfo.type === 'forest' &&
+                      !selectedHexHasConstruction &&
+                      selectedTileAssetName === 'dirt-lumber'
+                        ? ' (esgotada)'
+                        : ''}{' '}
+                      ·{' '}
                       {selectedHexHasConstruction
                         ? `Recurso: ${selectedTerrainInfo.resourceLabelPt}`
                         : `Potencial: ${selectedTerrainInfo.potentialPt}`}

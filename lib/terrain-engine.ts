@@ -32,7 +32,7 @@ export interface PlayerResourceSummary {
 export const INCOMPATIBLE_TERRAIN_MESSAGE =
   'Este edifício não pode ser construído neste terreno.';
 
-export const DEFAULT_FOREST_WOOD_STOCK = 100;
+export const DEFAULT_FOREST_WOOD_STOCK = 120;
 export const DEFAULT_FOREST_DEPLETION_THRESHOLD = 0;
 export const DEPLETED_FOREST_ASSET_NAME = 'dirt-lumber';
 
@@ -301,6 +301,9 @@ export function canBuildStructureOnTerrain(
   if (isNaturalTerrainAssetName(name)) return false;
   if (name === 'building-farm') {
     return terrainType === 'fertile' || terrainType === 'plains';
+  }
+  if (name === 'building-dock' || name === 'building-watermill') {
+    return terrainType === 'water' || terrainType === 'plains' || terrainType === 'fertile';
   }
   const required = getStructureRequiredTerrain(name);
   if (!required) return true;

@@ -14,11 +14,23 @@ import {
 } from './terrain-engine';
 import {
   advanceKingdomTurn,
+  buildInKingdom,
   createSandboxKingdomState,
+  demolishInKingdom,
+  deserializeKingdomState,
   getKingdomEconomy,
+  serializeKingdomState,
   type KingdomState,
 } from './kingdom-engine';
 import { computeMarketSummary } from './trade-engine';
+import {
+  evaluateHexBuildOptions,
+  validateBuildCandidateOnHex,
+} from './build-rules';
+import {
+  computeMilitaryIntelligence,
+  evaluateHexFortification,
+} from './military-engine';
 
 function idxOf(name: string): number {
   const idx = HEX_ASSETS.findIndex((a) => a.name === name);
@@ -554,3 +566,255 @@ test('Ônus de poluição e predação funcionam e estruturas defensivas mitigam
       cleanEcon.adjacencyPools.villagesByKey['0,1'].workerSupply
   );
 });
+
+test('ETAPA 3 build-rules: Moinho Fluvial e Doca exigem Água adjacente e Fazenda aceita Fértil ou Planície', () => {
+  const worldKingdom = makeKingdom([
+    makeTile(0, 0, 'plains', 'building-castle'),
+    makeTile(1, 0, 'fertile'), // sem água adjacente!
+    makeTile(-1, 0, 'fertile'), // adjacente à água (-2,0)
+    makeTile(-2, 0, 'water'),
+    makeTile(0, 1, 'plains'), // sem água adjacente!
+  ]);
+  const econ = getKingdomEconomy(worldKingdom, HEX_ASSETS);
+
+  // Terra seca sem água -> Moinho Fluvial e Doca bloqueados
+  const dryWatermill = validateBuildCandidateOnHex({
+    worldState: worldKingdom.worldState,
+    resources: worldKingdom.resources,
+    unlockedTechs: worldKingdom.research.unlocked,
+    availableWorkers: econ.population.availableWorkers,
+    hasActiveConstructionAtCoord: false,
+    q: 1,
+    r: 0,
+    structureIndex: idxOf('building-watermill'),
+    assets: HEX_ASSETS,
+  });
+  assert.equal(dryWatermill.allowed, false);
+  assert.match(dryWatermill.reasonPt ?? '', /Água adjacente/);
+
+  const dryDock = validateBuildCandidateOnHex({
+    worldState: worldKingdom.worldState,
+    resources: worldKingdom.resources,
+    unlockedTechs: worldKingdom.research.unlocked,
+    availableWorkers: econ.population.availableWorkers,
+    hasActiveConstructionAtCoord: false,
+    q: 0,
+    r: 1,
+    structureIndex: idxOf('building-dock'),
+    assets: HEX_ASSETS,
+  });
+  assert.equal(dryDock.allowed, false);
+  assert.match(dryDock.reasonPt ?? '', /Água adjacente/);
+
+  // Terra costeira adjacente à água (-1,0) -> Moinho Fluvial e Doca liberados!
+  const coastalEval = evaluateHexBuildOptions({
+    worldState: worldKingdom.worldState,
+    resources: worldKingdom.resources,
+    unlockedTechs: worldKingdom.research.unlocked,
+    economy: econ,
+    hasActiveConstructionAtCoord: false,
+    q: -1,
+    r: 0,
+    assets: HEX_ASSETS,
+  });
+  assert.equal(
+    coastalEval.options.some((o) => o.assetName === 'building-watermill'),
+    true
+  );
+  assert.equal(
+    coastalEval.options.some((o) => o.assetName === 'building-dock'),
+    true
+  );
+  // Fazenda permitida em Planície (0,1)
+  assert.equal(
+    validateBuildCandidateOnHex({
+      worldState: worldKingdom.worldState,
+      resources: worldKingdom.resources,
+      unlockedTechs: worldKingdom.research.unlocked,
+      availableWorkers: econ.population.availableWorkers,
+      hasActiveConstructionAtCoord: false,
+      q: 0,
+      r: 1,
+      structureIndex: idxOf('building-farm'),
+      assets: HEX_ASSETS,
+    }).allowed,
+    true
+  );
+});
+
+test('ETAPA 3 demolição e reconstrução recalculam imediatamente adjacência e revertem ônus', () => {
+  let state = makeKingdom([
+    makeTile(0, 0, 'plains', 'building-castle'),
+    makeTile(1, 0, 'fertile', 'building-farm'),
+    makeTile(2, 0, 'water'),
+    makeTile(1, 1, 'plains', 'building-smelter'), // causa fumaça em (1,0)
+    makeTile(0, 1, 'plains', 'building-village'),
+  ]);
+
+  const pollutedEcon = getKingdomEconomy(state, HEX_ASSETS);
+  const pollutedFarm = pollutedEcon.buildingsByKey['1,0'];
+  assert.ok(pollutedFarm.penaltyNeighborKeys.includes('1,1'));
+  assert.ok(pollutedFarm.penaltySummaryPt.some((n) => /Fumaça da Fundição/i.test(n)));
+  const pollutedFood = pollutedFarm.actualProduction.food;
+
+  // Demole a Fundição (1,1) -> ônus desaparece imediatamente e produção sobe
+  const dem = demolishInKingdom(state, 1, 1, HEX_ASSETS);
+  assert.equal(dem.removed, true);
+  state = dem.nextState;
+
+  const cleanEcon = getKingdomEconomy(state, HEX_ASSETS);
+  const cleanFarm = cleanEcon.buildingsByKey['1,0'];
+  assert.equal(cleanFarm.penaltyNeighborKeys.includes('1,1'), false);
+  assert.ok(cleanFarm.actualProduction.food > pollutedFood);
+  assert.ok(cleanFarm.positiveNeighborKeys.includes('2,0')); // Água
+  assert.ok(cleanFarm.positiveNeighborKeys.includes('0,1')); // Vila
+
+  // Reconstruir a Fundição e concluir obras volta a aplicar o efeito imediatamente
+  const rebuilt = buildInKingdom(state, 1, 1, idxOf('building-smelter'), 90, HEX_ASSETS);
+  assert.equal(rebuilt.built, true);
+  state = rebuilt.nextState;
+  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
+  state = advanceKingdomTurn(state, HEX_ASSETS).nextState;
+  const afterRebuildEcon = getKingdomEconomy(state, HEX_ASSETS);
+  assert.equal(afterRebuildEcon.buildingsByKey['1,1'].assetName, 'building-smelter');
+  assert.ok(afterRebuildEcon.buildingsByKey['1,0'].penaltyNeighborKeys.includes('1,1'));
+});
+
+test('ETAPA 3 militar: Torre em Montanha recebe bônus de altitude/alcance e Ponte mantém vulnerabilidade', () => {
+  const towerPlains = makeKingdom([
+    makeTile(0, 0, 'plains', 'building-castle'),
+    makeTile(1, 0, 'plains', 'building-tower'),
+  ]);
+  const towerMountain = makeKingdom([
+    makeTile(0, 0, 'plains', 'building-castle'),
+    makeTile(1, 0, 'mountain', 'building-tower'),
+  ]);
+  const bridgeTile = makeKingdom([
+    makeTile(0, 0, 'plains', 'building-castle'),
+    makeTile(1, 0, 'water', 'bridge'),
+  ]);
+
+  const plainsFort = evaluateHexFortification({
+    worldState: towerPlains.worldState,
+    q: 1,
+    r: 0,
+    units: towerPlains.units,
+    assets: HEX_ASSETS,
+  });
+  const mntFort = evaluateHexFortification({
+    worldState: towerMountain.worldState,
+    q: 1,
+    r: 0,
+    units: towerMountain.units,
+    assets: HEX_ASSETS,
+  });
+  const bridgeFort = evaluateHexFortification({
+    worldState: bridgeTile.worldState,
+    q: 1,
+    r: 0,
+    units: bridgeTile.units,
+    assets: HEX_ASSETS,
+  });
+
+  // Torre em montanha ganha bônus de terreno + altitude (+3) sobre torre em planície
+  assert.ok(mntFort.totalDefenseScore >= plainsFort.totalDefenseScore + 6);
+  assert.ok(mntFort.notesPt.some((n) => /Torre em montanha/i.test(n)));
+
+  const waterTile = makeKingdom([
+    makeTile(0, 0, 'plains', 'building-castle'),
+    makeTile(1, 0, 'water'),
+  ]);
+  const waterFort = evaluateHexFortification({
+    worldState: waterTile.worldState,
+    q: 1,
+    r: 0,
+    units: waterTile.units,
+    assets: HEX_ASSETS,
+  });
+  // Ponte possui penalidade de ponto vulnerável (-2 em relação à água aberta adjacente ao castelo)
+  assert.ok(bridgeFort.notesPt.some((n) => /Ponte exposta|vulnerável/i.test(n)));
+  assert.equal(bridgeFort.totalDefenseScore, waterFort.totalDefenseScore - 2);
+
+  // Torre em montanha alcança distância 6 na inteligência militar (vs 4 em planície)
+  const enemyFarWorld = {
+    ...towerMountain.worldState,
+    hexes: {
+      ...towerMountain.worldState.hexes,
+      '6,0': makeTile(6, 0, 'plains', 'building-castle', { owner: 'iron_clan' }),
+    },
+  };
+  const intelMountain = computeMilitaryIntelligence({
+    worldState: enemyFarWorld,
+    units: towerMountain.units,
+    assets: HEX_ASSETS,
+    playerTechs: [],
+    factions: towerMountain.factions,
+  });
+  const enemyFarPlainsWorld = {
+    ...towerPlains.worldState,
+    hexes: {
+      ...towerPlains.worldState.hexes,
+      '6,0': makeTile(6, 0, 'plains', 'building-castle', { owner: 'iron_clan' }),
+    },
+  };
+  const intelPlains = computeMilitaryIntelligence({
+    worldState: enemyFarPlainsWorld,
+    units: towerPlains.units,
+    assets: HEX_ASSETS,
+    playerTechs: [],
+    factions: towerPlains.factions,
+  });
+  assert.ok(
+    intelMountain.iron_clan.scoutPrecisionPct > intelPlains.iron_clan.scoutPrecisionPct
+  );
+});
+
+test('ETAPA 3 inspeção & Mercado expõem vizinhos positivos/ônus, origem, capacidade e variedade', () => {
+  const state = makeKingdom([
+    makeTile(0, 0, 'plains', 'building-castle'),
+    makeTile(1, 0, 'plains', 'building-market'),
+    makeTile(1, -1, 'fertile', 'building-farm'),
+    makeTile(2, -1, 'fertile', 'building-mill'),
+    makeTile(2, 0, 'mountain', 'building-mine', { mountainDeposit: 'ore' }),
+    makeTile(0, 1, 'plains', 'building-village'),
+    makeTile(2, 1, 'plains', 'building-market'), // segundo Mercado vizinho dividindo (2,0) e (0,1)!
+  ]);
+
+  const econ = getKingdomEconomy(state, HEX_ASSETS);
+  const millRep = econ.buildingsByKey['2,-1'];
+  assert.ok(millRep.positiveNeighborKeys.includes('1,-1')); // Fazenda
+  assert.ok(millRep.capacitySummaryPt?.includes('Capacidade'));
+  assert.ok(millRep.resourceOriginPt?.includes('Fazenda adjacente'));
+
+  const marketRep = econ.buildingsByKey['1,0'];
+  assert.ok(marketRep.marketDetails);
+  assert.ok(marketRep.marketDetails.producers.length >= 2);
+  assert.ok(marketRep.marketDetails.distinctProductsPt.length >= 2);
+  assert.match(marketRep.marketDetails.varietyBonusPt, /produtos distintos/i);
+  assert.ok(marketRep.positiveNeighborKeys.includes('1,-1'));
+  assert.ok(marketRep.positiveNeighborKeys.includes('0,1'));
+  // Segundo Mercado vizinho aparece como divisor/ônus de demanda
+  assert.ok(marketRep.marketDetails.sharedDemandNotePt);
+  assert.ok(marketRep.penaltyNeighborKeys.includes('2,1'));
+});
+
+test('ETAPA 3 compatibilidade de save preserva depósitos, estoque florestal e cadeias completas', () => {
+  let state = makeKingdom([
+    makeTile(0, 0, 'plains', 'building-castle'),
+    makeTile(1, 0, 'fertile', 'building-farm'),
+    makeTile(2, 0, 'forest', undefined, { woodStock: 12 }),
+    makeTile(1, 1, 'mountain', 'building-mine', { mountainDeposit: 'stone' }),
+    makeTile(0, 1, 'plains', 'building-village'),
+  ]);
+  const econBefore = getKingdomEconomy(state, HEX_ASSETS);
+  const saved = serializeKingdomState(state);
+  const loaded = deserializeKingdomState(saved, HEX_ASSETS.length);
+  assert.ok(loaded);
+  const econAfter = getKingdomEconomy(loaded!, HEX_ASSETS);
+
+  assert.equal(loaded!.worldState.hexes['2,0'].woodStock, 12);
+  assert.equal(loaded!.worldState.hexes['1,1'].mountainDeposit, 'stone');
+  assert.equal(econAfter.foodProduced, econBefore.foodProduced);
+  assert.equal(econAfter.stoneNet, econBefore.stoneNet);
+});
+
