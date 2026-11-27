@@ -160,7 +160,7 @@ export const BUILDING_CATALOG: Record<string, BuildingDefinition> = {
     storageBonus: 20,
     defenseBonus: 0,
     production: { gold: 0, wood: 0, stone: 0, food: 8, ore: 0, metal: 0, science: 0 },
-    allowedTerrains: ['fertile'],
+    allowedTerrains: ['fertile', 'plains'],
     requiredTech: null,
     canRecruitUnits: false,
   },

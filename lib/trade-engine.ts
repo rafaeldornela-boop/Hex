@@ -92,6 +92,11 @@ export function computeMarketSummary(params: {
   const connectedCitiesCount = connectedCityPairs > 0 ? connectedCityPairs + 1 : 0;
   const corridorCount = regionalSummary?.tradeCorridors.length ?? 0;
   const roadNetworkBonusPct = Math.min(10, connectedCityPairs * 4 + corridorCount * 3);
+  const averageVarietyCount = economy.commerceChain?.averageVarietyCount ?? 0;
+  const localVarietyBonusPct = Math.min(
+    6,
+    Math.round(Math.max(0, averageVarietyCount - 1) * 2)
+  );
 
   // Trade bonus lowers buy prices and raises sell prices cleanly (up to +48%)
   const bonusPct = Math.min(
@@ -100,7 +105,8 @@ export function computeMarketSummary(params: {
       (hasTradeTech ? 10 : 0) +
       Math.round(techTradeMods.tradeFeeReduction * 40) +
       activePacts * 5 +
-      roadNetworkBonusPct
+      roadNetworkBonusPct +
+      localVarietyBonusPct
   );
   const buyDiscount = 1 - bonusPct / 150;
   const sellBonus = 1 + bonusPct / 100;

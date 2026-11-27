@@ -14,11 +14,20 @@ import {
   DEPLETED_FOREST_ASSET_NAME,
   TERRAIN_METADATA,
   getHexTerrainAndResource,
+  getMountainDepositType,
+  type MountainDepositType,
   type TerrainType,
 } from './terrain-engine';
 import { AXIAL_DIRECTIONS, axialDistance, getAxialNeighbors } from './territory-engine';
 
-export type PoolKind = 'hunting' | 'fishing' | 'pasture' | 'workers';
+export type PoolKind =
+  | 'hunting'
+  | 'fishing'
+  | 'pasture'
+  | 'workers'
+  | 'grain'
+  | 'timber'
+  | 'commerce';
 
 export type PoolSharingMode = 'proportional_demand' | 'equal_split';
 
@@ -53,6 +62,73 @@ export interface AdjacencyPoolConfig {
   dock: {
     fishingDemand: number;
   };
+  sheep: {
+    pastureDemand: number;
+    manureFeedBonusFromFarm: number;
+    predationPenaltyPerForest: number;
+    predationMaxPenalty: number;
+  };
+  farm: {
+    plainsEfficiencyMultiplier: number;
+    irrigationBonusPerWaterUnit: number;
+    irrigationMaxBonus: number;
+    manureBonusFromCurral: number;
+    villageMarketEfficiencyPerNeighbor: number;
+    villageMarketMaxBonus: number;
+  };
+  mill: {
+    millGrainCapacity: number;
+    millFoodMultiplier: number;
+    millGoldPerGrain: number;
+    watermillGrainCapacity: number;
+    watermillFoodMultiplier: number;
+    watermillGoldPerGrain: number;
+    villageMarketEfficiencyPerNeighbor: number;
+    villageMarketMaxBonus: number;
+  };
+  lumber: {
+    timberInputPerTurn: number;
+  };
+  mine: {
+    stoneDepositOutput: { stone: number; ore: number };
+    oreDepositOutput: { stone: number; ore: number };
+    mixedDepositOutput: { stone: number; ore: number };
+    forestShoringBonusPerForest: number;
+    forestShoringMaxBonus: number;
+  };
+  smelter: {
+    woodFuelPerTurn: number;
+    kingdomWoodFallbackPerTurn: number;
+    forestFuelBonus: number;
+  };
+  penalties: {
+    mineDustOnFarmPerNeighbor: number;
+    mineDustMax: number;
+    smelterSmokeOnFarmPerNeighbor: number;
+    smelterSmokeMax: number;
+    forestShadeOnFarmPerNeighbor: number;
+    forestShadeMax: number;
+    smelterSmokeOnCurralPerNeighbor: number;
+    smelterSmokeMaxOnCurral: number;
+    mineContaminationOnWaterPerNeighbor: number;
+    mineContaminationMax: number;
+    smelterPollutionOnWaterPerNeighbor: number;
+    smelterPollutionMax: number;
+    waterPollutionMaxTotal: number;
+    smelterPollutionOnVillagePerNeighbor: number;
+    smelterPollutionMaxOnVillage: number;
+  };
+  commerce: {
+    baseOperatingGold: number;
+    producerTradeValue: number;
+    processedProducerMultiplier: number;
+    duplicateProductWeight: number;
+    varietyBonusPerExtraType: number;
+    varietyMaxBonus: number;
+    villageDemandWeight: number;
+    housingDemandWeight: number;
+    maxCommercialGoldBonus: number;
+  };
 }
 
 export type AdjacencyPoolConfigOverrides = {
@@ -62,6 +138,14 @@ export type AdjacencyPoolConfigOverrides = {
   plains?: Partial<AdjacencyPoolConfig['plains']>;
   village?: Partial<AdjacencyPoolConfig['village']>;
   dock?: Partial<AdjacencyPoolConfig['dock']>;
+  sheep?: Partial<AdjacencyPoolConfig['sheep']>;
+  farm?: Partial<AdjacencyPoolConfig['farm']>;
+  mill?: Partial<AdjacencyPoolConfig['mill']>;
+  lumber?: Partial<AdjacencyPoolConfig['lumber']>;
+  mine?: Partial<AdjacencyPoolConfig['mine']>;
+  smelter?: Partial<AdjacencyPoolConfig['smelter']>;
+  penalties?: Partial<AdjacencyPoolConfig['penalties']>;
+  commerce?: Partial<AdjacencyPoolConfig['commerce']>;
 };
 
 export const DEFAULT_ADJACENCY_CONFIG: AdjacencyPoolConfig = {
@@ -95,6 +179,73 @@ export const DEFAULT_ADJACENCY_CONFIG: AdjacencyPoolConfig = {
   dock: {
     fishingDemand: 6,
   },
+  sheep: {
+    pastureDemand: 4,
+    manureFeedBonusFromFarm: 0.2,
+    predationPenaltyPerForest: 0.25,
+    predationMaxPenalty: 0.5,
+  },
+  farm: {
+    plainsEfficiencyMultiplier: 0.68,
+    irrigationBonusPerWaterUnit: 0.05,
+    irrigationMaxBonus: 0.3,
+    manureBonusFromCurral: 0.15,
+    villageMarketEfficiencyPerNeighbor: 0.1,
+    villageMarketMaxBonus: 0.2,
+  },
+  mill: {
+    millGrainCapacity: 6,
+    millFoodMultiplier: 1.5,
+    millGoldPerGrain: 1.0,
+    watermillGrainCapacity: 10,
+    watermillFoodMultiplier: 1.65,
+    watermillGoldPerGrain: 1.2,
+    villageMarketEfficiencyPerNeighbor: 0.12,
+    villageMarketMaxBonus: 0.24,
+  },
+  lumber: {
+    timberInputPerTurn: 4,
+  },
+  mine: {
+    stoneDepositOutput: { stone: 8, ore: 0 },
+    oreDepositOutput: { stone: 1, ore: 9 },
+    mixedDepositOutput: { stone: 4, ore: 7 },
+    forestShoringBonusPerForest: 0.15,
+    forestShoringMaxBonus: 0.25,
+  },
+  smelter: {
+    woodFuelPerTurn: 2,
+    kingdomWoodFallbackPerTurn: 1,
+    forestFuelBonus: 0.15,
+  },
+  penalties: {
+    mineDustOnFarmPerNeighbor: 0.1,
+    mineDustMax: 0.2,
+    smelterSmokeOnFarmPerNeighbor: 0.2,
+    smelterSmokeMax: 0.35,
+    forestShadeOnFarmPerNeighbor: 0.08,
+    forestShadeMax: 0.2,
+    smelterSmokeOnCurralPerNeighbor: 0.2,
+    smelterSmokeMaxOnCurral: 0.35,
+    mineContaminationOnWaterPerNeighbor: 0.25,
+    mineContaminationMax: 0.5,
+    smelterPollutionOnWaterPerNeighbor: 0.3,
+    smelterPollutionMax: 0.6,
+    waterPollutionMaxTotal: 0.75,
+    smelterPollutionOnVillagePerNeighbor: 0.1,
+    smelterPollutionMaxOnVillage: 0.25,
+  },
+  commerce: {
+    baseOperatingGold: 10,
+    producerTradeValue: 8,
+    processedProducerMultiplier: 1.25,
+    duplicateProductWeight: 0.4,
+    varietyBonusPerExtraType: 0.25,
+    varietyMaxBonus: 0.75,
+    villageDemandWeight: 1.0,
+    housingDemandWeight: 0.5,
+    maxCommercialGoldBonus: 28,
+  },
 };
 
 export function resolveAdjacencyConfig(
@@ -122,6 +273,38 @@ export function resolveAdjacencyConfig(
     dock: {
       ...DEFAULT_ADJACENCY_CONFIG.dock,
       ...(overrides.dock ?? {}),
+    },
+    sheep: {
+      ...DEFAULT_ADJACENCY_CONFIG.sheep,
+      ...(overrides.sheep ?? {}),
+    },
+    farm: {
+      ...DEFAULT_ADJACENCY_CONFIG.farm,
+      ...(overrides.farm ?? {}),
+    },
+    mill: {
+      ...DEFAULT_ADJACENCY_CONFIG.mill,
+      ...(overrides.mill ?? {}),
+    },
+    lumber: {
+      ...DEFAULT_ADJACENCY_CONFIG.lumber,
+      ...(overrides.lumber ?? {}),
+    },
+    mine: {
+      ...DEFAULT_ADJACENCY_CONFIG.mine,
+      ...(overrides.mine ?? {}),
+    },
+    smelter: {
+      ...DEFAULT_ADJACENCY_CONFIG.smelter,
+      ...(overrides.smelter ?? {}),
+    },
+    penalties: {
+      ...DEFAULT_ADJACENCY_CONFIG.penalties,
+      ...(overrides.penalties ?? {}),
+    },
+    commerce: {
+      ...DEFAULT_ADJACENCY_CONFIG.commerce,
+      ...(overrides.commerce ?? {}),
     },
   };
 }
@@ -450,7 +633,7 @@ export function consumeForestWood(
   const nextTile: PlacedHex = {
     ...tile,
     woodStock: remainingStock,
-    ...(nowDepleted ? { forestDepleted: true } : {}),
+    ...(nowDepleted && !hadConstruction ? { forestDepleted: true } : {}),
     ...(shouldSwapVisual ? { structureIndex: depletedAssetIndex } : {}),
   };
 
@@ -493,7 +676,7 @@ export function syncForestDepletionState(
     if (!shouldBeDepleted) continue;
 
     const hasConstr = hasHexConstruction(tile, assets);
-    const needsFlag = tile.forestDepleted !== true;
+    const needsFlag = !hasConstr && tile.forestDepleted !== true;
     const needsVisual =
       !hasConstr && depletedAssetIndex >= 0 && tile.structureIndex !== depletedAssetIndex;
     const stock = getForestWoodStock(tile, config);
@@ -504,7 +687,7 @@ export function syncForestDepletionState(
       nextHexes[key] = {
         ...tile,
         woodStock: stock,
-        forestDepleted: true,
+        ...(!hasConstr ? { forestDepleted: true } : {}),
         ...(needsVisual ? { structureIndex: depletedAssetIndex } : {}),
       };
       if (needsFlag || needsVisual) {
@@ -525,6 +708,8 @@ export interface WaterFishingCapacityReport {
   r: number;
   baseCapacity: number;
   adjacencyBonus: number;
+  rawCapacity: number;
+  pollutionPenaltyPct: number;
   totalCapacity: number;
   waterNeighbors: number;
   capReached: boolean;
@@ -535,7 +720,8 @@ export function computeWaterFishingCapacity(
   q: number,
   r: number,
   assets: HexAssetEntry[] = [],
-  overrides?: AdjacencyPoolConfigOverrides
+  overrides?: AdjacencyPoolConfigOverrides,
+  underConstructionKeys?: Set<string>
 ): WaterFishingCapacityReport {
   const config = resolveAdjacencyConfig(overrides);
   const key = hexKey(q, r);
@@ -549,13 +735,22 @@ export function computeWaterFishingCapacity(
       r,
       baseCapacity: 0,
       adjacencyBonus: 0,
+      rawCapacity: 0,
+      pollutionPenaltyPct: 0,
       totalCapacity: 0,
       waterNeighbors: 0,
       capReached: false,
     };
   }
 
-  const neighbors = getHexNeighbors(worldState, q, r, assets, undefined, config);
+  const neighbors = getHexNeighbors(
+    worldState,
+    q,
+    r,
+    assets,
+    underConstructionKeys,
+    config
+  );
   const scaled = computeAdjacencyScaledEffect(
     neighbors,
     (n) => n.exists && n.terrainType === 'water',
@@ -566,13 +761,43 @@ export function computeWaterFishingCapacity(
     }
   );
 
+  const mineContam = computeAdjacencyScaledEffect(
+    neighbors,
+    (n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-mine',
+    {
+      baseValue: 0,
+      perNeighborBonus: config.penalties.mineContaminationOnWaterPerNeighbor,
+      maxBonus: config.penalties.mineContaminationMax,
+    }
+  ).cappedBonus;
+
+  const smelterPoll = computeAdjacencyScaledEffect(
+    neighbors,
+    (n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-smelter',
+    {
+      baseValue: 0,
+      perNeighborBonus: config.penalties.smelterPollutionOnWaterPerNeighbor,
+      maxBonus: config.penalties.smelterPollutionMax,
+    }
+  ).cappedBonus;
+
+  const totalPollution = Math.min(
+    config.penalties.waterPollutionMaxTotal,
+    mineContam + smelterPoll
+  );
+  const effectiveCapacity = roundPoolValue(
+    scaled.totalValue * Math.max(0, 1 - totalPollution)
+  );
+
   return {
     key,
     q,
     r,
     baseCapacity: scaled.baseValue,
     adjacencyBonus: scaled.cappedBonus,
-    totalCapacity: scaled.totalValue,
+    rawCapacity: scaled.totalValue,
+    pollutionPenaltyPct: Math.round(totalPollution * 100),
+    totalCapacity: effectiveCapacity,
     waterNeighbors: scaled.matchingNeighborCount,
     capReached: scaled.capReached,
   };
@@ -975,6 +1200,7 @@ export interface VillagePoolReport {
   q: number;
   r: number;
   population: number;
+  pollutionPenaltyPct: number;
   workerSupply: number;
   workersSuppliedTotal: number;
   workerConsumersByKey: Record<string, number>;
@@ -991,6 +1217,7 @@ export interface WorldAdjacencySummary {
   workers: PoolCategorySummary;
   irrigationByKey: Record<string, FertileIrrigationReport>;
   forestsByKey: Record<string, ForestTileStateReport>;
+  waterByKey: Record<string, WaterFishingCapacityReport>;
   villagesByKey: Record<string, VillagePoolReport>;
 }
 
@@ -1043,6 +1270,7 @@ export function evaluateWorldAdjacencyPools(params: {
 
   const forestsByKey: Record<string, ForestTileStateReport> = {};
   const irrigationByKey: Record<string, FertileIrrigationReport> = {};
+  const waterByKey: Record<string, WaterFishingCapacityReport> = {};
 
   const huntingProviders: PoolProviderNode[] = [];
   const fishingProviders: PoolProviderNode[] = [];
@@ -1054,7 +1282,13 @@ export function evaluateWorldAdjacencyPools(params: {
   const pastureConsumers: PoolConsumerNode[] = [];
   const workerConsumers: PoolConsumerNode[] = [];
 
-  const villageTiles: Array<{ key: string; tile: PlacedHex; pop: number; tileOwner: HexOwner }> = [];
+  const villageTiles: Array<{
+    key: string;
+    tile: PlacedHex;
+    pop: number;
+    pollutionPenalty: number;
+    tileOwner: HexOwner;
+  }> = [];
   const terrainProviderOwnerByKey = new Map<string, HexOwner>();
 
   let tiles: PlacedHex[];
@@ -1112,8 +1346,10 @@ export function evaluateWorldAdjacencyPools(params: {
         tile.q,
         tile.r,
         assets,
-        configOverrides
+        configOverrides,
+        underConstructionKeys
       );
+      waterByKey[key] = waterReport;
       fishingProviders.push({
         key,
         baseCapacity: waterReport.baseCapacity,
@@ -1154,7 +1390,25 @@ export function evaluateWorldAdjacencyPools(params: {
         0,
         villagePopulationsByKey?.[key] ?? getDefaultVillagePopulation(tile)
       );
-      villageTiles.push({ key, tile, pop, tileOwner });
+      const vNeighbors = getHexNeighbors(
+        worldState,
+        tile.q,
+        tile.r,
+        assets,
+        underConstructionKeys,
+        config
+      );
+      const pollutionPenalty = computeAdjacencyScaledEffect(
+        vNeighbors,
+        (n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-smelter',
+        {
+          baseValue: 0,
+          perNeighborBonus: config.penalties.smelterPollutionOnVillagePerNeighbor,
+          maxBonus: config.penalties.smelterPollutionMaxOnVillage,
+        }
+      ).cappedBonus;
+
+      villageTiles.push({ key, tile, pop, pollutionPenalty, tileOwner });
 
       huntingConsumers.push({
         key,
@@ -1171,17 +1425,26 @@ export function evaluateWorldAdjacencyPools(params: {
         assetName,
         demand: pop * config.village.pastureDemandPerPopulation,
       });
+      const workerSupply = roundPoolValue(
+        pop * config.village.workersSuppliedPerPopulation * Math.max(0, 1 - pollutionPenalty)
+      );
       workerProviders.push({
         key,
         baseCapacity: pop * config.village.workersSuppliedPerPopulation,
         adjacencyBonus: 0,
-        totalCapacity: pop * config.village.workersSuppliedPerPopulation,
+        totalCapacity: workerSupply,
       });
     } else if (assetName === 'building-dock') {
       fishingConsumers.push({
         key,
         assetName,
         demand: config.dock.fishingDemand,
+      });
+    } else if (assetName === 'building-sheep') {
+      pastureConsumers.push({
+        key,
+        assetName,
+        demand: config.sheep.pastureDemand,
       });
     }
 
@@ -1263,6 +1526,29 @@ export function evaluateWorldAdjacencyPools(params: {
     }
   }
 
+  // Curral-to-plains pasture edges (adjacent open plains)
+  for (const c of pastureConsumers) {
+    if (c.assetName !== 'building-sheep') continue;
+    const sheepTile = worldState.hexes[c.key];
+    if (!sheepTile) continue;
+    const sheepOwner = resolveTileOwner(sheepTile);
+    const neighbors = getHexNeighbors(
+      worldState,
+      sheepTile.q,
+      sheepTile.r,
+      assets,
+      underConstructionKeys,
+      config
+    );
+    for (const n of neighbors) {
+      if (!n.exists || !pastureProvSet.has(n.key)) continue;
+      const pOwner = terrainProviderOwnerByKey.get(n.key) ?? 'neutral';
+      if (isProviderAccessibleToConsumer(pOwner, sheepOwner, owner)) {
+        pastureEdges.push({ providerKey: n.key, consumerKey: c.key });
+      }
+    }
+  }
+
   const hunting = solveSharedPoolAllocations({
     kind: 'hunting',
     providers: huntingProviders,
@@ -1300,6 +1586,7 @@ export function evaluateWorldAdjacencyPools(params: {
       q: v.tile.q,
       r: v.tile.r,
       population: v.pop,
+      pollutionPenaltyPct: Math.round(v.pollutionPenalty * 100),
       workerSupply: workerProv?.totalCapacity ?? 0,
       workersSuppliedTotal: workerProv?.allocated ?? 0,
       workerConsumersByKey: workerProv?.allocationsByConsumerKey ?? {},
@@ -1317,6 +1604,694 @@ export function evaluateWorldAdjacencyPools(params: {
     workers,
     irrigationByKey,
     forestsByKey,
+    waterByKey,
     villagesByKey,
   };
 }
+
+export interface ChainAdjacencyEffectReport {
+  terrainMultiplier: number;
+  bonusMultiplier: number;
+  penaltyFactor: number;
+  netMultiplier: number;
+  notesPt: string[];
+  isIrrigated: boolean;
+  irrigationCapacity: number;
+  hasWaterAccess: boolean;
+  predationMitigated: boolean;
+  predationPenaltyPct: number;
+  pollutionPenaltyPct: number;
+  mountainDeposit: MountainDepositType;
+  activeForestNeighborKeys: string[];
+}
+
+/**
+ * Computes Stage 2 chain bonuses and penalties for a placed building using the central
+ * 6-neighbor query and capped scaling rules.
+ */
+export function computeBuildingChainAdjacency(params: {
+  worldState: HexWorldState;
+  tile: PlacedHex;
+  assetName: string;
+  assets: HexAssetEntry[];
+  underConstructionKeys?: Set<string>;
+  configOverrides?: AdjacencyPoolConfigOverrides;
+}): ChainAdjacencyEffectReport {
+  const {
+    worldState,
+    tile,
+    assetName,
+    assets,
+    underConstructionKeys,
+    configOverrides,
+  } = params;
+  const config = resolveAdjacencyConfig(configOverrides);
+  const neighbors = getHexNeighbors(
+    worldState,
+    tile.q,
+    tile.r,
+    assets,
+    underConstructionKeys,
+    config
+  );
+  const terrain = getHexTerrainAndResource(tile.q, tile.r, tile).terrainType;
+  const mountainDeposit = getMountainDepositType(tile.q, tile.r, tile, assets);
+
+  let terrainMultiplier = 1.0;
+  let bonus = 0;
+  let penalty = 0;
+  const notesPt: string[] = [];
+
+  const irrigation = computeFertileIrrigation(
+    worldState,
+    tile.q,
+    tile.r,
+    assets,
+    configOverrides
+  );
+  const hasWaterNeighbor = neighbors.some((n) => n.exists && n.terrainType === 'water');
+  const hasWaterAccess = terrain === 'water' || hasWaterNeighbor;
+
+  const activeForestNeighborKeys = neighbors
+    .filter((n) => n.exists && n.terrainType === 'forest' && !n.isForestDepleted)
+    .map((n) => n.key);
+
+  let predationMitigated = false;
+  let predationPenaltyPct = 0;
+  let pollutionPenaltyPct = 0;
+
+  switch (assetName) {
+    case 'building-farm': {
+      if (terrain === 'plains') {
+        terrainMultiplier = config.farm.plainsEfficiencyMultiplier;
+        notesPt.push('Planície: rendimento reduzido (-32%)');
+      }
+      if (irrigation.isIrrigated && irrigation.irrigationCapacity > 0) {
+        const irrBonus = Math.min(
+          config.farm.irrigationMaxBonus,
+          irrigation.irrigationCapacity * config.farm.irrigationBonusPerWaterUnit
+        );
+        bonus += irrBonus;
+        notesPt.push(`Irrigação (+${Math.round(irrBonus * 100)}%)`);
+      } else if (hasWaterNeighbor || neighbors.some((n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-watermill')) {
+        bonus += 0.15;
+        notesPt.push('Água próxima (+15%)');
+      }
+      if (neighbors.some((n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-sheep')) {
+        bonus += config.farm.manureBonusFromCurral;
+        notesPt.push(`Esterco do Curral (+${Math.round(config.farm.manureBonusFromCurral * 100)}%)`);
+      }
+      const vmBonus = computeAdjacencyScaledEffect(
+        neighbors,
+        (n) =>
+          n.exists &&
+          n.isCompleteBuilding &&
+          (n.assetName === 'building-village' || n.assetName === 'building-market'),
+        {
+          baseValue: 0,
+          perNeighborBonus: config.farm.villageMarketEfficiencyPerNeighbor,
+          maxBonus: config.farm.villageMarketMaxBonus,
+        }
+      ).cappedBonus;
+      if (vmBonus > 0) {
+        bonus += vmBonus;
+        notesPt.push(`Demanda Vila/Mercado (+${Math.round(vmBonus * 100)}%)`);
+      }
+
+      const mineDust = computeAdjacencyScaledEffect(
+        neighbors,
+        (n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-mine',
+        {
+          baseValue: 0,
+          perNeighborBonus: config.penalties.mineDustOnFarmPerNeighbor,
+          maxBonus: config.penalties.mineDustMax,
+        }
+      ).cappedBonus;
+      if (mineDust > 0) {
+        penalty += mineDust;
+        notesPt.push(`Poeira da Mina (-${Math.round(mineDust * 100)}%)`);
+      }
+
+      const smelterSmoke = computeAdjacencyScaledEffect(
+        neighbors,
+        (n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-smelter',
+        {
+          baseValue: 0,
+          perNeighborBonus: config.penalties.smelterSmokeOnFarmPerNeighbor,
+          maxBonus: config.penalties.smelterSmokeMax,
+        }
+      ).cappedBonus;
+      if (smelterSmoke > 0) {
+        penalty += smelterSmoke;
+        notesPt.push(`Fumaça da Fundição (-${Math.round(smelterSmoke * 100)}%)`);
+      }
+
+      const forestShade = computeAdjacencyScaledEffect(
+        neighbors,
+        (n) => n.exists && n.terrainType === 'forest' && !n.isForestDepleted,
+        {
+          baseValue: 0,
+          perNeighborBonus: config.penalties.forestShadeOnFarmPerNeighbor,
+          maxBonus: config.penalties.forestShadeMax,
+        }
+      ).cappedBonus;
+      if (forestShade > 0) {
+        penalty += forestShade;
+        notesPt.push(`Pragas/sombra da Floresta (-${Math.round(forestShade * 100)}%)`);
+      }
+
+      pollutionPenaltyPct = Math.round((mineDust + smelterSmoke) * 100);
+      break;
+    }
+
+    case 'building-mill':
+    case 'building-watermill': {
+      const vmBonus = computeAdjacencyScaledEffect(
+        neighbors,
+        (n) =>
+          n.exists &&
+          n.isCompleteBuilding &&
+          (n.assetName === 'building-village' || n.assetName === 'building-market'),
+        {
+          baseValue: 0,
+          perNeighborBonus: config.mill.villageMarketEfficiencyPerNeighbor,
+          maxBonus: config.mill.villageMarketMaxBonus,
+        }
+      ).cappedBonus;
+      if (vmBonus > 0) {
+        bonus += vmBonus;
+        notesPt.push(`Escoamento Vila/Mercado (+${Math.round(vmBonus * 100)}%)`);
+      }
+      break;
+    }
+
+    case 'building-sheep': {
+      if (neighbors.some((n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-farm')) {
+        bonus += config.sheep.manureFeedBonusFromFarm;
+        notesPt.push(`Ração/Esterco da Fazenda (+${Math.round(config.sheep.manureFeedBonusFromFarm * 100)}%)`);
+      }
+      const rawPredation = computeAdjacencyScaledEffect(
+        neighbors,
+        (n) => n.exists && n.terrainType === 'forest' && !n.isForestDepleted,
+        {
+          baseValue: 0,
+          perNeighborBonus: config.sheep.predationPenaltyPerForest,
+          maxBonus: config.sheep.predationMaxPenalty,
+        }
+      ).cappedBonus;
+      const hasGuard = neighbors.some(
+        (n) =>
+          n.exists &&
+          n.isCompleteBuilding &&
+          (n.assetName === 'building-archery' ||
+            n.assetName === 'building-tower' ||
+            n.assetName === 'unit-wall-tower')
+      );
+      if (rawPredation > 0) {
+        if (hasGuard) {
+          predationMitigated = true;
+          notesPt.push('Predação neutralizada por Arquearia/Torre');
+        } else {
+          penalty += rawPredation;
+          predationPenaltyPct = Math.round(rawPredation * 100);
+          notesPt.push(`Predação da Floresta (-${predationPenaltyPct}%)`);
+        }
+      }
+      const smelterSmoke = computeAdjacencyScaledEffect(
+        neighbors,
+        (n) => n.exists && n.isCompleteBuilding && n.assetName === 'building-smelter',
+        {
+          baseValue: 0,
+          perNeighborBonus: config.penalties.smelterSmokeOnCurralPerNeighbor,
+          maxBonus: config.penalties.smelterSmokeMaxOnCurral,
+        }
+      ).cappedBonus;
+      if (smelterSmoke > 0) {
+        penalty += smelterSmoke;
+        pollutionPenaltyPct = Math.round(smelterSmoke * 100);
+        notesPt.push(`Fumaça da Fundição (-${pollutionPenaltyPct}%)`);
+      }
+      break;
+    }
+
+    case 'building-mine': {
+      const shoring = computeAdjacencyScaledEffect(
+        neighbors,
+        (n) => n.exists && n.terrainType === 'forest' && !n.isForestDepleted,
+        {
+          baseValue: 0,
+          perNeighborBonus: config.mine.forestShoringBonusPerForest,
+          maxBonus: config.mine.forestShoringMaxBonus,
+        }
+      ).cappedBonus;
+      if (shoring > 0) {
+        bonus += shoring;
+        notesPt.push(`Escoramento florestal (+${Math.round(shoring * 100)}%)`);
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  const netMultiplier = Math.max(0.25, Number((1 + bonus - penalty).toFixed(4)));
+
+  return {
+    terrainMultiplier,
+    bonusMultiplier: Number((1 + bonus).toFixed(4)),
+    penaltyFactor: Number(Math.max(0, 1 - penalty).toFixed(4)),
+    netMultiplier,
+    notesPt,
+    isIrrigated: irrigation.isIrrigated,
+    irrigationCapacity: irrigation.irrigationCapacity,
+    hasWaterAccess,
+    predationMitigated,
+    predationPenaltyPct,
+    pollutionPenaltyPct,
+    mountainDeposit,
+    activeForestNeighborKeys,
+  };
+}
+
+export interface GrainProcessingChainResult {
+  grainSummary: PoolCategorySummary;
+  grainConsumedByFarmKey: Record<string, number>;
+  excessGrainByFarmKey: Record<string, number>;
+  grainProcessedByMillKey: Record<string, number>;
+  processedFoodByMillKey: Record<string, number>;
+  processedGoldByMillKey: Record<string, number>;
+}
+
+export function solveGrainProcessingChain(params: {
+  worldState: HexWorldState;
+  farms: Array<{ key: string; q: number; r: number; rawGrainProduced: number }>;
+  mills: Array<{
+    key: string;
+    q: number;
+    r: number;
+    assetName: 'building-mill' | 'building-watermill';
+    processingCapacity: number;
+    efficiencyMultiplier: number;
+  }>;
+  configOverrides?: AdjacencyPoolConfigOverrides;
+}): GrainProcessingChainResult {
+  const { farms, mills, configOverrides } = params;
+  const config = resolveAdjacencyConfig(configOverrides);
+
+  const providers: PoolProviderNode[] = farms.map((f) => ({
+    key: f.key,
+    baseCapacity: f.rawGrainProduced,
+    adjacencyBonus: 0,
+    totalCapacity: f.rawGrainProduced,
+  }));
+
+  const consumers: PoolConsumerNode[] = mills.map((m) => ({
+    key: m.key,
+    assetName: m.assetName,
+    demand: m.processingCapacity,
+  }));
+
+  const edges: PoolEdge[] = [];
+  for (const f of farms) {
+    for (const m of mills) {
+      if (axialDistance({ q: f.q, r: f.r }, { q: m.q, r: m.r }) === 1) {
+        edges.push({ providerKey: f.key, consumerKey: m.key });
+      }
+    }
+  }
+
+  const grainSummary = solveSharedPoolAllocations({
+    kind: 'grain',
+    providers,
+    consumers,
+    edges,
+    sharingMode: config.sharingMode,
+  });
+
+  const grainConsumedByFarmKey: Record<string, number> = {};
+  const excessGrainByFarmKey: Record<string, number> = {};
+  for (const f of farms) {
+    const alloc = grainSummary.providersByKey[f.key];
+    const used = alloc?.allocated ?? 0;
+    grainConsumedByFarmKey[f.key] = roundPoolValue(used);
+    excessGrainByFarmKey[f.key] = roundPoolValue(Math.max(0, f.rawGrainProduced - used));
+  }
+
+  const grainProcessedByMillKey: Record<string, number> = {};
+  const processedFoodByMillKey: Record<string, number> = {};
+  const processedGoldByMillKey: Record<string, number> = {};
+
+  for (const m of mills) {
+    const alloc = grainSummary.consumersByKey[m.key];
+    const processed = alloc?.allocated ?? 0;
+    const foodMult =
+      m.assetName === 'building-watermill'
+        ? config.mill.watermillFoodMultiplier
+        : config.mill.millFoodMultiplier;
+    const goldRate =
+      m.assetName === 'building-watermill'
+        ? config.mill.watermillGoldPerGrain
+        : config.mill.millGoldPerGrain;
+
+    grainProcessedByMillKey[m.key] = roundPoolValue(processed);
+    processedFoodByMillKey[m.key] = Math.round(
+      processed * foodMult * m.efficiencyMultiplier
+    );
+    processedGoldByMillKey[m.key] = Math.round(
+      processed * goldRate * m.efficiencyMultiplier
+    );
+  }
+
+  return {
+    grainSummary,
+    grainConsumedByFarmKey,
+    excessGrainByFarmKey,
+    grainProcessedByMillKey,
+    processedFoodByMillKey,
+    processedGoldByMillKey,
+  };
+}
+
+export interface ForestTimberExtractionResult {
+  timberSummary: PoolCategorySummary;
+  forestWoodConsumedByKey: Record<string, number>;
+  timberSuppliedByConsumerKey: Record<string, number>;
+}
+
+/**
+ * Shared finite-wood extraction solver for Serrarias (dirt-lumber) and Fundições (building-smelter).
+ * Respects forest finite woodStock, ignores depleted forests (dirt-lumber), and prefers adjacent active forests.
+ */
+export function resolveForestTimberChain(params: {
+  worldState: HexWorldState;
+  assets: HexAssetEntry[];
+  consumers: Array<{
+    key: string;
+    q: number;
+    r: number;
+    assetName: 'dirt-lumber' | 'building-smelter';
+    woodDemand: number;
+    allowOwnTile: boolean;
+  }>;
+  owner?: HexOwner;
+  configOverrides?: AdjacencyPoolConfigOverrides;
+}): ForestTimberExtractionResult {
+  const { worldState, assets, consumers, owner, configOverrides } = params;
+  const config = resolveAdjacencyConfig(configOverrides);
+
+  const forestProviders: PoolProviderNode[] = [];
+  const forestSeen = new Set<string>();
+  const edges: PoolEdge[] = [];
+
+  for (const c of consumers) {
+    if (c.woodDemand <= 0) continue;
+    const cTile = worldState.hexes[c.key];
+    const cOwner = resolveTileOwner(cTile);
+
+    const neighbors = getHexNeighbors(worldState, c.q, c.r, assets, undefined, config);
+    const adjacentForestKeys: string[] = [];
+
+    for (const n of neighbors) {
+      if (!n.exists || n.terrainType !== 'forest' || n.isForestDepleted) continue;
+      if (!isProviderAccessibleToConsumer(n.owner, cOwner, owner)) continue;
+      const stock = getForestWoodStock(n.tile, config);
+      if (stock <= config.forest.woodDepletionThreshold) continue;
+      adjacentForestKeys.push(n.key);
+      if (!forestSeen.has(n.key)) {
+        forestSeen.add(n.key);
+        forestProviders.push({
+          key: n.key,
+          baseCapacity: stock,
+          adjacencyBonus: 0,
+          totalCapacity: stock,
+        });
+      }
+      edges.push({ providerKey: n.key, consumerKey: c.key });
+    }
+
+    // Serraria sits on a forest tile: if no adjacent forest can supply it (or own tile also has timber),
+    // allow drawing from own non-depleted forest tile when no adjacent forest exists or own tile is active.
+    if (c.allowOwnTile && cTile && adjacentForestKeys.length === 0) {
+      const ownTerrain = getHexTerrainAndResource(c.q, c.r, cTile).terrainType;
+      if (ownTerrain === 'forest' && !isForestDepleted(cTile, config)) {
+        const ownStock = getForestWoodStock(cTile, config);
+        if (ownStock > config.forest.woodDepletionThreshold) {
+          if (!forestSeen.has(c.key)) {
+            forestSeen.add(c.key);
+            forestProviders.push({
+              key: c.key,
+              baseCapacity: ownStock,
+              adjacencyBonus: 0,
+              totalCapacity: ownStock,
+            });
+          }
+          edges.push({ providerKey: c.key, consumerKey: c.key });
+        }
+      }
+    }
+  }
+
+  const timberSummary = solveSharedPoolAllocations({
+    kind: 'timber',
+    providers: forestProviders,
+    consumers: consumers.map((c) => ({
+      key: c.key,
+      assetName: c.assetName,
+      demand: c.woodDemand,
+    })),
+    edges,
+    sharingMode: config.sharingMode,
+  });
+
+  const forestWoodConsumedByKey: Record<string, number> = {};
+  for (const [fKey, prov] of Object.entries(timberSummary.providersByKey)) {
+    if (prov.allocated > 0) {
+      forestWoodConsumedByKey[fKey] = Math.round(prov.allocated);
+    }
+  }
+
+  const timberSuppliedByConsumerKey: Record<string, number> = {};
+  for (const [cKey, cons] of Object.entries(timberSummary.consumersByKey)) {
+    timberSuppliedByConsumerKey[cKey] = cons.allocated;
+  }
+
+  return {
+    timberSummary,
+    forestWoodConsumedByKey,
+    timberSuppliedByConsumerKey,
+  };
+}
+
+export type LocalCommerceProductCategory =
+  | 'grain'
+  | 'flour'
+  | 'livestock'
+  | 'lumber'
+  | 'minerals'
+  | 'metal'
+  | 'fish'
+  | 'maritime';
+
+export const PRODUCER_COMMERCE_CATEGORY: Record<string, LocalCommerceProductCategory> = {
+  'building-farm': 'grain',
+  'building-mill': 'flour',
+  'building-watermill': 'flour',
+  'building-sheep': 'livestock',
+  'dirt-lumber': 'lumber',
+  'building-mine': 'minerals',
+  'building-smelter': 'metal',
+  'building-dock': 'fish',
+  'building-port': 'maritime',
+};
+
+const PROCESSED_COMMERCE_CATEGORIES = new Set<LocalCommerceProductCategory>([
+  'flour',
+  'lumber',
+  'metal',
+  'maritime',
+]);
+
+export interface MarketCommerceReport {
+  marketKey: string;
+  allocatedSupplyUnits: number;
+  allocatedDemandUnits: number;
+  distinctProductTypes: LocalCommerceProductCategory[];
+  varietyMultiplier: number;
+  commercialGold: number;
+  sharedWithMarketKeys: string[];
+}
+
+export interface LocalCommerceChainResult {
+  supplyPool: PoolCategorySummary;
+  demandPool: PoolCategorySummary;
+  marketsByKey: Record<string, MarketCommerceReport>;
+  averageVarietyCount: number;
+}
+
+/**
+ * Integrates Mercado with adjacent producers and Villages/housing demand.
+ * - Distinct product types earn higher efficiency than identical duplicates.
+ * - Neighboring Markets share adjacent producer supply & Village demand proportionally.
+ * - Produces zero physical resources; returns pure commercial gold.
+ */
+export function solveLocalCommerceChain(params: {
+  worldState: HexWorldState;
+  markets: Array<{
+    key: string;
+    q: number;
+    r: number;
+    capacityWeight: number;
+    workerRatio: number;
+  }>;
+  activeProducersByKey: Record<string, { assetName: string; q: number; r: number; isActive: boolean }>;
+  housingDemandByKey: Record<string, { assetName: string; q: number; r: number; weight: number }>;
+  configOverrides?: AdjacencyPoolConfigOverrides;
+}): LocalCommerceChainResult {
+  const {
+    markets,
+    activeProducersByKey,
+    housingDemandByKey,
+    configOverrides,
+  } = params;
+  const config = resolveAdjacencyConfig(configOverrides);
+
+  const supplyProviders: PoolProviderNode[] = [];
+  const supplyEdges: PoolEdge[] = [];
+  for (const [pKey, prod] of Object.entries(activeProducersByKey)) {
+    const category = PRODUCER_COMMERCE_CATEGORY[prod.assetName];
+    if (!category || !prod.isActive) continue;
+    const unitCap = PROCESSED_COMMERCE_CATEGORIES.has(category)
+      ? config.commerce.processedProducerMultiplier
+      : 1.0;
+    supplyProviders.push({
+      key: pKey,
+      baseCapacity: unitCap,
+      adjacencyBonus: 0,
+      totalCapacity: unitCap,
+    });
+    for (const m of markets) {
+      if (m.workerRatio <= 0) continue;
+      if (axialDistance({ q: prod.q, r: prod.r }, { q: m.q, r: m.r }) === 1) {
+        supplyEdges.push({ providerKey: pKey, consumerKey: m.key });
+      }
+    }
+  }
+
+  const demandProviders: PoolProviderNode[] = [];
+  const demandEdges: PoolEdge[] = [];
+  for (const [hKey, house] of Object.entries(housingDemandByKey)) {
+    if (house.weight <= 0) continue;
+    demandProviders.push({
+      key: hKey,
+      baseCapacity: house.weight,
+      adjacencyBonus: 0,
+      totalCapacity: house.weight,
+    });
+    for (const m of markets) {
+      if (m.workerRatio <= 0) continue;
+      if (axialDistance({ q: house.q, r: house.r }, { q: m.q, r: m.r }) === 1) {
+        demandEdges.push({ providerKey: hKey, consumerKey: m.key });
+      }
+    }
+  }
+
+  const marketConsumers: PoolConsumerNode[] = markets.map((m) => ({
+    key: m.key,
+    assetName: 'building-market',
+    demand: m.workerRatio > 0 ? Math.max(1, m.capacityWeight * 10 * m.workerRatio) : 0,
+  }));
+
+  const supplyPool = solveSharedPoolAllocations({
+    kind: 'commerce',
+    providers: supplyProviders,
+    consumers: marketConsumers,
+    edges: supplyEdges,
+    sharingMode: config.sharingMode,
+  });
+
+  const demandPool = solveSharedPoolAllocations({
+    kind: 'commerce',
+    providers: demandProviders,
+    consumers: marketConsumers,
+    edges: demandEdges,
+    sharingMode: config.sharingMode,
+  });
+
+  const marketsByKey: Record<string, MarketCommerceReport> = {};
+  let varietyTotal = 0;
+
+  for (const m of markets) {
+    const sAlloc = supplyPool.consumersByKey[m.key];
+    const dAlloc = demandPool.consumersByKey[m.key];
+    const allocatedSupplyUnits = sAlloc?.allocated ?? 0;
+    const allocatedDemandUnits = dAlloc?.allocated ?? 0;
+
+    // Count distinct product categories among allocated providers and apply diminishing returns to duplicates
+    const seenByCat = new Map<LocalCommerceProductCategory, number>();
+    let effectiveVolume = 0;
+
+    for (const [pKey, amount] of Object.entries(sAlloc?.allocationsByProviderKey ?? {})) {
+      if (amount <= 0) continue;
+      const prod = activeProducersByKey[pKey];
+      if (!prod) continue;
+      const cat = PRODUCER_COMMERCE_CATEGORY[prod.assetName];
+      if (!cat) continue;
+      const countSoFar = seenByCat.get(cat) ?? 0;
+      const weight = countSoFar === 0 ? 1.0 : config.commerce.duplicateProductWeight;
+      effectiveVolume += amount * weight;
+      seenByCat.set(cat, countSoFar + 1);
+    }
+
+    const distinctProductTypes = Array.from(seenByCat.keys()).sort();
+    varietyTotal += distinctProductTypes.length;
+
+    const varietyMultiplier =
+      distinctProductTypes.length > 1
+        ? 1 +
+          Math.min(
+            config.commerce.varietyMaxBonus,
+            (distinctProductTypes.length - 1) * config.commerce.varietyBonusPerExtraType
+          )
+        : 1.0;
+
+    // Demand factor ensures Villages/housing drive commerce, while still valuing supply even if small
+    const demandMultiplier =
+      allocatedDemandUnits > 0
+        ? Math.min(1.5, 0.75 + allocatedDemandUnits * 0.35)
+        : 0.65;
+
+    const rawCommercialBonus =
+      effectiveVolume * config.commerce.producerTradeValue * varietyMultiplier * demandMultiplier;
+    const cappedBonus = Math.min(config.commerce.maxCommercialGoldBonus, rawCommercialBonus);
+
+    const commercialGold =
+      m.workerRatio > 0
+        ? Math.round((config.commerce.baseOperatingGold + cappedBonus) * m.workerRatio)
+        : 0;
+
+    const peers = new Set<string>([
+      ...(sAlloc?.sharedWithConsumerKeys ?? []),
+      ...(dAlloc?.sharedWithConsumerKeys ?? []),
+    ]);
+
+    marketsByKey[m.key] = {
+      marketKey: m.key,
+      allocatedSupplyUnits: roundPoolValue(allocatedSupplyUnits),
+      allocatedDemandUnits: roundPoolValue(allocatedDemandUnits),
+      distinctProductTypes,
+      varietyMultiplier: roundPoolValue(varietyMultiplier),
+      commercialGold,
+      sharedWithMarketKeys: Array.from(peers).sort(),
+    };
+  }
+
+  return {
+    supplyPool,
+    demandPool,
+    marketsByKey,
+    averageVarietyCount:
+      markets.length > 0 ? roundPoolValue(varietyTotal / markets.length) : 0,
+  };
+}
+

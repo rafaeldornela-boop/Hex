@@ -30,7 +30,10 @@ import {
   TERRAIN_METADATA,
   getHexTerrainAndResource,
 } from './terrain-engine';
-import { syncForestDepletionState } from './adjacency-engine';
+import {
+  consumeForestWood,
+  syncForestDepletionState,
+} from './adjacency-engine';
 import type { ActiveExpansion } from './territory-engine';
 import {
   advanceResearchProgress,
@@ -352,8 +355,22 @@ export function processKingdomTurn(
     };
   });
 
+  let worldAfterTimber = worldAfterExpansions;
+  for (const [fKey, amount] of Object.entries(econ.forestWoodConsumptionsByKey ?? {})) {
+    if (!amount || amount <= 0) continue;
+    const forestTile = worldAfterTimber.hexes[fKey];
+    if (!forestTile) continue;
+    worldAfterTimber = consumeForestWood(
+      worldAfterTimber,
+      forestTile.q,
+      forestTile.r,
+      amount,
+      assets
+    ).nextState;
+  }
+
   const aiResult = advanceFactionsTurn({
-    worldState: { ...worldAfterExpansions, cash: nextCash },
+    worldState: { ...worldAfterTimber, cash: nextCash },
     factions: working.factions,
     units: refreshedUnits,
     assets,

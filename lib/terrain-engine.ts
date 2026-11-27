@@ -5,6 +5,8 @@ export type TerrainType = 'plains' | 'forest' | 'mountain' | 'water' | 'fertile'
 
 export type ResourceType = 'none' | 'wood' | 'ore' | 'food' | 'water';
 
+export type MountainDepositType = 'ore' | 'stone' | 'mixed';
+
 export interface TerrainResourceInfo {
   resourceType: ResourceType;
   resourceAmount: number;
@@ -297,9 +299,55 @@ export function canBuildStructureOnTerrain(
 ): boolean {
   const name = typeof structure === 'string' ? structure : structure.name;
   if (isNaturalTerrainAssetName(name)) return false;
+  if (name === 'building-farm') {
+    return terrainType === 'fertile' || terrainType === 'plains';
+  }
   const required = getStructureRequiredTerrain(name);
   if (!required) return true;
   return required === terrainType;
+}
+
+const VALID_MOUNTAIN_DEPOSITS = new Set<MountainDepositType>(['ore', 'stone', 'mixed']);
+
+export function isValidMountainDepositType(value: unknown): value is MountainDepositType {
+  return typeof value === 'string' && VALID_MOUNTAIN_DEPOSITS.has(value as MountainDepositType);
+}
+
+/**
+ * Differentiates Stone vs Ore vs Mixed deposits on mountain hexes without creating
+ * additional economic TerrainType categories.
+ */
+export function getMountainDepositType(
+  q: number,
+  r: number,
+  tile?: Pick<PlacedHex, 'terrainType' | 'resourceType' | 'resourceAmount' | 'rareFeature' | 'mountainDeposit' | 'structureIndex'> | null,
+  assets?: HexAssetEntry[]
+): MountainDepositType {
+  const terrain = isValidTerrainType(tile?.terrainType)
+    ? tile.terrainType
+    : getTerrainForHex(q, r);
+  if (terrain !== 'mountain') return 'mixed';
+
+  if (isValidMountainDepositType(tile?.mountainDeposit)) {
+    return tile.mountainDeposit;
+  }
+
+  if (tile?.rareFeature === 'pure_iron' || tile?.rareFeature === 'gold_vein') {
+    return 'ore';
+  }
+
+  const assetName =
+    tile && assets && typeof tile.structureIndex === 'number'
+      ? assets[tile.structureIndex]?.name ?? ''
+      : '';
+  if (assetName === 'stone-rocks' || assetName === 'stone-hill' || assetName === 'stone') {
+    return 'stone';
+  }
+  if (assetName === 'stone-mountain') {
+    return 'ore';
+  }
+
+  return 'mixed';
 }
 
 export function getStructureDisplayInfo(assetName: string): {

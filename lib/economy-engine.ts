@@ -19,9 +19,17 @@ import {
   getStrategicRegionInfo,
 } from './terrain-engine';
 import {
+  DEFAULT_ADJACENCY_CONFIG,
   computeAdjacencyScaledEffect,
+  computeBuildingChainAdjacency,
   evaluateWorldAdjacencyPools,
   getHexNeighbors,
+  resolveForestTimberChain,
+  solveGrainProcessingChain,
+  solveLocalCommerceChain,
+  type ChainAdjacencyEffectReport,
+  type GrainProcessingChainResult,
+  type LocalCommerceChainResult,
   type WorldAdjacencySummary,
 } from './adjacency-engine';
 import { getTechModifiers, type TechId } from './tech-engine';
@@ -177,6 +185,10 @@ export interface TurnProductionBreakdown {
   roadConnectivity: RoadConnectivitySummary;
   regionalSummary: RegionalWorldSummary;
   adjacencyPools: WorldAdjacencySummary;
+  grainChain: GrainProcessingChainResult;
+  commerceChain: LocalCommerceChainResult;
+  forestWoodConsumptionsByKey: Record<string, number>;
+  kingdomWoodFuelConsumed: number;
   buildingsByKey: Record<string, BuildingOperationReport>;
   attentionHexKeys: string[];
   season: SeasonId | null;
@@ -709,6 +721,7 @@ export function computeTurnEconomyBreakdown(params: {
     } | null;
     locationFactor: number;
     locationNotesPt: string[];
+    chainAdj: ChainAdjacencyEffectReport;
     logisticsFactor: number;
     logisticsEfficiencyPct: number;
     logisticsStatusPt: string;
@@ -767,7 +780,6 @@ export function computeTurnEconomyBreakdown(params: {
 
     if (isUnderConstruction) {
       underConstructionCount += 1;
-      const bDef = stats.baseDef;
       buildingsByKey[key] = {
         key,
         assetName,
@@ -848,6 +860,21 @@ export function computeTurnEconomyBreakdown(params: {
       regionalSummary.hexBonusesByKey
     );
 
+    const chainAdj = computeBuildingChainAdjacency({
+      worldState,
+      tile,
+      assetName,
+      assets,
+      underConstructionKeys,
+    });
+
+    // Avoid double-counting locationFactor water note on Farm since Stage 2 irrigation replaces it cleanly
+    let adjustedLocFactor = loc.factor;
+    if (assetName === 'building-farm' && chainAdj.isIrrigated) {
+      adjustedLocFactor = Math.max(0.75, Number((loc.factor - 0.15).toFixed(2)));
+    }
+    const mergedNotes = Array.from(new Set([...loc.notesPt, ...chainAdj.notesPt]));
+
     const logistics = computeBuildingLogistics({
       q: tile.q,
       r: tile.r,
@@ -858,11 +885,7 @@ export function computeTurnEconomyBreakdown(params: {
 
     const regBonus = regionalSummary.hexBonusesByKey[key];
 
-    const hasWaterNeighbor =
-      terrainInfo.terrainType === 'water' ||
-      getHexNeighbors(worldState, tile.q, tile.r, assets, underConstructionKeys).some(
-        (n) => n.exists && n.terrainType === 'water'
-      );
+    const hasWaterNeighbor = chainAdj.hasWaterAccess;
 
     workOrders.push({
       key,
@@ -885,8 +908,9 @@ export function computeTurnEconomyBreakdown(params: {
       bDef,
       hasWaterNeighbor,
       upgradeInProgress: upgradeInfo,
-      locationFactor: loc.factor,
-      locationNotesPt: loc.notesPt,
+      locationFactor: adjustedLocFactor,
+      locationNotesPt: mergedNotes,
+      chainAdj,
       logisticsFactor: Number(
         Math.min(1.45, logistics.factor + modEff.logisticsBonusPct).toFixed(2)
       ),
@@ -933,6 +957,83 @@ export function computeTurnEconomyBreakdown(params: {
     workOrders,
   });
 
+  // 1b. Resolve finite Forest timber & fuel extraction for Serrarias and Fundições
+  const timberConsumers: Array<{
+    key: string;
+    q: number;
+    r: number;
+    assetName: 'dirt-lumber' | 'building-smelter';
+    woodDemand: number;
+    allowOwnTile: boolean;
+  }> = [];
+
+  for (const item of completedBuildings) {
+    const assign = workerAlloc.assignmentsByKey[item.key];
+    const workerRatio = assign
+      ? computeWorkerProductionScale(assign.assigned, assign.required)
+      : 1;
+    if (workerRatio <= 0) continue;
+    if (item.assetName === 'dirt-lumber') {
+      timberConsumers.push({
+        key: item.key,
+        q: item.tile.q,
+        r: item.tile.r,
+        assetName: 'dirt-lumber',
+        woodDemand: DEFAULT_ADJACENCY_CONFIG.lumber.timberInputPerTurn * workerRatio,
+        allowOwnTile: true,
+      });
+    } else if (item.assetName === 'building-smelter') {
+      timberConsumers.push({
+        key: item.key,
+        q: item.tile.q,
+        r: item.tile.r,
+        assetName: 'building-smelter',
+        woodDemand: DEFAULT_ADJACENCY_CONFIG.smelter.woodFuelPerTurn * workerRatio,
+        allowOwnTile: false,
+      });
+    }
+  }
+
+  const forestTimber = resolveForestTimberChain({
+    worldState,
+    assets,
+    consumers: timberConsumers,
+    owner,
+  });
+
+  // Compute Smelter fuel ratios (prefer adjacent active Forest woodStock; fallback to kingdom wood stock)
+  let remainingKingdomWoodFuel = Math.max(0, resources.wood || 0);
+  const smelterFuelByKey: Record<
+    string,
+    { fuelRatio: number; usedForestFuel: boolean; kingdomFuelUsed: number; forestFuelUsed: number }
+  > = {};
+  let totalKingdomWoodFuelConsumed = 0;
+
+  for (const item of completedBuildings) {
+    if (item.assetName !== 'building-smelter') continue;
+    const assign = workerAlloc.assignmentsByKey[item.key];
+    const workerRatio = assign
+      ? computeWorkerProductionScale(assign.assigned, assign.required)
+      : 1;
+    const neededFuel = DEFAULT_ADJACENCY_CONFIG.smelter.woodFuelPerTurn * workerRatio;
+    const forestFuelUsed = forestTimber.timberSuppliedByConsumerKey[item.key] ?? 0;
+    let kingdomFuelUsed = 0;
+    if (forestFuelUsed < neededFuel && remainingKingdomWoodFuel > 0) {
+      const deficit = neededFuel - forestFuelUsed;
+      kingdomFuelUsed = Math.min(remainingKingdomWoodFuel, deficit);
+      remainingKingdomWoodFuel -= kingdomFuelUsed;
+      totalKingdomWoodFuelConsumed += kingdomFuelUsed;
+    }
+    const totalSupplied = forestFuelUsed + kingdomFuelUsed;
+    const fuelRatio = neededFuel > 0 ? Math.min(1, totalSupplied / neededFuel) : 1;
+    smelterFuelByKey[item.key] = {
+      fuelRatio,
+      usedForestFuel: forestFuelUsed > 0,
+      kingdomFuelUsed,
+      forestFuelUsed,
+    };
+  }
+
   const computeResilientMultiplier = (
     rawMult: number,
     resilience: number,
@@ -943,14 +1044,42 @@ export function computeTurnEconomyBreakdown(params: {
     return 1 - (1 - rawMult) * (1 - totalResilience);
   };
 
-  // 2. First pass: calculate ore extraction and food baseline before checking input conversions and starvation
-  let extractedOreThisTurn = baseOreProd;
-  let preStarveFoodProd = baseFoodProd * seasonFoodMult * weatherFoodMult;
-
   const getRegionalSpecForHex = (key: string) => {
     const cityId = regionalSummary.controllingCityIdByHexKey[key];
     return cityId ? regionalSummary.cityProfilesById[cityId]?.primarySpecialization ?? null : null;
   };
+
+  // Helper to resolve base ore/stone for Mountain deposits without creating extra TerrainTypes
+  const getEffectiveMineDepositProduction = (item: (typeof completedBuildings)[number]) => {
+    const baseMineDef = item.stats.baseDef.production;
+    const levelScaleOre = baseMineDef.ore > 0 ? item.stats.production.ore / baseMineDef.ore : 1;
+    const levelScaleStone =
+      baseMineDef.stone > 0 ? item.stats.production.stone / baseMineDef.stone : 1;
+    const dep = item.chainAdj.mountainDeposit;
+    const template =
+      dep === 'stone'
+        ? DEFAULT_ADJACENCY_CONFIG.mine.stoneDepositOutput
+        : dep === 'ore'
+          ? DEFAULT_ADJACENCY_CONFIG.mine.oreDepositOutput
+          : DEFAULT_ADJACENCY_CONFIG.mine.mixedDepositOutput;
+    return {
+      stone: template.stone * levelScaleStone,
+      ore: template.ore * levelScaleOre,
+    };
+  };
+
+  // 2. First pass: calculate ore extraction and pre-starvation food (including Farm -> Mill + Curral + Doca chains)
+  let extractedOreThisTurn = baseOreProd;
+  let preStarveFoodProd = baseFoodProd * seasonFoodMult * weatherFoodMult;
+  const pass1Farms: Array<{ key: string; q: number; r: number; rawGrainProduced: number }> = [];
+  const pass1Mills: Array<{
+    key: string;
+    q: number;
+    r: number;
+    assetName: 'building-mill' | 'building-watermill';
+    processingCapacity: number;
+    efficiencyMultiplier: number;
+  }> = [];
 
   for (const item of completedBuildings) {
     const assign = workerAlloc.assignmentsByKey[item.key];
@@ -966,22 +1095,29 @@ export function computeTurnEconomyBreakdown(params: {
     const citySpec = getRegionalSpecForHex(item.key);
     const citySpecTier = citySpec ? SPECIALIZATION_STAGE_META[citySpec.stage].tier : 0;
 
-    if (item.stats.production.ore > 0) {
+    if (item.assetName === 'building-mine' || item.stats.production.ore > 0) {
       const regMiningMult =
         citySpec?.id === 'mining' ? (citySpecTier === 3 ? 1.15 : citySpecTier === 2 ? 1.1 : 1.06) : 1;
       const effRainOrePass1 =
         weather.id === 'rain' || weather.id === 'storm'
           ? 1 - 0.15 * (1 - Math.min(0.75, item.modEff.rainStormResilience))
           : 1;
+      const baseOre =
+        item.assetName === 'building-mine'
+          ? getEffectiveMineDepositProduction(item).ore
+          : item.stats.production.ore;
+      const chainMult = item.assetName === 'building-mine' ? item.chainAdj.netMultiplier : 1;
       extractedOreThisTurn +=
-        item.stats.production.ore *
+        baseOre *
         (1 + item.modEff.prodPct.ore) *
         rawScale *
+        chainMult *
         mods.stoneOreMultiplier *
         mods.oreBonusMultiplier *
         regMiningMult *
         effRainOrePass1;
     }
+
     if (item.stats.production.food > 0) {
       const waterMitigation =
         weather.id === 'drought_weather' && item.hasWaterNeighbor ? 0.35 : 0;
@@ -1018,15 +1154,81 @@ export function computeTurnEconomyBreakdown(params: {
         item.stats.seasonalResilience + weatherModResilience,
         waterMitigation
       );
-      preStarveFoodProd +=
-        item.stats.production.food *
+      const climateFactor =
         (1 + item.modEff.prodPct.food + springSummerBonus) *
-        rawScale *
         mods.foodMultiplier *
         effectFoodMult *
         effSeasonFood *
         effWeatherFood;
+
+      if (item.assetName === 'building-farm') {
+        const rawGrain =
+          item.stats.production.food *
+          climateFactor *
+          rawScale *
+          item.chainAdj.terrainMultiplier *
+          item.chainAdj.netMultiplier;
+        pass1Farms.push({
+          key: item.key,
+          q: item.tile.q,
+          r: item.tile.r,
+          rawGrainProduced: Math.max(0, rawGrain),
+        });
+      } else if (
+        item.assetName === 'building-mill' ||
+        item.assetName === 'building-watermill'
+      ) {
+        const isWaterMill = item.assetName === 'building-watermill';
+        const hasWater = !isWaterMill || item.chainAdj.hasWaterAccess;
+        const baseCap = isWaterMill
+          ? DEFAULT_ADJACENCY_CONFIG.mill.watermillGrainCapacity
+          : DEFAULT_ADJACENCY_CONFIG.mill.millGrainCapacity;
+        const capScale = item.stats.production.food / Math.max(1, item.stats.baseDef.production.food);
+        const cap = hasWater
+          ? baseCap * capScale * workerRatio * item.chainAdj.netMultiplier
+          : 0;
+        pass1Mills.push({
+          key: item.key,
+          q: item.tile.q,
+          r: item.tile.r,
+          assetName: item.assetName,
+          processingCapacity: Math.max(0, cap),
+          efficiencyMultiplier:
+            item.locationFactor *
+            item.logisticsFactor *
+            item.districtMultiplier *
+            effectFactor *
+            (1 + item.modEff.prodPct.food),
+        });
+      } else if (item.assetName === 'building-sheep') {
+        const pastureRatio =
+          adjacencyPools.pasture.consumersByKey[item.key]?.fulfillmentRatio ?? 0;
+        preStarveFoodProd +=
+          item.stats.production.food *
+          climateFactor *
+          rawScale *
+          pastureRatio *
+          item.chainAdj.netMultiplier;
+      } else if (item.assetName === 'building-dock') {
+        const fishingRatio =
+          adjacencyPools.fishing.consumersByKey[item.key]?.fulfillmentRatio ?? 0;
+        preStarveFoodProd += item.stats.production.food * climateFactor * rawScale * fishingRatio;
+      } else {
+        preStarveFoodProd += item.stats.production.food * climateFactor * rawScale;
+      }
     }
+  }
+
+  const pass1GrainChain = solveGrainProcessingChain({
+    worldState,
+    farms: pass1Farms,
+    mills: pass1Mills,
+  });
+  for (const excess of Object.values(pass1GrainChain.excessGrainByFarmKey)) {
+    preStarveFoodProd += excess;
+  }
+  for (const procFood of Object.values(pass1GrainChain.processedFoodByMillKey)) {
+    preStarveFoodProd += procFood;
   }
 
   // 3. Evaluate food balance & starvation factor (includes 1-turn safety margin grace period)
@@ -1054,30 +1256,53 @@ export function computeTurnEconomyBreakdown(params: {
     const assign = workerAlloc.assignmentsByKey[item.key];
     const workerRatio = assign ? assign.ratio : 1;
     if (workerRatio <= 0) continue;
-    totalOreDemand += reqOre * workerRatio;
+    const fuelInfo = smelterFuelByKey[item.key];
+    if (fuelInfo && fuelInfo.fuelRatio <= 0.01) continue;
+    totalOreDemand += reqOre * workerRatio * (fuelInfo ? fuelInfo.fuelRatio : 1);
   }
 
   const availableOrePool = Math.max(0, (resources.ore || 0) + Math.floor(extractedOreThisTurn));
   const oreInputRatio =
     totalOreDemand > 0 ? Math.min(1, availableOrePool / totalOreDemand) : 1;
 
-  // 5. Final per-building production & status aggregation
-  let buildingGoldGross = 0;
-  let buildingWoodProd = 0;
-  let buildingStoneProd = 0;
-  let buildingFoodProd = 0;
-  let buildingOreProd = 0;
-  let buildingMetalProd = 0;
-  let buildingScienceProd = 0;
-  let totalOreConsumed = 0;
+  // 5. Final per-building production & status aggregation (pre-Market so Markets observe active producers)
+  const finalFarms: Array<{ key: string; q: number; r: number; rawGrainProduced: number }> = [];
+  const finalMills: Array<{
+    key: string;
+    q: number;
+    r: number;
+    assetName: 'building-mill' | 'building-watermill';
+    processingCapacity: number;
+    efficiencyMultiplier: number;
+  }> = [];
 
-  const attentionHexKeys: string[] = [];
-  const operationCounts = {
-    operating: 0,
-    partial: 0,
-    idle: 0,
-    underConstruction: underConstructionCount,
-  };
+  interface PendingBuildingOutput {
+    item: (typeof completedBuildings)[number];
+    workersAssigned: number;
+    workersRequired: number;
+    workerRatio: number;
+    inputRatio: number;
+    fuelRatio: number;
+    timberRatio: number;
+    pastureRatio: number;
+    fishingRatio: number;
+    combinedFactor: number;
+    effSeasonFood: number;
+    effWeatherFood: number;
+    effSeasonWood: number;
+    effWeatherWood: number;
+    effSeasonGold: number;
+    effWeatherGold: number;
+    effRainStoneOre: number;
+    seasonModRes: number;
+    weatherModRes: number;
+    regCommerceMult: number;
+    actualProduction: BuildingProduction;
+    inputConsumed: Partial<Record<InputResourceKey, number>>;
+    oreUsed: number;
+  }
+
+  const pendingOutputs: PendingBuildingOutput[] = [];
 
   for (const item of completedBuildings) {
     const assign = workerAlloc.assignmentsByKey[item.key];
@@ -1089,6 +1314,24 @@ export function computeTurnEconomyBreakdown(params: {
 
     const reqOreInput = item.bDef.inputConsumption?.ore ?? 0;
     const inputRatio = reqOreInput > 0 ? oreInputRatio : 1;
+    const fuelInfo = smelterFuelByKey[item.key];
+    const fuelRatio = item.assetName === 'building-smelter' ? (fuelInfo?.fuelRatio ?? 0) : 1;
+
+    let timberRatio = 1;
+    if (item.assetName === 'dirt-lumber') {
+      const neededTimber = DEFAULT_ADJACENCY_CONFIG.lumber.timberInputPerTurn * workerRatio;
+      const suppliedTimber = forestTimber.timberSuppliedByConsumerKey[item.key] ?? 0;
+      timberRatio = neededTimber > 0 ? Math.min(1, suppliedTimber / neededTimber) : 0;
+    }
+
+    const pastureRatio =
+      item.assetName === 'building-sheep'
+        ? (adjacencyPools.pasture.consumersByKey[item.key]?.fulfillmentRatio ?? 0)
+        : 1;
+    const fishingRatio =
+      item.assetName === 'building-dock'
+        ? (adjacencyPools.fishing.consumersByKey[item.key]?.fulfillmentRatio ?? 0)
+        : 1;
 
     const combinedFactor =
       item.locationFactor *
@@ -1096,6 +1339,10 @@ export function computeTurnEconomyBreakdown(params: {
       item.districtMultiplier *
       workerRatio *
       inputRatio *
+      fuelRatio *
+      timberRatio *
+      pastureRatio *
+      fishingRatio *
       starvationFactor *
       effectFactor;
 
@@ -1173,19 +1420,42 @@ export function computeTurnEconomyBreakdown(params: {
         ? 1 - 0.15 * (1 - Math.min(0.75, item.modEff.rainStormResilience))
         : 1;
 
+    const mineBase =
+      item.assetName === 'building-mine'
+        ? getEffectiveMineDepositProduction(item)
+        : { stone: item.stats.production.stone, ore: item.stats.production.ore };
+
+    const smelterFuelBonus =
+      item.assetName === 'building-smelter' && fuelInfo?.usedForestFuel
+        ? 1 + DEFAULT_ADJACENCY_CONFIG.smelter.forestFuelBonus
+        : 1;
+
+    const chainNetMult =
+      item.assetName === 'building-farm' ||
+      item.assetName === 'building-sheep' ||
+      item.assetName === 'building-mine'
+        ? item.chainAdj.netMultiplier
+        : 1;
+    const terrainMult =
+      item.assetName === 'building-farm' ? item.chainAdj.terrainMultiplier : 1;
+
     const actualProduction: BuildingProduction = {
       gold:
-        Math.round(
-          item.stats.production.gold *
-            (1 + item.modEff.prodPct.gold) *
-            mods.goldMultiplier *
-            effectGoldMult *
-            effSeasonGold *
-            effWeatherGold *
-            regCommerceMult *
-            combinedFactor
-        ) +
-        (workerRatio > 0 ? item.districtGoldFlat + item.modEff.flatGold : 0),
+        item.assetName === 'building-market'
+          ? 0 // Resolved after producers via solveLocalCommerceChain
+          : item.assetName === 'building-mill' || item.assetName === 'building-watermill'
+            ? 0 // Resolved via solveGrainProcessingChain
+            : Math.round(
+                item.stats.production.gold *
+                  (1 + item.modEff.prodPct.gold) *
+                  mods.goldMultiplier *
+                  effectGoldMult *
+                  effSeasonGold *
+                  effWeatherGold *
+                  regCommerceMult *
+                  combinedFactor *
+                  chainNetMult
+              ) + (workerRatio > 0 ? item.districtGoldFlat + item.modEff.flatGold : 0),
       wood: Math.round(
         item.stats.production.wood *
           (1 + item.modEff.prodPct.wood) *
@@ -1195,36 +1465,46 @@ export function computeTurnEconomyBreakdown(params: {
           combinedFactor
       ),
       stone: Math.round(
-        item.stats.production.stone *
+        mineBase.stone *
           (1 + item.modEff.prodPct.stone) *
           mods.stoneOreMultiplier *
           regMiningMult *
           effRainStoneOre *
-          combinedFactor
+          combinedFactor *
+          chainNetMult
       ),
-      food: Math.round(
-        item.stats.production.food *
-          (1 + item.modEff.prodPct.food + springSummerFoodMod) *
-          mods.foodMultiplier *
-          effectFoodMult *
-          effSeasonFood *
-          effWeatherFood *
-          combinedFactor
-      ),
+      food:
+        item.assetName === 'building-farm' ||
+        item.assetName === 'building-mill' ||
+        item.assetName === 'building-watermill'
+          ? 0 // Resolved via solveGrainProcessingChain
+          : Math.round(
+              item.stats.production.food *
+                (1 + item.modEff.prodPct.food + springSummerFoodMod) *
+                mods.foodMultiplier *
+                effectFoodMult *
+                effSeasonFood *
+                effWeatherFood *
+                combinedFactor *
+                chainNetMult *
+                terrainMult
+            ),
       ore: Math.round(
-        item.stats.production.ore *
+        mineBase.ore *
           (1 + item.modEff.prodPct.ore) *
           mods.stoneOreMultiplier *
           mods.oreBonusMultiplier *
           regMiningMult *
           effRainStoneOre *
-          combinedFactor
+          combinedFactor *
+          chainNetMult
       ),
       metal: Math.round(
         item.stats.production.metal *
           (1 + item.modEff.prodPct.metal) *
           regMiningMult *
-          combinedFactor
+          combinedFactor *
+          smelterFuelBonus
       ),
       science:
         Math.round(
@@ -1234,10 +1514,286 @@ export function computeTurnEconomyBreakdown(params: {
         ) + (workerRatio > 0 ? item.modEff.flatScience : 0),
     };
 
-    const oreUsed =
-      reqOreInput > 0 ? Math.round(reqOreInput * workerRatio * inputRatio * 10) / 10 : 0;
-    totalOreConsumed += oreUsed;
+    if (item.assetName === 'building-farm') {
+      const rawGrain =
+        item.stats.production.food *
+        (1 + item.modEff.prodPct.food + springSummerFoodMod) *
+        mods.foodMultiplier *
+        effectFoodMult *
+        effSeasonFood *
+        effWeatherFood *
+        combinedFactor *
+        chainNetMult *
+        terrainMult;
+      finalFarms.push({
+        key: item.key,
+        q: item.tile.q,
+        r: item.tile.r,
+        rawGrainProduced: Math.max(0, rawGrain),
+      });
+    } else if (
+      item.assetName === 'building-mill' ||
+      item.assetName === 'building-watermill'
+    ) {
+      const isWaterMill = item.assetName === 'building-watermill';
+      const hasWater = !isWaterMill || item.chainAdj.hasWaterAccess;
+      const baseCap = isWaterMill
+        ? DEFAULT_ADJACENCY_CONFIG.mill.watermillGrainCapacity
+        : DEFAULT_ADJACENCY_CONFIG.mill.millGrainCapacity;
+      const capScale = item.stats.production.food / Math.max(1, item.stats.baseDef.production.food);
+      const cap = hasWater
+        ? baseCap *
+          capScale *
+          workerRatio *
+          starvationFactor *
+          item.chainAdj.netMultiplier
+        : 0;
+      finalMills.push({
+        key: item.key,
+        q: item.tile.q,
+        r: item.tile.r,
+        assetName: item.assetName,
+        processingCapacity: Math.max(0, cap),
+        efficiencyMultiplier:
+          item.locationFactor *
+          item.logisticsFactor *
+          item.districtMultiplier *
+          effectFactor *
+          (1 + item.modEff.prodPct.food),
+      });
+    }
 
+    const oreUsed =
+      reqOreInput > 0
+        ? Math.round(reqOreInput * workerRatio * inputRatio * fuelRatio * 10) / 10
+        : 0;
+    const inputConsumed: Partial<Record<InputResourceKey, number>> = {};
+    if (reqOreInput > 0) inputConsumed.ore = Math.round(oreUsed);
+    if (item.assetName === 'dirt-lumber') {
+      const consumedTimber = forestTimber.timberSuppliedByConsumerKey[item.key] ?? 0;
+      if (consumedTimber > 0) inputConsumed.wood = Math.round(consumedTimber);
+    } else if (item.assetName === 'building-smelter' && fuelInfo) {
+      const totalFuelUsed = fuelInfo.forestFuelUsed + fuelInfo.kingdomFuelUsed;
+      if (totalFuelUsed > 0) inputConsumed.wood = Math.round(totalFuelUsed);
+    }
+
+    pendingOutputs.push({
+      item,
+      workersAssigned,
+      workersRequired,
+      workerRatio,
+      inputRatio,
+      fuelRatio,
+      timberRatio,
+      pastureRatio,
+      fishingRatio,
+      combinedFactor,
+      effSeasonFood,
+      effWeatherFood,
+      effSeasonWood,
+      effWeatherWood,
+      effSeasonGold,
+      effWeatherGold,
+      effRainStoneOre,
+      seasonModRes,
+      weatherModRes,
+      regCommerceMult,
+      actualProduction,
+      inputConsumed,
+      oreUsed,
+    });
+  }
+
+  // 5b. Resolve final Grain -> Mill transformation
+  const grainChain = solveGrainProcessingChain({
+    worldState,
+    farms: finalFarms,
+    mills: finalMills,
+  });
+
+  for (const po of pendingOutputs) {
+    if (po.item.assetName === 'building-farm') {
+      po.actualProduction.food = Math.round(
+        grainChain.excessGrainByFarmKey[po.item.key] ?? 0
+      );
+    } else if (
+      po.item.assetName === 'building-mill' ||
+      po.item.assetName === 'building-watermill'
+    ) {
+      const processedGrain = grainChain.grainProcessedByMillKey[po.item.key] ?? 0;
+      po.actualProduction.food = grainChain.processedFoodByMillKey[po.item.key] ?? 0;
+      po.actualProduction.gold =
+        (grainChain.processedGoldByMillKey[po.item.key] ?? 0) +
+        (processedGrain > 0 && po.workerRatio > 0
+          ? po.item.districtGoldFlat + po.item.modEff.flatGold
+          : 0);
+      if (processedGrain > 0) {
+        po.inputConsumed.food = Math.round(processedGrain);
+      }
+    }
+  }
+
+  // 5c. Resolve local Commerce chain for Markets (never produces resources, shares demand & values variety)
+  const marketInputs: Array<{
+    key: string;
+    q: number;
+    r: number;
+    capacityWeight: number;
+    workerRatio: number;
+  }> = [];
+  const activeProducersByKey: Record<
+    string,
+    { assetName: string; q: number; r: number; isActive: boolean }
+  > = {};
+  const housingDemandByKey: Record<
+    string,
+    { assetName: string; q: number; r: number; weight: number }
+  > = {};
+
+  for (const po of pendingOutputs) {
+    const { item, actualProduction } = po;
+    if (item.assetName === 'building-market') {
+      marketInputs.push({
+        key: item.key,
+        q: item.tile.q,
+        r: item.tile.r,
+        capacityWeight: item.level,
+        workerRatio: po.workerRatio,
+      });
+    } else {
+      const hasOutput =
+        actualProduction.food > 0 ||
+        actualProduction.wood > 0 ||
+        actualProduction.stone > 0 ||
+        actualProduction.ore > 0 ||
+        actualProduction.metal > 0 ||
+        actualProduction.gold > 0 ||
+        (item.assetName === 'building-farm' &&
+          (grainChain.grainConsumedByFarmKey[item.key] ?? 0) > 0);
+      activeProducersByKey[item.key] = {
+        assetName: item.assetName,
+        q: item.tile.q,
+        r: item.tile.r,
+        isActive: hasOutput,
+      };
+    }
+
+    if (item.assetName === 'building-village') {
+      housingDemandByKey[item.key] = {
+        assetName: item.assetName,
+        q: item.tile.q,
+        r: item.tile.r,
+        weight: DEFAULT_ADJACENCY_CONFIG.commerce.villageDemandWeight * (1 + (item.level - 1) * 0.3),
+      };
+    } else if (
+      item.assetName === 'building-castle' ||
+      item.assetName === 'unit-mansion'
+    ) {
+      housingDemandByKey[item.key] = {
+        assetName: item.assetName,
+        q: item.tile.q,
+        r: item.tile.r,
+        weight: 0.75,
+      };
+    } else if (
+      item.assetName === 'building-house' ||
+      item.assetName === 'building-cabin'
+    ) {
+      housingDemandByKey[item.key] = {
+        assetName: item.assetName,
+        q: item.tile.q,
+        r: item.tile.r,
+        weight: DEFAULT_ADJACENCY_CONFIG.commerce.housingDemandWeight,
+      };
+    }
+  }
+
+  const commerceChain = solveLocalCommerceChain({
+    worldState,
+    markets: marketInputs,
+    activeProducersByKey,
+    housingDemandByKey,
+  });
+
+  for (const po of pendingOutputs) {
+    if (po.item.assetName === 'building-market') {
+      const marketRep = commerceChain.marketsByKey[po.item.key];
+      const baseCommerceGold = marketRep?.commercialGold ?? 0;
+      po.actualProduction = {
+        gold:
+          po.workerRatio > 0
+            ? Math.round(
+                baseCommerceGold *
+                  (1 + po.item.modEff.prodPct.gold) *
+                  mods.goldMultiplier *
+                  effectGoldMult *
+                  po.effSeasonGold *
+                  po.effWeatherGold *
+                  po.regCommerceMult *
+                  po.item.logisticsFactor *
+                  po.item.districtMultiplier *
+                  starvationFactor *
+                  effectFactor
+              ) +
+              po.item.districtGoldFlat +
+              po.item.modEff.flatGold
+            : 0,
+        wood: 0,
+        stone: 0,
+        food: 0,
+        ore: 0,
+        metal: 0,
+        science: 0,
+      };
+    }
+  }
+
+  // 5d. Aggregate final building production, statuses & reports
+  let buildingGoldGross = 0;
+  let buildingWoodProd = 0;
+  let buildingStoneProd = 0;
+  let buildingFoodProd = 0;
+  let buildingOreProd = 0;
+  let buildingMetalProd = 0;
+  let buildingScienceProd = 0;
+  let totalOreConsumed = 0;
+
+  const attentionHexKeys: string[] = [];
+  const operationCounts = {
+    operating: 0,
+    partial: 0,
+    idle: 0,
+    underConstruction: underConstructionCount,
+  };
+
+  for (const po of pendingOutputs) {
+    const {
+      item,
+      workersAssigned,
+      workersRequired,
+      workerRatio,
+      inputRatio,
+      fuelRatio,
+      timberRatio,
+      pastureRatio,
+      fishingRatio,
+      combinedFactor,
+      effSeasonFood,
+      effWeatherFood,
+      effSeasonWood,
+      effWeatherWood,
+      effSeasonGold,
+      effWeatherGold,
+      effRainStoneOre,
+      seasonModRes,
+      weatherModRes,
+      actualProduction,
+      inputConsumed,
+      oreUsed,
+    } = po;
+    const reqOreInput = item.bDef.inputConsumption?.ore ?? 0;
+
+    totalOreConsumed += oreUsed;
     buildingGoldGross += actualProduction.gold;
     buildingWoodProd += actualProduction.wood;
     buildingStoneProd += actualProduction.stone;
@@ -1294,6 +1850,36 @@ export function computeTurnEconomyBreakdown(params: {
       status = 'idle';
       statusLabelPt = 'Parado';
       reasonPt = 'Falta de minério para fundir metal';
+    } else if (item.assetName === 'building-smelter' && fuelRatio <= 0.01) {
+      status = 'idle';
+      statusLabelPt = 'Parado';
+      reasonPt = 'Falta de combustível (madeira) para fundição';
+    } else if (item.assetName === 'dirt-lumber' && timberRatio <= 0.01) {
+      status = 'idle';
+      statusLabelPt = 'Parado';
+      reasonPt = 'Floresta esgotada: sem madeira disponível';
+    } else if (item.assetName === 'building-sheep' && pastureRatio <= 0.01) {
+      status = 'idle';
+      statusLabelPt = 'Parado';
+      reasonPt = 'Sem pasto em Planície adjacente';
+    } else if (item.assetName === 'building-dock' && fishingRatio <= 0.01) {
+      status = 'idle';
+      statusLabelPt = 'Parado';
+      reasonPt = 'Sem capacidade de pesca disponível';
+    } else if (
+      item.assetName === 'building-watermill' &&
+      !item.chainAdj.hasWaterAccess
+    ) {
+      status = 'idle';
+      statusLabelPt = 'Parado';
+      reasonPt = 'Sem Água adjacente para mover a roda';
+    } else if (
+      (item.assetName === 'building-mill' || item.assetName === 'building-watermill') &&
+      (grainChain.grainProcessedByMillKey[item.key] ?? 0) <= 0.01
+    ) {
+      status = 'idle';
+      statusLabelPt = 'Parado';
+      reasonPt = 'Sem Fazenda adjacente para fornecer grão';
     } else if (workersRequired > 0 && workerRatio < 1) {
       status = 'partial';
       statusLabelPt = 'Parcial';
@@ -1302,6 +1888,22 @@ export function computeTurnEconomyBreakdown(params: {
       status = 'partial';
       statusLabelPt = 'Parcial';
       reasonPt = 'Suprimento de minério insuficiente';
+    } else if (item.assetName === 'building-smelter' && fuelRatio < 0.99) {
+      status = 'partial';
+      statusLabelPt = 'Parcial';
+      reasonPt = 'Combustível de madeira insuficiente';
+    } else if (item.assetName === 'dirt-lumber' && timberRatio < 0.99) {
+      status = 'partial';
+      statusLabelPt = 'Parcial';
+      reasonPt = 'Estoque de madeira da floresta quase esgotado';
+    } else if (item.assetName === 'building-sheep' && pastureRatio < 0.99) {
+      status = 'partial';
+      statusLabelPt = 'Parcial';
+      reasonPt = 'Pasto compartilhado insuficiente';
+    } else if (item.assetName === 'building-dock' && fishingRatio < 0.99) {
+      status = 'partial';
+      statusLabelPt = 'Parcial';
+      reasonPt = 'Pesca compartilhada ou poluída';
     } else if (starvationFactor < 1) {
       status = 'partial';
       statusLabelPt = 'Parcial';
@@ -1361,7 +1963,7 @@ export function computeTurnEconomyBreakdown(params: {
       effectiveStorageFood: item.modEff.storageFoodBonus,
       effectiveDefenseBonus: item.stats.defenseBonus + item.modEff.defenseBonus,
       effectiveMaintenanceGold: Math.max(0, item.stats.maintenanceGold + item.modEff.maintenanceDelta),
-      inputConsumed: reqOreInput > 0 ? { ore: Math.round(oreUsed) } : {},
+      inputConsumed,
     };
   }
 
@@ -1388,8 +1990,10 @@ export function computeTurnEconomyBreakdown(params: {
       seasonUpkeepMult
   );
 
+  const roundedKingdomWoodFuel = Math.round(totalKingdomWoodFuelConsumed);
   const finalWood =
-    Math.round((baseWoodProd * seasonWoodMult * weatherWoodMult + buildingWoodProd) * mods.woodMultiplier);
+    Math.round((baseWoodProd * seasonWoodMult * weatherWoodMult + buildingWoodProd) * mods.woodMultiplier) -
+    roundedKingdomWoodFuel;
   const finalStone =
     Math.round(baseStoneProd * mods.stoneOreMultiplier) + buildingStoneProd;
   const finalFoodProd =
@@ -1492,6 +2096,10 @@ export function computeTurnEconomyBreakdown(params: {
     roadConnectivity,
     regionalSummary,
     adjacencyPools,
+    grainChain,
+    commerceChain,
+    forestWoodConsumptionsByKey: forestTimber.forestWoodConsumedByKey,
+    kingdomWoodFuelConsumed: roundedKingdomWoodFuel,
     buildingsByKey,
     attentionHexKeys,
     season: season ?? null,

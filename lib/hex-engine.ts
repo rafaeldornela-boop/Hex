@@ -1,12 +1,16 @@
 import type { HexAssetEntry } from './godot-docs';
 import {
+  DEFAULT_FOREST_DEPLETION_THRESHOLD,
   DEFAULT_FOREST_WOOD_STOCK,
   DEPLETED_FOREST_ASSET_NAME,
   TERRAIN_METADATA,
   canBuildStructureOnTerrain,
   getHexTerrainAndResource,
+  getMountainDepositType,
   isNaturalTerrainAssetName,
+  isValidMountainDepositType,
   isValidRareFeatureType,
+  type MountainDepositType,
   type RareFeatureType,
   type ResourceType,
   type TerrainType,
@@ -43,6 +47,8 @@ export interface PlacedHex {
   terrainType?: TerrainType;
   resourceType?: ResourceType;
   resourceAmount?: number;
+  /** Differentiated mineral deposit on mountain hexes ('ore' | 'stone' | 'mixed') */
+  mountainDeposit?: MountainDepositType;
   /** Finite remaining wood stock on forest tiles */
   woodStock?: number;
   /** True when a forest reached wood depletion threshold and transitioned to dirt-lumber */
@@ -217,6 +223,11 @@ export function placeHexInState(
   const cost =
     !previous || previous.structureIndex !== structureIndex ? asset.price : 0;
 
+  const resolvedMountainDeposit =
+    terrainInfo.terrainType === 'mountain'
+      ? (previous?.mountainDeposit ?? getMountainDepositType(q, r, previous, assets))
+      : undefined;
+
   const nextHexes: Record<string, PlacedHex> = {
     ...state.hexes,
     [key]: {
@@ -228,6 +239,7 @@ export function placeHexInState(
       terrainType: terrainInfo.terrainType,
       resourceType: terrainInfo.resourceType,
       resourceAmount: terrainInfo.resourceAmount,
+      ...(resolvedMountainDeposit ? { mountainDeposit: resolvedMountainDeposit } : {}),
       ...(typeof previous?.woodStock === 'number' ? { woodStock: previous.woodStock } : {}),
       ...(previous?.forestDepleted ? { forestDepleted: true } : {}),
       ...(previous?.rareFeature ? { rareFeature: previous.rareFeature } : {}),
@@ -277,10 +289,14 @@ export function demolishHexInState(
   }
 
   const terrainInfo = getHexTerrainAndResource(q, r, existing);
-  const baseAssetName =
-    existing.forestDepleted && terrainInfo.terrainType === 'forest'
-      ? DEPLETED_FOREST_ASSET_NAME
-      : TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
+  const isDepletedForest =
+    terrainInfo.terrainType === 'forest' &&
+    (existing.forestDepleted === true ||
+      (typeof existing.woodStock === 'number' &&
+        existing.woodStock <= DEFAULT_FOREST_DEPLETION_THRESHOLD));
+  const baseAssetName = isDepletedForest
+    ? DEPLETED_FOREST_ASSET_NAME
+    : TERRAIN_METADATA[terrainInfo.terrainType].defaultAssetName;
   const baseAssetIndex = assets.findIndex((a) => a.name === baseAssetName);
   const nextStructureIndex =
     baseAssetIndex >= 0 ? baseAssetIndex : existing.structureIndex;
@@ -298,6 +314,7 @@ export function demolishHexInState(
           terrainType: terrainInfo.terrainType,
           resourceType: terrainInfo.resourceType,
           resourceAmount: terrainInfo.resourceAmount,
+          ...(isDepletedForest ? { forestDepleted: true } : {}),
           level: undefined,
           modules: undefined,
           ...(existing.meta
@@ -384,6 +401,9 @@ export function deserializeWorldState(
             if (cleanModules.length > 0) {
               tile.modules = cleanModules;
             }
+          }
+          if (isValidMountainDepositType((item as PlacedHex).mountainDeposit)) {
+            tile.mountainDeposit = (item as PlacedHex).mountainDeposit;
           }
           const rawWoodStock = (item as PlacedHex).woodStock;
           if (typeof rawWoodStock === 'number' && Number.isFinite(rawWoodStock)) {

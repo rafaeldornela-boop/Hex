@@ -14,6 +14,7 @@ import {
   DEFAULT_FOREST_WOOD_STOCK,
   TERRAIN_METADATA,
   getResourceForTerrain,
+  type MountainDepositType,
   type RareFeatureType,
   type TerrainType,
 } from './terrain-engine';
@@ -571,6 +572,17 @@ export function generateProceduralKingdomWorld(
         ? DEFAULT_ROTATION_DEG
         : ((Math.floor(rng() * 6) * 60 + DEFAULT_ROTATION_DEG) % 360);
 
+    const mountainDeposit: MountainDepositType | undefined =
+      cell.terrainType === 'mountain'
+        ? cell.rareFeature === 'pure_iron' ||
+          cell.rareFeature === 'gold_vein' ||
+          assetName === 'stone-mountain'
+          ? 'ore'
+          : assetName === 'stone-rocks'
+            ? 'stone'
+            : 'mixed'
+        : undefined;
+
     hexes[hexKey(cell.q, cell.r)] = {
       q: cell.q,
       r: cell.r,
@@ -580,6 +592,7 @@ export function generateProceduralKingdomWorld(
       terrainType: cell.terrainType,
       resourceType: resInfo.resourceType,
       resourceAmount: resInfo.resourceAmount,
+      ...(mountainDeposit ? { mountainDeposit } : {}),
       ...(cell.terrainType === 'forest'
         ? { woodStock: DEFAULT_FOREST_WOOD_STOCK }
         : {}),
