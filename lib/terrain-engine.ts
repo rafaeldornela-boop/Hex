@@ -91,6 +91,20 @@ export const NATURAL_TERRAIN_ASSET_NAMES = new Set<string>([
   'water',
   'water-island',
   'water-rocks',
+  'river-start',
+  'river-end',
+  'river-straight',
+  'river-corner',
+  'river-corner-sharp',
+  'river-intersectionA',
+  'river-intersectionB',
+  'river-intersectionC',
+  'river-intersectionD',
+  'river-intersectionE',
+  'river-intersectionF',
+  'river-intersectionG',
+  'river-intersectionH',
+  'river-crossing',
 ]);
 
 export function isNaturalTerrainAssetName(assetName: string): boolean {
