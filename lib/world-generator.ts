@@ -21,6 +21,7 @@ import {
 import { AXIAL_DIRECTIONS } from './territory-engine';
 import { createInitialFactions, type FactionState } from './faction-engine';
 import { UNIT_CATALOG, type UnitEntity } from './military-engine';
+import { selectRiverPiece, type RiverPieceName } from './river-pieces';
 
 export const DEFAULT_WORLD_SEED = 42026;
 export const WORLD_COLS = 32;
@@ -135,6 +136,7 @@ interface InternalCell {
   ridge: number;
   terrainType: TerrainType;
   riverTile: boolean;
+  riverRole?: 'source' | 'mouth' | 'channel';
   rareFeature: RareFeatureType;
 }
 
@@ -157,6 +159,9 @@ function pickTerrainAssetName(
 ): string {
   switch (terrainType) {
     case 'plains':
+      if (nearCoast && elevation < 0.38) {
+        return roll > 0.85 ? 'sand-rocks' : 'sand';
+      }
       return elevation > 0.56 || roll > 0.82 ? 'grass-hill' : 'grass';
     case 'forest':
       return 'grass-forest';
@@ -308,35 +313,128 @@ export function generateProceduralKingdomWorld(
     }
   }
 
-  for (const source of chosenSources) {
-    let curr: InternalCell | undefined = source;
-    const visited = new Set<string>();
-    for (let step = 0; step < 34 && curr; step++) {
-      const k = hexKey(curr.q, curr.r);
-      visited.add(k);
-      curr.terrainType = 'water';
-      curr.riverTile = true;
+  const riverConnections = new Map<string, Set<number>>();
+  const getConnections = (c: InternalCell): Set<number> => {
+    const k = hexKey(c.q, c.r);
+    let s = riverConnections.get(k);
+    if (!s) {
+      s = new Set<number>();
+      riverConnections.set(k, s);
+    }
+    return s;
+  };
 
-      // Collect unvisited neighbors and bias smoothly downhill toward lowest elevation
-      const neighbors: InternalCell[] = [];
-      for (const dir of AXIAL_DIRECTIONS) {
-        const n = cells.get(hexKey(curr.q + dir.q, curr.r + dir.r));
+  const connectRiverCells = (c1: InternalCell, c2: InternalCell, dirFromC1ToC2: number) => {
+    getConnections(c1).add(dirFromC1ToC2);
+    getConnections(c2).add((dirFromC1ToC2 + 3) % 6);
+  };
+
+  for (const source of chosenSources) {
+    let curr: InternalCell = source;
+    curr.riverTile = true;
+    curr.terrainType = 'water';
+    curr.riverRole = 'source';
+
+    const visited = new Set<string>();
+    visited.add(hexKey(curr.q, curr.r));
+    let reachedWater = false;
+
+    for (let step = 0; step < 40 && !reachedWater; step++) {
+      const neighborsWithDir: Array<{ cell: InternalCell; dir: number }> = [];
+      for (let dir = 0; dir < AXIAL_DIRECTIONS.length; dir++) {
+        const offset = AXIAL_DIRECTIONS[dir];
+        const n = cells.get(hexKey(curr.q + offset.q, curr.r + offset.r));
         if (n && !visited.has(hexKey(n.q, n.r))) {
-          neighbors.push(n);
+          neighborsWithDir.push({ cell: n, dir });
         }
       }
-      if (neighbors.length === 0) break;
 
-      // Stop if river reached open sea (water tile that wasn't just carved by this river)
-      const seaNeighbor = neighbors.find((n) => n.terrainType === 'water' && !n.riverTile);
-      if (seaNeighbor && step >= 4) break;
+      if (neighborsWithDir.length === 0) break;
 
-      neighbors.sort((a, b) => {
-        const jitterA = (hash2d(a.col, a.row, seed + step) - 0.5) * 0.04;
-        const jitterB = (hash2d(b.col, b.row, seed + step) - 0.5) * 0.04;
-        return a.elevation + jitterA - (b.elevation + jitterB);
+      // Check if any neighbor is natural open sea (water and not already a river tile)
+      const seaOption = neighborsWithDir.find(
+        (opt) => opt.cell.terrainType === 'water' && !opt.cell.riverTile
+      );
+      if (seaOption && step >= 3) {
+        connectRiverCells(curr, seaOption.cell, seaOption.dir);
+        seaOption.cell.riverTile = true;
+        seaOption.cell.riverRole = 'mouth';
+        reachedWater = true;
+        break;
+      }
+
+      // Check if any neighbor is an existing river tile from an earlier river (confluence)
+      const riverOption = neighborsWithDir.find((opt) => opt.cell.riverTile);
+      if (riverOption && step >= 2) {
+        connectRiverCells(curr, riverOption.cell, riverOption.dir);
+        reachedWater = true;
+        break;
+      }
+
+      // Sort remaining neighbors by elevation (downhill) + slight jitter
+      neighborsWithDir.sort((a, b) => {
+        const jitterA = (hash2d(a.cell.col, a.cell.row, seed + step * 7) - 0.5) * 0.04;
+        const jitterB = (hash2d(b.cell.col, b.cell.row, seed + step * 7) - 0.5) * 0.04;
+        return a.cell.elevation + jitterA - (b.cell.elevation + jitterB);
       });
-      curr = neighbors[0];
+
+      const next = neighborsWithDir[0];
+      visited.add(hexKey(next.cell.q, next.cell.r));
+      next.cell.riverTile = true;
+      next.cell.terrainType = 'water';
+      if (!next.cell.riverRole) next.cell.riverRole = 'channel';
+
+      connectRiverCells(curr, next.cell, next.dir);
+      curr = next.cell;
+    }
+
+    // Guaranteed mouth: if river did not reach sea or confluence, find nearest sea cell via BFS
+    if (!reachedWater) {
+      const queue: InternalCell[] = [curr];
+      const parent = new Map<string, { prev: InternalCell; dir: number }>();
+      const bfsVisited = new Set<string>([hexKey(curr.q, curr.r)]);
+      let seaTarget: InternalCell | null = null;
+
+      while (queue.length > 0 && !seaTarget) {
+        const u = queue.shift()!;
+        for (let dir = 0; dir < AXIAL_DIRECTIONS.length; dir++) {
+          const offset = AXIAL_DIRECTIONS[dir];
+          const n = cells.get(hexKey(u.q + offset.q, u.r + offset.r));
+          if (!n) continue;
+          const nk = hexKey(n.q, n.r);
+          if (bfsVisited.has(nk)) continue;
+          bfsVisited.add(nk);
+
+          parent.set(nk, { prev: u, dir });
+
+          if (n.terrainType === 'water' && !n.riverTile) {
+            seaTarget = n;
+            break;
+          }
+          queue.push(n);
+        }
+      }
+
+      if (seaTarget) {
+        const path: Array<{ from: InternalCell; to: InternalCell; dir: number }> = [];
+        let walk: InternalCell = seaTarget;
+        while (walk !== curr) {
+          const stepInfo = parent.get(hexKey(walk.q, walk.r))!;
+          path.unshift({ from: stepInfo.prev, to: walk, dir: stepInfo.dir });
+          walk = stepInfo.prev;
+        }
+
+        for (const segment of path) {
+          segment.to.riverTile = true;
+          segment.to.terrainType = 'water';
+          if (segment.to === seaTarget) {
+            segment.to.riverRole = 'mouth';
+          } else if (!segment.to.riverRole) {
+            segment.to.riverRole = 'channel';
+          }
+          connectRiverCells(segment.from, segment.to, segment.dir);
+        }
+      }
     }
   }
 
@@ -560,17 +658,30 @@ export function generateProceduralKingdomWorld(
       return n && n.terrainType !== 'water';
     });
     const roll = hash2d(cell.col, cell.row, seed + 444);
-    const assetName = pickTerrainAssetName(
-      cell.terrainType,
-      cell.elevation,
-      roll,
-      nearCoast
-    );
+    let assetName: string;
+    let orientation: number;
+
+    if (cell.riverTile) {
+      const conns = riverConnections.get(hexKey(cell.q, cell.r));
+      const dirs = conns ? Array.from(conns) : [];
+      const role = cell.riverRole ?? 'channel';
+      const picked = selectRiverPiece(dirs, role);
+      assetName = picked.pieceName;
+      orientation = picked.orientation;
+    } else {
+      assetName = pickTerrainAssetName(
+        cell.terrainType,
+        cell.elevation,
+        roll,
+        nearCoast
+      );
+      orientation =
+        cell.terrainType === 'water'
+          ? DEFAULT_ROTATION_DEG
+          : ((Math.floor(rng() * 6) * 60 + DEFAULT_ROTATION_DEG) % 360);
+    }
+
     const resInfo = getResourceForTerrain(cell.terrainType);
-    const orientation =
-      cell.terrainType === 'water'
-        ? DEFAULT_ROTATION_DEG
-        : ((Math.floor(rng() * 6) * 60 + DEFAULT_ROTATION_DEG) % 360);
 
     const mountainDeposit: MountainDepositType | undefined =
       cell.terrainType === 'mountain'

@@ -1227,7 +1227,6 @@ export class HexSceneController {
     );
     this.penaltyAdjacencyOverlayMesh.frustumCulled = false;
     this.scene.add(this.penaltyAdjacencyOverlayMesh);
-
     // Batched seasonal detail InstancedMeshes (spring blossoms, 4-season farm crops, winter northern ice)
     const flowerGeo = new THREE.DodecahedronGeometry(0.026 * HEX_WORLD_SCALE, 0);
     const flowerMat = new THREE.MeshStandardMaterial({
@@ -4114,7 +4113,6 @@ export class HexSceneController {
     oldPenGeo.dispose();
     this.wakeRenderLoop();
   }
-
   public syncRoadsAndCities(params: {
     roads: RoadMap;
     cities: CityEntity[];
