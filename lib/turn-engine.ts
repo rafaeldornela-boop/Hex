@@ -57,9 +57,13 @@ export interface TurnAdvanceResult {
   completedBuildings: string[];
   completedUpgrades: string[];
   completedModules: string[];
+  completedBuildingKeys?: string[];
+  completedUpgradeKeys?: string[];
+  completedModuleKeys?: string[];
   incorporatedKeys: string[];
   foundedCities: string[];
   leveledUpCities: string[];
+  leveledUpCityIds?: string[];
   seasonChangedToPt: string | null;
   newEvent: ActiveKingdomEvent | null;
   conqueredByAiKeys: string[];
@@ -109,6 +113,9 @@ export function processKingdomTurn(
   const completedBuildings: string[] = [];
   const completedUpgrades: string[] = [];
   const completedModules: string[] = [];
+  const completedBuildingKeys: string[] = [];
+  const completedUpgradeKeys: string[] = [];
+  const completedModuleKeys: string[] = [];
   const nextConstructions: ActiveConstruction[] = [];
   const nextHexes = { ...working.worldState.hexes };
   let hexesMutated = false;
@@ -116,8 +123,8 @@ export function processKingdomTurn(
   for (const c of working.constructions) {
     const rem = c.turnsRemaining - 1;
     if (rem <= 0) {
+      const key = hexKey(c.q, c.r);
       if (c.kind === 'upgrade' && typeof c.targetLevel === 'number') {
-        const key = hexKey(c.q, c.r);
         const existing = nextHexes[key];
         if (existing) {
           nextHexes[key] = {
@@ -132,12 +139,13 @@ export function processKingdomTurn(
         const label = `${getBuildingDefinition(c.assetName).labelPt} Nv.${toRomanLevel(c.targetLevel)}`;
         completedUpgrades.push(label);
         completedBuildings.push(label);
+        completedUpgradeKeys.push(key);
+        completedBuildingKeys.push(key);
       } else if (
         c.kind === 'module' &&
         c.moduleId &&
         isValidBuildingModuleId(c.moduleId)
       ) {
-        const key = hexKey(c.q, c.r);
         const existing = nextHexes[key];
         if (existing) {
           const prevModules = Array.isArray(existing.modules)
@@ -160,8 +168,11 @@ export function processKingdomTurn(
         const modLabel = `${BUILDING_MODULES[c.moduleId].labelPt} (${getBuildingDefinition(c.assetName).labelPt})`;
         completedModules.push(modLabel);
         completedBuildings.push(modLabel);
+        completedModuleKeys.push(key);
+        completedBuildingKeys.push(key);
       } else {
         completedBuildings.push(getBuildingDefinition(c.assetName).labelPt);
+        completedBuildingKeys.push(key);
       }
     } else {
       nextConstructions.push({ ...c, turnsRemaining: rem });
@@ -283,6 +294,11 @@ export function processKingdomTurn(
 
   // Step 2 & 3 & 4: Compute production, input conversions, food balance, road upkeep, and seasonal/tier effects
   const tradePactBonus = getTradePactBonusGold(working.factions);
+  const damagedHexPenaltiesByKey: Record<string, number> = {};
+  for (const [k, rec] of Object.entries(working.damagedHexes ?? {})) {
+    const pct = Math.max(0, Math.min(65, rec?.productionPenaltyPct ?? 35));
+    if (pct > 0) damagedHexPenaltiesByKey[k] = pct;
+  }
   const econ = computeTurnEconomyBreakdown({
     worldState: worldAfterExpansions,
     resources: working.resources,
@@ -306,6 +322,7 @@ export function processKingdomTurn(
     weather: weatherStep.weather,
     upgradingConstructionsByKey: upgradingByKeyAfterBuild,
     moduleConstructionsByKey: moduleByKeyAfterBuild,
+    damagedHexPenaltiesByKey,
   });
 
   // Step 4: Treasury update
@@ -376,6 +393,9 @@ export function processKingdomTurn(
     assets,
     turn: nextTurn,
     underConstructionKeys: underKeysAfterBuild,
+    playerTechs: working.research.unlocked,
+    damagedHexes: working.damagedHexes,
+    roads: workingRoads,
   });
 
   // Strip player roads, active constructions, & lost city centers if rival factions captured tiles
@@ -404,6 +424,7 @@ export function processKingdomTurn(
   const leveledUpCities = citySync.leveledUpCities.map(
     (entry) => `${entry.city.name} (${CITY_STAGE_META[entry.toLevel].labelPt})`
   );
+  const leveledUpCityIds = citySync.leveledUpCities.map((entry) => entry.city.id);
 
   const playerBorderHex = Object.values(aiResult.worldState.hexes).find(
     (t) => t.owner === 'player'
@@ -532,9 +553,13 @@ export function processKingdomTurn(
     completedBuildings,
     completedUpgrades,
     completedModules,
+    completedBuildingKeys,
+    completedUpgradeKeys,
+    completedModuleKeys,
     incorporatedKeys,
     foundedCities,
     leveledUpCities,
+    leveledUpCityIds,
     seasonChangedToPt,
     newEvent,
     conqueredByAiKeys: aiResult.conqueredKeys,

@@ -477,22 +477,18 @@ const TERRAIN_WIND_UNIFORMS = {
 };
 
 function createSeasonalTerrainMaterialVariant(
-  mat: THREE.Material | THREE.Material[]
+  mat: THREE.Material | THREE.Material[],
+  enableCanopyWind = true
 ): THREE.Material | THREE.Material[] {
   const cloneOne = (m: THREE.Material): THREE.Material => {
     const cloned = m.clone();
-    cloned.customProgramCacheKey = () => 'hex-seasonal-terrain-v2-wind';
+    cloned.customProgramCacheKey = () =>
+      enableCanopyWind ? 'hex-seasonal-terrain-v2-wind' : 'hex-seasonal-terrain-v2-static';
     cloned.onBeforeCompile = (shader) => {
       shader.uniforms.uWindTime = TERRAIN_WIND_UNIFORMS.uWindTime;
       shader.uniforms.uWindAmp = TERRAIN_WIND_UNIFORMS.uWindAmp;
-      shader.vertexShader =
-        `attribute vec4 aSeasonData;\nuniform float uWindTime;\nuniform float uWindAmp;\nvarying vec3 vLocalSeasonPos;\nvarying vec4 vSeasonData;\n` +
-        shader.vertexShader.replace(
-          '#include <begin_vertex>',
-          `#include <begin_vertex>
-          vLocalSeasonPos = position;
-          vSeasonData = aSeasonData;
-          if (position.y > 0.24 && uWindAmp > 0.001) {
+      const windSnippet = enableCanopyWind
+        ? `          if (position.y > 0.24 && uWindAmp > 0.001) {
             float swayMask = clamp((position.y - 0.24) * 2.2, 0.0, 1.0);
             float phase = position.x * 3.1 + position.z * 2.7;
             #ifdef USE_INSTANCING
@@ -502,19 +498,9 @@ function createSeasonalTerrainMaterialVariant(
             transformed.x += gust * 0.015 * swayMask * uWindAmp;
             transformed.z += cos(uWindTime * 1.35 + phase) * 0.01 * swayMask * uWindAmp;
           }\n`
-        );
-      shader.fragmentShader =
-        `varying vec3 vLocalSeasonPos;\nvarying vec4 vSeasonData;\n` +
-        shader.fragmentShader.replace(
-          '#include <color_fragment>',
-          `#include <color_fragment>
-          {
-            float sShift = vSeasonData.x;
-            float sSnow = vSeasonData.y;
-            float sWetIce = vSeasonData.z;
-            float sDecid = vSeasonData.w;
-            float py = vLocalSeasonPos.y;
-            bool isCanopy = (py > 0.24 && py < 0.72);
+        : '';
+      const canopyTintSnippet = enableCanopyWind
+        ? `            bool isCanopy = (py > 0.24 && py < 0.72);
             if (isCanopy && sShift > 0.95) {
               float autT = clamp((sShift - 0.95) / 1.05, 0.0, 1.0);
               if (sDecid > 0.5) {
@@ -534,7 +520,29 @@ function createSeasonalTerrainMaterialVariant(
               } else {
                 diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.13, 0.31, 0.22), winT * 0.42);
               }
-            }
+            }`
+        : '';
+      shader.vertexShader =
+        `attribute vec4 aSeasonData;\nuniform float uWindTime;\nuniform float uWindAmp;\nvarying vec3 vLocalSeasonPos;\nvarying vec4 vSeasonData;\n` +
+        shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+          vLocalSeasonPos = position;
+          vSeasonData = aSeasonData;
+${windSnippet}`
+        );
+      shader.fragmentShader =
+        `varying vec3 vLocalSeasonPos;\nvarying vec4 vSeasonData;\n` +
+        shader.fragmentShader.replace(
+          '#include <color_fragment>',
+          `#include <color_fragment>
+          {
+            float sShift = vSeasonData.x;
+            float sSnow = vSeasonData.y;
+            float sWetIce = vSeasonData.z;
+            float sDecid = vSeasonData.w;
+            float py = vLocalSeasonPos.y;
+${canopyTintSnippet}
             if (py <= 0.22 && sWetIce > 0.1) {
               diffuseColor.rgb *= mix(1.0, 0.85, clamp(sWetIce, 0.0, 0.8));
             }
@@ -833,9 +841,11 @@ export class HexSceneController {
 
     // Studio RoomEnvironment for subtle PBR sheen without washing out pastel colormaps
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.envRenderTarget = pmrem.fromScene(new RoomEnvironment(), 0.04);
+    const roomEnv = new RoomEnvironment();
+    this.envRenderTarget = pmrem.fromScene(roomEnv, 0.04);
     this.scene.environment = this.envRenderTarget.texture;
     this.scene.environmentIntensity = 0.32;
+    roomEnv.dispose();
     pmrem.dispose();
 
     // Camera (close enough for readable hex details while framing regional context)
@@ -3718,7 +3728,7 @@ export class HexSceneController {
     const cacheKey = `${assetName}:${subIdx}`;
     let cached = this.seasonalTerrainMats.get(cacheKey);
     if (!cached) {
-      cached = createSeasonalTerrainMaterialVariant(baseMat);
+      cached = createSeasonalTerrainMaterialVariant(baseMat, assetName === 'grass-forest');
       this.seasonalTerrainMats.set(cacheKey, cached);
     }
     return cached;
@@ -5812,9 +5822,36 @@ export class HexSceneController {
     materials.add(this.upgradeEmberMat);
     materials.add(this.fertileOverlayMat);
 
+    const textures = new Set<THREE.Texture>();
+    const envTex = this.envRenderTarget?.texture;
+    const textureKeys = [
+      'map',
+      'alphaMap',
+      'aoMap',
+      'bumpMap',
+      'displacementMap',
+      'emissiveMap',
+      'envMap',
+      'lightMap',
+      'metalnessMap',
+      'normalMap',
+      'roughnessMap',
+      'specularMap',
+    ] as const;
+
     geometries.add(this.conquestRingGeo);
     geometries.forEach((g) => g.dispose());
-    materials.forEach((m) => m.dispose());
+    materials.forEach((m) => {
+      const matRec = m as unknown as Record<string, unknown>;
+      for (const key of textureKeys) {
+        const val = matRec[key];
+        if (val instanceof THREE.Texture && val !== envTex && val !== this.waterTexture) {
+          textures.add(val);
+        }
+      }
+      m.dispose();
+    });
+    textures.forEach((t) => t.dispose());
 
     while (this.terrainInstancesGroup.children.length > 0) {
       const child = this.terrainInstancesGroup.children[0] as THREE.InstancedMesh;
@@ -5830,6 +5867,7 @@ export class HexSceneController {
     this.smokeMesh.dispose();
     this.forgeLightsMesh.dispose();
     this.bannersMesh.dispose();
+    this.roadLanternsMesh.dispose();
     this.particlesMesh.dispose();
 
     this.conquestWaves = [];

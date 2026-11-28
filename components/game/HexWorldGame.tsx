@@ -825,15 +825,15 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
     };
     const capitalCoord = res.nextState.playerCapital ?? { q: 0, r: 0 };
 
-    res.completedBuildings.slice(0, 3).forEach((k) => {
+    (res.completedBuildingKeys ?? res.completedBuildings).slice(0, 3).forEach((k) => {
       const c = parseKeyCoord(k);
       if (c) controllerRef.current?.triggerEventEffect('build_complete', c);
     });
-    res.completedUpgrades.slice(0, 2).forEach((k) => {
+    (res.completedUpgradeKeys ?? res.completedUpgrades).slice(0, 2).forEach((k) => {
       const c = parseKeyCoord(k);
       if (c) controllerRef.current?.triggerEventEffect('upgrade', c);
     });
-    res.completedModules.slice(0, 2).forEach((k) => {
+    (res.completedModuleKeys ?? res.completedModules).slice(0, 2).forEach((k) => {
       const c = parseKeyCoord(k);
       if (c) controllerRef.current?.triggerEventEffect('module', c);
     });
@@ -841,8 +841,10 @@ export default function HexWorldGame({ initialAutostart = false }: HexWorldGameP
       const city = res.nextState.cities.find((c) => c.name === cityName);
       if (city) controllerRef.current?.triggerEventEffect('city', city.center);
     });
-    res.leveledUpCities.slice(0, 2).forEach((cityName) => {
-      const city = res.nextState.cities.find((c) => c.name === cityName);
+    (res.leveledUpCityIds ?? res.leveledUpCities).slice(0, 2).forEach((cityIdOrName) => {
+      const city = res.nextState.cities.find(
+        (c) => c.id === cityIdOrName || c.name === cityIdOrName
+      );
       if (city) controllerRef.current?.triggerEventEffect('city', city.center);
     });
     res.incorporatedKeys.slice(0, 2).forEach((k) => {

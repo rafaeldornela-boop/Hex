@@ -565,6 +565,7 @@ export function computeTurnEconomyBreakdown(params: {
     string,
     { moduleId: BuildingModuleId; turnsRemaining: number; totalTurns: number }
   >;
+  damagedHexPenaltiesByKey?: Record<string, number>;
 }): TurnProductionBreakdown {
   const {
     worldState,
@@ -589,6 +590,7 @@ export function computeTurnEconomyBreakdown(params: {
     weather = createInitialClimateWeather(),
     upgradingConstructionsByKey = {},
     moduleConstructionsByKey = {},
+    damagedHexPenaltiesByKey = {},
   } = params;
 
   const mods = getTechModifiers(unlockedTechs);
@@ -837,6 +839,13 @@ export function computeTurnEconomyBreakdown(params: {
         effectiveDefenseBonus: 0,
         effectiveMaintenanceGold: 0,
         inputConsumed: {},
+        positiveNeighborKeys: [],
+        penaltyNeighborKeys: [],
+        capacitySummaryPt: null,
+        resourceOriginPt: null,
+        workerOriginPt: null,
+        bonusSummaryPt: [],
+        penaltySummaryPt: [],
       };
       continue;
     }
@@ -892,12 +901,24 @@ export function computeTurnEconomyBreakdown(params: {
       underConstructionKeys,
     });
 
-    // Avoid double-counting locationFactor water note on Farm since Stage 2 irrigation replaces it cleanly
+    // Avoid double-counting locationFactor water note on Farm since Stage 2 chainAdj handles irrigation and water-neighbor bonus
     let adjustedLocFactor = loc.factor;
-    if (assetName === 'building-farm' && chainAdj.isIrrigated) {
+    if (
+      assetName === 'building-farm' &&
+      (chainAdj.isIrrigated ||
+        chainAdj.hasWaterAccess ||
+        loc.notesPt.includes('Água próxima (+15%)'))
+    ) {
       adjustedLocFactor = Math.max(0.75, Number((loc.factor - 0.15).toFixed(2)));
     }
-    const mergedNotes = Array.from(new Set([...loc.notesPt, ...chainAdj.notesPt]));
+    const mergedNotes = Array.from(
+      new Set([
+        ...(assetName === 'building-farm'
+          ? loc.notesPt.filter((n) => n !== 'Água próxima (+15%)')
+          : loc.notesPt),
+        ...chainAdj.notesPt,
+      ])
+    );
 
     const logistics = computeBuildingLogistics({
       q: tile.q,
@@ -1093,7 +1114,7 @@ export function computeTurnEconomyBreakdown(params: {
   };
 
   // 2. First pass: calculate ore extraction and pre-starvation food (including Farm -> Mill + Curral + Doca chains)
-  let extractedOreThisTurn = baseOreProd;
+  const pass1MineOres: number[] = [];
   let preStarveFoodProd = baseFoodProd * seasonFoodMult * weatherFoodMult;
   const pass1Farms: Array<{ key: string; q: number; r: number; rawGrainProduced: number }> = [];
   const pass1Mills: Array<{
@@ -1110,11 +1131,14 @@ export function computeTurnEconomyBreakdown(params: {
     const workerRatio = assign
       ? computeWorkerProductionScale(assign.assigned, assign.required)
       : 1;
+    const damagePct = Math.max(0, Math.min(65, damagedHexPenaltiesByKey[item.key] ?? 0));
+    const damageMult = damagePct > 0 ? Math.max(0.35, (100 - damagePct) / 100) : 1;
     const rawScale =
       item.locationFactor *
       item.logisticsFactor *
       item.districtMultiplier *
       workerRatio *
+      damageMult *
       effectFactor;
     const citySpec = getRegionalSpecForHex(item.key);
     const citySpecTier = citySpec ? SPECIALIZATION_STAGE_META[citySpec.stage].tier : 0;
@@ -1131,15 +1155,16 @@ export function computeTurnEconomyBreakdown(params: {
           ? getEffectiveMineDepositProduction(item).ore
           : item.stats.production.ore;
       const chainMult = item.assetName === 'building-mine' ? item.chainAdj.netMultiplier : 1;
-      extractedOreThisTurn +=
+      pass1MineOres.push(
         baseOre *
-        (1 + item.modEff.prodPct.ore) *
-        rawScale *
-        chainMult *
-        mods.stoneOreMultiplier *
-        mods.oreBonusMultiplier *
-        regMiningMult *
-        effRainOrePass1;
+          (1 + item.modEff.prodPct.ore) *
+          rawScale *
+          chainMult *
+          mods.stoneOreMultiplier *
+          mods.oreBonusMultiplier *
+          regMiningMult *
+          effRainOrePass1
+      );
     }
 
     if (item.stats.production.food > 0) {
@@ -1209,7 +1234,7 @@ export function computeTurnEconomyBreakdown(params: {
           : DEFAULT_ADJACENCY_CONFIG.mill.millGrainCapacity;
         const capScale = item.stats.production.food / Math.max(1, item.stats.baseDef.production.food);
         const cap = hasWater
-          ? baseCap * capScale * workerRatio * item.chainAdj.netMultiplier
+          ? baseCap * capScale * workerRatio * damageMult * item.chainAdj.netMultiplier
           : 0;
         pass1Mills.push({
           key: item.key,
@@ -1221,7 +1246,6 @@ export function computeTurnEconomyBreakdown(params: {
             item.locationFactor *
             item.logisticsFactor *
             item.districtMultiplier *
-            effectFactor *
             (1 + item.modEff.prodPct.food),
         });
       } else if (item.assetName === 'building-sheep') {
@@ -1285,7 +1309,11 @@ export function computeTurnEconomyBreakdown(params: {
     totalOreDemand += reqOre * workerRatio * (fuelInfo ? fuelInfo.fuelRatio : 1);
   }
 
-  const availableOrePool = Math.max(0, (resources.ore || 0) + Math.floor(extractedOreThisTurn));
+  const actualMineOre = pass1MineOres.reduce(
+    (sum, ore) => sum + Math.round(ore * starvationFactor),
+    0
+  );
+  const availableOrePool = Math.max(0, (resources.ore || 0) + Math.floor(baseOreProd + actualMineOre));
   const oreInputRatio =
     totalOreDemand > 0 ? Math.min(1, availableOrePool / totalOreDemand) : 1;
 
@@ -1357,6 +1385,9 @@ export function computeTurnEconomyBreakdown(params: {
         ? (adjacencyPools.fishing.consumersByKey[item.key]?.fulfillmentRatio ?? 0)
         : 1;
 
+    const damagePct = Math.max(0, Math.min(65, damagedHexPenaltiesByKey[item.key] ?? 0));
+    const damageMult = damagePct > 0 ? Math.max(0.35, (100 - damagePct) / 100) : 1;
+
     const combinedFactor =
       item.locationFactor *
       item.logisticsFactor *
@@ -1368,6 +1399,7 @@ export function computeTurnEconomyBreakdown(params: {
       pastureRatio *
       fishingRatio *
       starvationFactor *
+      damageMult *
       effectFactor;
 
     const citySpec = getRegionalSpecForHex(item.key);
@@ -1570,6 +1602,7 @@ export function computeTurnEconomyBreakdown(params: {
           capScale *
           workerRatio *
           starvationFactor *
+          damageMult *
           item.chainAdj.netMultiplier
         : 0;
       finalMills.push({
@@ -1582,7 +1615,6 @@ export function computeTurnEconomyBreakdown(params: {
           item.locationFactor *
           item.logisticsFactor *
           item.districtMultiplier *
-          effectFactor *
           (1 + item.modEff.prodPct.food),
       });
     }
@@ -1861,6 +1893,8 @@ export function computeTurnEconomyBreakdown(params: {
       }
     }
 
+    const damagePct = Math.max(0, Math.min(65, damagedHexPenaltiesByKey[item.key] ?? 0));
+
     // Determine clear status & causal reason
     let status: BuildingOperationStatus = 'operating';
     let statusLabelPt = 'Operando';
@@ -1928,6 +1962,10 @@ export function computeTurnEconomyBreakdown(params: {
       status = 'partial';
       statusLabelPt = 'Parcial';
       reasonPt = 'Pesca compartilhada ou poluída';
+    } else if (damagePct > 0) {
+      status = 'partial';
+      statusLabelPt = 'Parcial';
+      reasonPt = `Setor danificado por conflito (-${damagePct}% produção; repare para restaurar).`;
     } else if (starvationFactor < 1) {
       status = 'partial';
       statusLabelPt = 'Parcial';

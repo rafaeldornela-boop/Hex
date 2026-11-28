@@ -789,9 +789,6 @@ export function getKingdomEconomy(
   const baseActiveEffects = (state.activeEffects ?? []).filter(
     (e) => e.id !== 'eff-war-damage-sync'
   );
-  const effectiveEffects = warDamage.effect
-    ? [...baseActiveEffects, warDamage.effect]
-    : baseActiveEffects;
 
   const breakdown = computeTurnEconomyBreakdown({
     worldState: state.worldState,
@@ -803,7 +800,7 @@ export function getKingdomEconomy(
     owner: 'player',
     underConstructionKeys: underKeys,
     expansionWorkersUsed,
-    activeEffects: effectiveEffects,
+    activeEffects: baseActiveEffects,
     tradePactGoldBonus: tradePactBonus,
     eventGoldMultiplier: state.activeEvent?.goldMultiplierMod ?? 1,
     eventFoodMultiplier: state.activeEvent?.foodMultiplierMod ?? 1,
@@ -816,25 +813,8 @@ export function getKingdomEconomy(
     weather,
     upgradingConstructionsByKey: upgradingByKey,
     moduleConstructionsByKey: moduleByKey,
+    damagedHexPenaltiesByKey: warDamage.penaltyByKey,
   });
-
-  if (Object.keys(warDamage.penaltyByKey).length > 0) {
-    for (const [key, pct] of Object.entries(warDamage.penaltyByKey)) {
-      const bReport = breakdown.buildingsByKey[key];
-      if (!bReport) continue;
-      const mult = Math.max(0.35, (100 - pct) / 100);
-      bReport.actualProduction = {
-        gold: Math.round(bReport.actualProduction.gold * mult),
-        wood: Math.round(bReport.actualProduction.wood * mult),
-        stone: Math.round(bReport.actualProduction.stone * mult),
-        food: Math.round(bReport.actualProduction.food * mult),
-        ore: Math.round(bReport.actualProduction.ore * mult),
-        metal: Math.round(bReport.actualProduction.metal * mult),
-        science: Math.round(bReport.actualProduction.science * mult),
-      };
-      bReport.reasonPt = `Setor danificado por conflito (-${pct}% produção; repare para restaurar).`;
-    }
-  }
 
   return breakdown;
 }
@@ -1964,8 +1944,13 @@ export function commandUnitInKingdom(
     };
   }
 
+  const occupantIsEnemy =
+    Boolean(occupant) &&
+    occupant!.owner !== 'player' &&
+    occupant!.owner !== 'neutral';
+
   // Friendly move
-  if (targetOwner === 'player' || targetOwner === 'neutral') {
+  if ((targetOwner === 'player' || targetOwner === 'neutral') && !occupantIsEnemy) {
     if (occupant) {
       return {
         nextState: state,
@@ -1983,8 +1968,9 @@ export function commandUnitInKingdom(
     };
   }
 
-  // Attack enemy faction tile!
-  const enemyFaction = state.factions.find((f) => f.id === targetOwner);
+  // Attack enemy faction tile or enemy occupant on neutral ground!
+  const combatTargetOwner: HexOwner = occupantIsEnemy ? occupant!.owner : targetOwner;
+  const enemyFaction = state.factions.find((f) => f.id === combatTargetOwner);
   const dipMap = getDiplomacyMapForState(state);
   const alliedOwners = new Set<HexOwner>();
   for (const [fId, d] of Object.entries(dipMap)) {
@@ -2095,7 +2081,7 @@ export function commandUnitInKingdom(
   const conflictDip = registerConflictInDiplomacyMap({
     diplomacyMap: dipMap,
     factions: state.factions,
-    targetFactionId: targetOwner,
+    targetFactionId: combatTargetOwner,
     turn: state.turn,
     attackerSide: 'player',
     reasonPt: combat.capturedHex
@@ -2114,7 +2100,7 @@ export function commandUnitInKingdom(
   );
   const nextTrade = embargoFactionRoutes(
     disrupted.nextTradeState,
-    targetOwner,
+    combatTargetOwner,
     true,
     'Guerra aberta bloqueou o comércio bilateral.'
   );
@@ -3400,7 +3386,6 @@ export function advanceKingdomTurn(
 
   const preDipMap = getDiplomacyMapForState(working);
   const preFactions = syncFactionsFromDiplomacy(working.factions, preDipMap);
-  const warDamageSync = buildWarDamageSyncEffect(working);
   const cleanActiveEffects = (working.activeEffects ?? []).filter(
     (e) => e.id !== 'eff-war-damage-sync'
   );
@@ -3414,9 +3399,7 @@ export function advanceKingdomTurn(
     ...working,
     factions: preFactions,
     diplomacyByFactionId: preDipMap,
-    activeEffects: warDamageSync.effect
-      ? [...cleanActiveEffects, warDamageSync.effect]
-      : cleanActiveEffects,
+    activeEffects: cleanActiveEffects,
   };
 
   const baseResult = processKingdomTurn(workingWithEffects, assets);

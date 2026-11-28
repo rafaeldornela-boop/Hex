@@ -301,8 +301,12 @@ export function getReachableUnitCoords(params: {
       const occupant = getUnitAt(units, nq, nr);
       const targetOwner: HexOwner = tile?.owner ?? 'neutral';
 
+      const occupantIsEnemy =
+        Boolean(occupant) && occupant!.owner !== unit.owner && occupant!.owner !== 'neutral';
       const isFriendlyOrNeutral = targetOwner === unit.owner || targetOwner === 'neutral';
-      const isEnemyTarget = targetOwner !== unit.owner && targetOwner !== 'neutral';
+      const isEnemyTarget =
+        (targetOwner !== unit.owner && targetOwner !== 'neutral') || occupantIsEnemy;
+      const combatOwner: HexOwner = occupantIsEnemy ? occupant!.owner : targetOwner;
       const occupiedByFriendly = Boolean(occupant && occupant.owner === unit.owner);
 
       const roadHere = roads?.[nk];
@@ -317,7 +321,7 @@ export function getReachableUnitCoords(params: {
       if (nextCost > maxSteps) continue;
 
       if (isEnemyTarget) {
-        if (canAttackOwner(targetOwner)) {
+        if (canAttackOwner(combatOwner)) {
           const prev = results.get(nk);
           if (!prev || nextCost < prev.cost) {
             results.set(nk, { q: nq, r: nr, cost: nextCost, isAttackTarget: true });
@@ -1275,7 +1279,8 @@ export function resolveHexCombat(
 
   if (attackScore >= defenseScore) {
     const margin = attackScore - defenseScore;
-    const attackerDamage = Math.max(2, Math.min(attacker.hp - 1, 7 - Math.floor(margin / 2)));
+    const attackerDamage =
+      attacker.hp <= 1 ? 0 : Math.max(1, Math.min(attacker.hp - 1, 7 - Math.floor(margin / 2)));
     const defenderDamage = defender ? defender.hp : 0;
     const lootGold = 120;
     const consequence = targetTile

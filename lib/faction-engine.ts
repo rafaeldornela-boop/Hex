@@ -37,9 +37,11 @@ import {
   getUnitAt,
   isAdjacentCoord,
   resolveHexCombat,
+  type DamagedHexRecord,
   type UnitEntity,
   type UnitType,
 } from './military-engine';
+import type { RoadMap } from './road-engine';
 
 export type FactionRelation = 'neutral' | 'truce' | 'trade_pact' | 'hostile';
 
@@ -319,6 +321,9 @@ export function advanceFactionsTurn(params: {
   assets: HexAssetEntry[];
   turn: number;
   underConstructionKeys?: Set<string>;
+  playerTechs?: TechId[];
+  damagedHexes?: Record<string, DamagedHexRecord>;
+  roads?: RoadMap;
 }): {
   worldState: HexWorldState;
   factions: FactionState[];
@@ -590,9 +595,20 @@ export function advanceFactionsTurn(params: {
         (u) => u.owner === faction.id && u.hp > 0 && !u.movedThisTurn
       );
       if (readyUnit) {
-        // Check adjacent player tile first for an intelligent attack (only if odds are reasonable)
-        const adjPlayerTile = playerTiles.find((pt) =>
-          isAdjacentCoord(readyUnit, pt)
+        const attDef = UNIT_CATALOG[readyUnit.type];
+        const isNavigablePlayerTarget = (pt: (typeof playerTiles)[number]): boolean => {
+          const tKey = hexKey(pt.q, pt.r);
+          const terrain = getHexTerrainAndResource(pt.q, pt.r, pt).terrainType;
+          const assetName = params.assets[pt.structureIndex]?.name ?? '';
+          const isCompletedBridge =
+            assetName === 'bridge' && !params.underConstructionKeys?.has(tKey);
+          if (attDef.navalOnly) return terrain === 'water';
+          return terrain !== 'water' || isCompletedBridge;
+        };
+
+        // Check adjacent navigable player tile first for an intelligent attack (only if odds are reasonable)
+        const adjPlayerTile = playerTiles.find(
+          (pt) => isAdjacentCoord(readyUnit, pt) && isNavigablePlayerTarget(pt)
         );
         if (adjPlayerTile) {
           const combat = resolveHexCombat(
@@ -603,10 +619,13 @@ export function advanceFactionsTurn(params: {
             adjPlayerTile.r,
             nextUnits,
             params.assets,
-            [],
-            params.underConstructionKeys
+            params.playerTechs ?? [],
+            params.underConstructionKeys,
+            {
+              damagedHexes: params.damagedHexes,
+              turn: params.turn,
+            }
           );
-          const attDef = UNIT_CATALOG[readyUnit.type];
           const estAtt = Math.round(
             (attDef.attack + (nextResearch.unlocked.includes('metallurgy') ? 4 : 0)) *
               (readyUnit.hp / readyUnit.maxHp)
@@ -648,23 +667,30 @@ export function advanceFactionsTurn(params: {
             }
           }
         } else if (factionUnits.length >= 2) {
-          // Advance 1 unit smoothly toward nearest player territory across safe non-water owned/neutral tiles
-          const currentDist = Math.min(...playerTiles.map((pt) => hexDistance(readyUnit, pt)));
+          const moveTargets = playerTiles.filter(isNavigablePlayerTarget);
+          const goalTiles = moveTargets.length > 0 ? moveTargets : playerTiles;
+          // Advance 1 unit smoothly toward nearest player territory obeying terrain/navigation rules
+          const currentDist = Math.min(...goalTiles.map((pt) => hexDistance(readyUnit, pt)));
           let bestStep: AxialCoord | null = null;
           let bestDist = currentDist;
           const boundedWorld = typeof nextWorld.worldCols === 'number';
           for (const dir of AXIAL_DIRECTIONS) {
             const nq = readyUnit.q + dir.q;
             const nr = readyUnit.r + dir.r;
-            const tile = nextWorld.hexes[hexKey(nq, nr)];
+            const nKey = hexKey(nq, nr);
+            const tile = nextWorld.hexes[nKey];
             if (boundedWorld && !tile) continue;
             const terrain = getHexTerrainAndResource(nq, nr, tile).terrainType;
-            if (terrain === 'water') continue;
+            const assetName = tile ? (params.assets[tile.structureIndex]?.name ?? '') : '';
+            const isCompletedBridge =
+              assetName === 'bridge' && !params.underConstructionKeys?.has(nKey);
+            if (attDef.navalOnly && terrain !== 'water') continue;
+            if (!attDef.navalOnly && terrain === 'water' && !isCompletedBridge) continue;
             if (tile && tile.owner && tile.owner !== faction.id && tile.owner !== 'neutral') {
               continue;
             }
             if (getUnitAt(nextUnits, nq, nr)) continue;
-            const d = Math.min(...playerTiles.map((pt) => hexDistance({ q: nq, r: nr }, pt)));
+            const d = Math.min(...goalTiles.map((pt) => hexDistance({ q: nq, r: nr }, pt)));
             if (d < bestDist) {
               bestDist = d;
               bestStep = { q: nq, r: nr };

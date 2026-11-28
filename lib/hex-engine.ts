@@ -214,14 +214,19 @@ export function placeHexInState(
   const isSameTile =
     previous !== undefined &&
     previous.structureIndex === structureIndex &&
-    previous.orientation === orientation;
+    previous.orientation === orientation &&
+    !(previous.forestDepleted === true && asset.name === DEPLETED_FOREST_ASSET_NAME);
 
   if (isSameTile) {
     return { nextState: state, changed: false, spent: 0 };
   }
 
   const cost =
-    !previous || previous.structureIndex !== structureIndex ? asset.price : 0;
+    !previous ||
+    previous.structureIndex !== structureIndex ||
+    (previous.forestDepleted === true && asset.name === DEPLETED_FOREST_ASSET_NAME)
+      ? asset.price
+      : 0;
 
   const resolvedMountainDeposit =
     terrainInfo.terrainType === 'mountain'
@@ -241,7 +246,6 @@ export function placeHexInState(
       resourceAmount: terrainInfo.resourceAmount,
       ...(resolvedMountainDeposit ? { mountainDeposit: resolvedMountainDeposit } : {}),
       ...(typeof previous?.woodStock === 'number' ? { woodStock: previous.woodStock } : {}),
-      ...(previous?.forestDepleted ? { forestDepleted: true } : {}),
       ...(previous?.rareFeature ? { rareFeature: previous.rareFeature } : {}),
       ...(previous?.meta ? { meta: previous.meta } : {}),
     },

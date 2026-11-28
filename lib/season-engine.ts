@@ -531,15 +531,19 @@ export function computeHexSeasonalVisualProfile(params: {
   });
   const snowAmount = computeTileSnowFactor({ climate, season, seasonProgress: p, weather });
 
-  // Classify forest tiles into deciduous vs boreal conifers (north has more conifers)
+  // Classify living forest tiles into deciduous vs boreal conifers (exclude depleted/cleared dirt-lumber tiles)
+  const isLivingForestFoliage =
+    terrainType === 'forest' &&
+    assetName !== 'dirt-lumber' &&
+    !Boolean(tile?.forestDepleted);
   const coniferThreshold = 0.25 + northRatio * 0.52;
-  const isConifer = terrainType === 'forest' && noise < coniferThreshold;
-  const isDeciduous = terrainType === 'forest' && !isConifer;
+  const isConifer = isLivingForestFoliage && noise < coniferThreshold;
+  const isDeciduous = isLivingForestFoliage && !isConifer;
 
   let subVariant: BiomeSeasonalSubVariant = 'temperate_plains';
   if (terrainType === 'mountain') {
     subVariant = 'alpine';
-  } else if (terrainType === 'forest') {
+  } else if (isLivingForestFoliage) {
     subVariant = isConifer ? 'boreal_conifer' : 'deciduous_forest';
   } else if (terrainType === 'fertile') {
     subVariant = 'riverbank_fertile';
@@ -550,7 +554,7 @@ export function computeHexSeasonalVisualProfile(params: {
   // 0..+0.95: spring fresh vibrancy (or summer lush 0..0.2)
   // +1.1..+2.0: autumn golden/amber/crimson foliage (peaks mid-to-late autumn)
   let foliageShift = 0;
-  if (terrainType !== 'mountain') {
+  if (terrainType !== 'mountain' && assetName !== 'dirt-lumber') {
     if (season === 'spring') {
       foliageShift = 0.9 - p * 0.45; // 0.9 early spring -> 0.45 late spring
     } else if (season === 'summer') {
