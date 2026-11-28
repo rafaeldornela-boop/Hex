@@ -1,0 +1,5 @@
+   headColorHex: weather === 'frost' ? 0xd9e8f5 : 0xb5b3a6,
+    furrowColorHex: weather === 'frost' ? 0x7d8a96 : 0x695d52,
+  };
+}
+
